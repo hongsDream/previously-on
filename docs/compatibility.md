@@ -10,7 +10,11 @@ The repository contains a local mapped-regression matrix with five categories an
 - App Server
 - setup, privacy, and recovery
 
-The canonical mapping is `fixtures/compatibility/scenarios.json`. Every entry points to an executable Rust regression test. This is regression traceability, not evidence that 30 real Codex workflows ran.
+The canonical mapping is `fixtures/compatibility/scenarios.json`. Every entry points to one exact
+Rust test target and test name. The driver requires the named filter to resolve to exactly one
+test, executes that test separately for each Codex version, and records the actual per-row exit
+outcome. A missing or misspelled filter fails instead of being counted as a pass. This is
+regression traceability, not evidence that 30 real Codex workflows ran.
 
 ## Run the release gate
 
@@ -42,9 +46,12 @@ tag can build even a draft release, the protected `release-compatibility` enviro
 product version, the npm registry's current and previous stable Codex versions, and all 30
 scenario IDs for each CLI version. Every scenario must be a real passing workflow with evidence
 hashes and reconstructed prompt, assistant final, file-change tool, test command, and stable
-source IDs. The artifact must also record zero data-loss events and zero serious stale
-applications. The mapped driver emits a different `evidenceClass`, has an ineligible release
-gate, and cannot pass this validator.
+source IDs. The artifact must also record zero data-loss events. Serious stale applications are
+never a hardcoded counter: release eligibility requires a separately retained evaluator JSON file
+whose hash, commit, version, evaluated count, and zero-incident result are verified. Omitting that
+file records `status: "unmeasured"` and keeps automatic release eligibility false. The mapped
+driver emits a different `evidenceClass`, has an ineligible release gate, and cannot pass this
+validator.
 
 See [Live compatibility evidence contract](live-compatibility-evidence.md) for the accepted JSON
 shape and privacy boundary.
@@ -93,7 +100,9 @@ node --test scripts/compatibility/live-harness.test.mjs
 
 The release owner runs the live gate manually from a clean Apple Silicon checkout. All paths are
 absolute. Current Codex App evidence and either prior-build evidence or a documented unavailable
-result are supplied without embedding raw App data:
+result are supplied as sanitized JSON files. Each digest must match a retained file copied into
+the evidence bundle, and resume revalidates those bytes. A current App result marked `degraded`
+is preserved but cannot make the release eligible:
 
 ```sh
 node scripts/compatibility/live-harness.mjs \
@@ -104,12 +113,23 @@ node scripts/compatibility/live-harness.mjs \
   --codex-home /absolute/path/to/authenticated/CODEX_HOME \
   --model <release-test-model> \
   --codex-app-current-build <build> \
+  --codex-app-current-evidence /absolute/path/to/current-app-evidence.json \
   --codex-app-current-evidence-sha256 <sha256> \
   --codex-app-previous-build <build> \
+  --codex-app-previous-evidence /absolute/path/to/previous-app-evidence.json \
   --codex-app-previous-evidence-sha256 <sha256> \
+  --stale-evaluation-artifact /absolute/path/to/stale-evaluation.json \
+  --stale-evaluation-sha256 <sha256> \
   --output /absolute/path/to/live-compatibility.json \
   --confirm RUN_60_AUTHENTICATED_CODEX_WORKFLOWS
 ```
+
+If an authenticated matrix is interrupted, rerun the same command with `--resume`. The harness
+opens the existing output and evidence directory, verifies each completed scenario's retained
+evidence, and skips only checkpoints that are still valid. Resume fails closed if the Git commit,
+PreviouslyOn or Codex binary digest, resolved Codex version, fixture contract, scenario matrix,
+mapped artifact, App evidence, or stale-evaluator evidence binding differs. In that case, choose a new output path and
+produce a new artifact; do not copy completed rows into a differently bound matrix.
 
 The source `CODEX_HOME` is never modified. Only its `auth.json` is copied into a permission-limited
 temporary home; existing config, Hooks, rules, plugins, memories, and sessions are excluded. Each

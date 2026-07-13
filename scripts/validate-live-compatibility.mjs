@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
@@ -39,7 +39,15 @@ if (!Number.isFinite(Date.parse(artifact.generatedAt))) fail('generatedAt must b
 
 assertEqual(artifact.releaseEligibility?.eligible, true, 'releaseEligibility.eligible');
 assertEqual(artifact.releaseEligibility?.dataLossEvents, 0, 'releaseEligibility.dataLossEvents');
-assertEqual(artifact.releaseEligibility?.seriousStaleApplications, 0, 'releaseEligibility.seriousStaleApplications');
+const staleEvaluation = artifact.releaseEligibility?.seriousStaleApplications;
+assertEqual(staleEvaluation?.status, 'measured', 'releaseEligibility.seriousStaleApplications.status');
+assertEqual(staleEvaluation?.count, 0, 'releaseEligibility.seriousStaleApplications.count');
+if (!Number.isInteger(staleEvaluation?.scenariosEvaluated) || staleEvaluation.scenariosEvaluated < 1) {
+  fail('releaseEligibility.seriousStaleApplications.scenariosEvaluated must be positive');
+}
+if (!Number.isFinite(Date.parse(staleEvaluation?.evaluatedAt))) {
+  fail('releaseEligibility.seriousStaleApplications.evaluatedAt must be ISO-8601');
+}
 assertEqual(artifact.liveCodexWorkflowMatrix?.status, 'complete', 'liveCodexWorkflowMatrix.status');
 assertEqual(artifact.liveCodexWorkflowMatrix?.completedRuns, 60, 'liveCodexWorkflowMatrix.completedRuns');
 assertEqual(artifact.transparentCaptureReleaseGate?.eligible, true, 'transparentCaptureReleaseGate.eligible');
@@ -72,7 +80,7 @@ assertEqual(mappedEvidence.gitCommit, expectedCommit, 'mapped evidence gitCommit
 assertEqual(mappedEvidence.localMappedRegression?.scenarioCount, 30, 'mapped evidence scenarioCount');
 
 const matrix = JSON.parse(readFileSync(`${root}/fixtures/compatibility/scenarios.json`, 'utf8'));
-const expectedScenarios = new Map(matrix.scenarios.map((scenario) => [scenario.id, scenario.category]));
+const expectedScenarios = new Map(matrix.scenarios.map((scenario) => [scenario.id, scenario]));
 if (expectedScenarios.size !== 30) fail('repository compatibility fixture must contain exactly 30 unique scenarios');
 
 const cliRuns = artifact.codexCli?.runs;
@@ -80,6 +88,7 @@ if (!Array.isArray(cliRuns) || cliRuns.length !== 2) fail('codexCli.runs must co
 const roles = new Map(cliRuns.map((run) => [run.role, run]));
 if (roles.size !== 2 || !roles.has('latest') || !roles.has('previous')) fail('codexCli.runs roles must be latest and previous');
 if (roles.get('latest').version === roles.get('previous').version) fail('latest and previous Codex versions must differ');
+validateMappedRows(mappedEvidence, roles);
 
 if (args.get('--resolve-current-codex')) {
   const { latest, previous } = resolveStableCodexVersions();
@@ -90,6 +99,21 @@ if (args.get('--resolve-current-codex')) {
 for (const role of ['latest', 'previous']) validateCliRun(roles.get(role), role);
 validateAppRun(artifact.codexApp?.current, 'codexApp.current', false);
 validateAppRun(artifact.codexApp?.previous, 'codexApp.previous', true);
+const staleEvidence = readBoundEvidence(
+  staleEvaluation.evidencePath,
+  staleEvaluation.evidenceSha256,
+  'releaseEligibility.seriousStaleApplications',
+);
+assertEqual(staleEvidence.schemaVersion, 1, 'stale evidence schemaVersion');
+assertEqual(staleEvidence.evidenceClass, 'serious_stale_application_evaluation', 'stale evidence evidenceClass');
+assertEqual(staleEvidence.product, 'PreviouslyOn', 'stale evidence product');
+assertEqual(staleEvidence.productVersion, expectedProductVersion, 'stale evidence productVersion');
+assertEqual(staleEvidence.gitCommit, expectedCommit, 'stale evidence gitCommit');
+assertEqual(staleEvidence.status, 'measured', 'stale evidence status');
+assertEqual(staleEvidence.seriousStaleApplications, 0, 'stale evidence seriousStaleApplications');
+assertEqual(staleEvidence.scenariosEvaluated, staleEvaluation.scenariosEvaluated, 'stale evidence scenariosEvaluated');
+assertEqual(staleEvidence.evaluatedAt, staleEvaluation.evaluatedAt, 'stale evidence evaluatedAt');
+assertSanitizedEvidence(staleEvidence, 'stale evidence');
 
 process.stdout.write(`eligible live compatibility evidence verified: ${artifactPath}\n`);
 
@@ -101,14 +125,14 @@ function validateCliRun(run, role) {
   for (const scenario of run.scenarios) {
     if (!expectedScenarios.has(scenario.id)) fail(`${role} contains unknown scenario ${scenario.id}`);
     if (!seen.add(scenario.id)) fail(`${role} contains duplicate scenario ${scenario.id}`);
-    assertEqual(scenario.category, expectedScenarios.get(scenario.id), `${role}/${scenario.id} category`);
+    assertEqual(scenario.category, expectedScenarios.get(scenario.id).category, `${role}/${scenario.id} category`);
     assertEqual(scenario.status, 'passed', `${role}/${scenario.id} status`);
     for (const field of ['userPrompt', 'assistantFinal', 'fileChangeTool', 'testCommand', 'stableSourceIds']) {
       assertEqual(scenario.reconstruction?.[field], true, `${role}/${scenario.id} reconstruction.${field}`);
     }
     const mapped = scenario.scenarioAssertion;
     assertEqual(mapped?.status, 'passed', `${role}/${scenario.id} scenarioAssertion.status`);
-    const definition = matrix.scenarios.find((candidate) => candidate.id === scenario.id);
+    const definition = expectedScenarios.get(scenario.id);
     assertEqual(mapped?.testTarget, definition.testTarget, `${role}/${scenario.id} scenarioAssertion.testTarget`);
     assertEqual(mapped?.testFilter, definition.testFilter, `${role}/${scenario.id} scenarioAssertion.testFilter`);
     assertEqual(mapped?.expectation, definition.expectation, `${role}/${scenario.id} scenarioAssertion.expectation`);
@@ -162,6 +186,8 @@ function readBoundEvidence(relativePath, expectedSha256, label) {
     fail(`${label}.evidencePath is reused by another evidence entry`);
   }
   if (!existsSync(path)) fail(`${label}.evidencePath is missing from the evidence bundle`);
+  const metadata = lstatSync(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) fail(`${label}.evidencePath must be a regular non-symlink file`);
   const bytes = readFileSync(path);
   assertEqual(sha256(bytes), expectedSha256, `${label}.evidenceSha256`);
   try {
@@ -205,6 +231,37 @@ function validateAppRun(run, label, allowUnavailable) {
   assertEqual(run?.status, 'passed', `${label}.status`);
   if (typeof run?.build !== 'string' || run.build.trim() === '') fail(`${label}.build is required`);
   if (!/^[0-9a-f]{64}$/i.test(run.evidenceSha256 ?? '')) fail(`${label}.evidenceSha256 is required`);
+  const evidence = readBoundEvidence(run.evidencePath, run.evidenceSha256, label);
+  assertEqual(evidence.schemaVersion, 1, `${label} evidence schemaVersion`);
+  assertEqual(evidence.evidenceClass, 'codex_app_verification', `${label} evidence evidenceClass`);
+  assertEqual(evidence.product, 'Codex App', `${label} evidence product`);
+  assertEqual(evidence.status, 'passed', `${label} evidence status`);
+  assertEqual(evidence.build, run.build, `${label} evidence build`);
+  if (!Number.isFinite(Date.parse(evidence.checkedAt))) fail(`${label} evidence checkedAt must be ISO-8601`);
+  assertSanitizedEvidence(evidence, label);
+}
+
+function validateMappedRows(mappedEvidence, roles) {
+  const runs = mappedEvidence.localMappedRegression?.runs;
+  if (!Array.isArray(runs) || runs.length !== 2) fail('mapped evidence must contain two actual regression runs');
+  const byVersion = new Map(runs.map((run) => [run.codexVersionSlot, run]));
+  for (const role of ['latest', 'previous']) {
+    const version = roles.get(role).version;
+    const run = byVersion.get(version);
+    if (!run || !Array.isArray(run.scenarioResults) || run.scenarioResults.length !== expectedScenarios.size) {
+      fail(`mapped evidence omitted actual scenario rows for ${role} Codex ${version}`);
+    }
+    const seen = new Set();
+    for (const result of run.scenarioResults) {
+      const expected = expectedScenarios.get(result.id);
+      if (!expected || !seen.add(result.id)) fail(`mapped evidence contains unknown or duplicate row ${result.id}`);
+      assertEqual(result.testTarget, expected.testTarget, `mapped ${role}/${result.id} testTarget`);
+      assertEqual(result.testFilter, expected.testFilter, `mapped ${role}/${result.id} testFilter`);
+      assertEqual(result.expectation, expected.expectation, `mapped ${role}/${result.id} expectation`);
+      assertEqual(result.status, 'passed', `mapped ${role}/${result.id} status`);
+      assertEqual(result.exitCode, 0, `mapped ${role}/${result.id} exitCode`);
+    }
+  }
 }
 
 function resolveStableCodexVersions() {

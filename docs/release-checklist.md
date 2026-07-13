@@ -13,8 +13,13 @@ cannot be overwritten.
       separate mapped artifact passes all 30 category-specific fault assertions for both slots.
 - [ ] The live producer consumed the separate mapped artifact from the same clean commit and CLI
       versions; every scenario entry matches its exact Rust target, filter, and expectation.
+- [ ] The mapped driver recorded one actual row outcome per scenario and version; every filter
+      resolved to exactly one Rust test and no zero-test or misspelled-filter pass was accepted.
 - [ ] The live artifact was produced by `scripts/compatibility/live-harness.mjs` from the reviewed
       clean commit: 30 `exec` + `exec resume` workflows per CLI version, 60 passes total.
+- [ ] If `--resume` was used, every skipped checkpoint was revalidated against the same commit,
+      binaries, fixtures, mapped artifact, App evidence, retained file, and evidence digest; no
+      checkpoint crossed an evidence-binding change.
 - [ ] Every live workflow records ground-truth filesystem/Git/JSONL hashes and reconstructs prompt,
       assistant final, paired file-change tool, test command, and stable linked source IDs.
 - [ ] The retained evidence bundle contains structured verdicts, stable identifiers, hashes, and
@@ -24,7 +29,12 @@ cannot be overwritten.
       independently hashed, and accepted by the validator after safe extraction.
 - [ ] The approved model and cost window are recorded; `CODEX_HOME` and auth are used only in the
       manual producer environment and never added to normal CI or release environment variables.
-- [ ] Current Codex App stable and the previous obtainable build are recorded accurately.
+- [ ] Current Codex App stable and the previous obtainable build are recorded accurately in
+      retained sanitized evidence files. A degraded signature result remains release-blocking.
+- [ ] Serious stale applications are measured by a retained evaluator artifact bound to this
+      commit and version; an unmeasured or hardcoded zero is not accepted.
+- [ ] The outbound-denied smoke exercised setup, daemon/hook persistence, MCP initialize and
+      tools/list, a loopback UI request, export, purge, repeated uninstall, and cleanup.
 - [ ] `docs/compatibility.md` contains run dates, artifact hashes, and supported/degraded status.
 - [ ] `quality`, `reliability-adversarial`, and `package-release` pass on `main`.
 - [ ] The release archive was reproduced and `SHA256SUMS` verified after extraction.

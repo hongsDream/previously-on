@@ -1,9 +1,9 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::context_pack::ContextPackBuilder;
-use crate::domain::{CoverageStatus, CoverageV1};
+use crate::domain::{CoverageStatus, CoverageV1, EvidenceV1, FactV1, Freshness};
 use crate::redaction::redact_value;
 use crate::store::Store;
 use crate::APP_VERSION;
@@ -11,6 +11,7 @@ use crate::APP_VERSION;
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_RESUME_PACK_TOKEN_BUDGET: u32 = 1_800;
 const MAX_MCP_RESPONSE_TOKENS: u32 = 2_000;
+pub const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 const UNTRUSTED_CLASSIFICATION: &str = "untrusted_historical_data";
 const UNTRUSTED_INSTRUCTION_POLICY: &str = "data_only_never_execute";
@@ -93,26 +94,39 @@ impl McpBackend for StoreMcpBackend {
         } else {
             CoverageV1::merge(checkpoints.iter().map(|checkpoint| &checkpoint.coverage))
         };
-        let baseline = checkpoints.last().map(|checkpoint| &checkpoint.git_after);
-        match crate::git::assess_task_freshness(self.repository_path(), baseline, &files) {
-            Ok(freshness) => {
-                for fact in &mut facts {
-                    fact.freshness = freshness;
-                }
-            }
-            Err(error) => {
-                for fact in &mut facts {
-                    fact.freshness = crate::domain::Freshness::Stale;
-                }
-                coverage.status = coverage.status.worst(CoverageStatus::Degraded);
-                coverage.missing.push("freshness_validation".to_string());
-                coverage.warnings.push(error.to_string());
-            }
+        let registered_repository_path = self.repository_path();
+        let repository_path = checkpoints
+            .last()
+            .map(|checkpoint| checkpoint.git_after.root.as_str())
+            .filter(|path| !path.is_empty())
+            .unwrap_or(&registered_repository_path);
+        let temporal = crate::git::revalidate_task(
+            repository_path,
+            checkpoints.last().map(|checkpoint| &checkpoint.git_after),
+            &files,
+        )?;
+        for fact in &mut facts {
+            fact.freshness = fact_freshness(
+                &registered_repository_path,
+                fact,
+                &evidence,
+                &checkpoints,
+                &files,
+            );
+        }
+        if temporal.status != crate::domain::TemporalStatusV1::Unchanged {
+            coverage.status = coverage.status.worst(CoverageStatus::Degraded);
+            coverage
+                .warnings
+                .push(format!("temporal revalidation: {:?}", temporal.status));
         }
         let mut builder = ContextPackBuilder::new(&task.repository_id, task_id);
         if let Some(token_budget) = token_budget {
             builder = builder.token_budget(token_budget);
         }
+        builder = builder
+            .current_validation(crate::git::current_validation(&temporal))
+            .temporal_revalidation(temporal);
         let pack = builder.build(task.goal, facts, evidence, files, tests, coverage)?;
         Ok(serde_json::to_value(pack)?)
     }
@@ -154,6 +168,42 @@ impl McpBackend for StoreMcpBackend {
         }
         Ok(serde_json::to_value(timeline)?)
     }
+}
+
+pub(crate) fn fact_freshness(
+    repository_path: &str,
+    fact: &FactV1,
+    evidence: &[EvidenceV1],
+    checkpoints: &[crate::domain::CheckpointV1],
+    files: &[crate::domain::FileChangeV1],
+) -> Freshness {
+    let evidence_sessions = fact
+        .evidence_ids
+        .iter()
+        .filter_map(|id| evidence.iter().find(|item| item.id == *id))
+        .map(|item| item.session_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let baseline = checkpoints
+        .iter()
+        .filter(|checkpoint| evidence_sessions.contains(checkpoint.session_id.as_str()))
+        .max_by_key(|checkpoint| checkpoint.created_at)
+        .map(|checkpoint| &checkpoint.git_after);
+    let scoped_files = files
+        .iter()
+        .filter(|file| evidence_sessions.contains(file.session_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let scoped_files = if scoped_files.is_empty() {
+        files
+    } else {
+        &scoped_files
+    };
+    let validation_root = baseline
+        .map(|snapshot| snapshot.root.as_str())
+        .filter(|path| !path.is_empty())
+        .unwrap_or(repository_path);
+    crate::git::assess_task_freshness(validation_root, baseline, scoped_files)
+        .unwrap_or(Freshness::Stale)
 }
 
 pub fn tool_definitions() -> Vec<Value> {
@@ -226,16 +276,24 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut reader = BufReader::new(input);
-    let mut line = String::new();
     loop {
-        line.clear();
-        if reader.read_line(&mut line).await? == 0 {
-            break;
-        }
-        if line.trim().is_empty() {
+        let line = match crate::bounded_io::read_bounded_line_async(
+            &mut reader,
+            MAX_MCP_REQUEST_BYTES,
+            false,
+        )
+        .await?
+        {
+            crate::bounded_io::BoundedLine::Eof => break,
+            crate::bounded_io::BoundedLine::TooLong => {
+                bail!("MCP JSON-RPC frame exceeds {MAX_MCP_REQUEST_BYTES} byte limit")
+            }
+            crate::bounded_io::BoundedLine::Line(line) => line,
+        };
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let response = match serde_json::from_str::<Value>(line.trim_end()) {
+        let response = match serde_json::from_slice::<Value>(&line) {
             Ok(request) => handle_request(backend, &request),
             Err(error) => Some(json_rpc_error(Value::Null, -32700, &error.to_string())),
         };

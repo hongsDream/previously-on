@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const SCHEMA_VERSION_V1: u16 = 1;
 pub const MAX_EVIDENCE_EXCERPT_CHARS: usize = 500;
+pub const MAX_CONTEXT_TEMPORAL_ITEMS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -138,6 +139,34 @@ pub enum Freshness {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum TemporalStatusV1 {
+    #[default]
+    Unchanged,
+    Changed,
+    Diverged,
+    Broken,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationStateV1 {
+    #[default]
+    Normal,
+    Eligible,
+    Suggested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationReasonV1 {
+    CompactionLimit,
+    ContextUsageLimit,
+    OldSessionCodeChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum FactLifecycle {
     #[default]
     Candidate,
@@ -182,6 +211,9 @@ pub enum EventKind {
     FactCandidate,
     FactConfirmed,
     Checkpoint,
+    ContextCompaction,
+    ContextUsageUpdated,
+    ContinuationSuggested,
     #[default]
     SessionStopped,
     Unknown,
@@ -293,7 +325,47 @@ pub struct SessionV1 {
     #[serde(default)]
     pub head: Option<String>,
     #[serde(default)]
+    pub source_thread_id: Option<String>,
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub turn_count: u32,
+    #[serde(default)]
+    pub compaction_count: u32,
+    #[serde(default)]
+    pub context_usage: Option<ContextUsageV1>,
+    #[serde(default)]
+    pub continuation_state: ContinuationStateV1,
+    #[serde(default)]
     pub coverage: CoverageV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsageV1 {
+    pub total_tokens: u64,
+    pub model_context_window: u64,
+    #[serde(default)]
+    pub observed_at: Option<DateTime<Utc>>,
+}
+
+impl ContextUsageV1 {
+    pub fn utilization(&self) -> Option<f64> {
+        (self.model_context_window > 0)
+            .then(|| self.total_tokens as f64 / self.model_context_window as f64)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContinuationAdviceV1 {
+    pub action: String,
+    #[serde(default)]
+    pub reasons: Vec<ContinuationReasonV1>,
+    pub task_id: String,
+    pub task_title: String,
+    pub last_activity_at: DateTime<Utc>,
+    pub compaction_count: u32,
+    #[serde(default)]
+    pub context_usage: Option<ContextUsageV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +384,12 @@ pub struct GitSnapshotV1 {
     pub dirty_files: Vec<String>,
     #[serde(default)]
     pub working_tree_changes: Vec<FileChangeV1>,
+    /// SHA-256 fingerprints of dirty working-tree content at capture time.
+    /// `None` records that the path was intentionally absent (for example, a
+    /// deletion or the source side of a rename). Raw file content is never
+    /// persisted.
+    #[serde(default)]
+    pub content_fingerprints: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +632,135 @@ pub struct ContextFactV1 {
     pub selection_reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemporalRevalidationV1 {
+    pub schema_version: u16,
+    pub status: TemporalStatusV1,
+    #[serde(default)]
+    pub baseline_head: Option<String>,
+    #[serde(default)]
+    pub current_head: Option<String>,
+    #[serde(default)]
+    pub merge_base: Option<String>,
+    #[serde(default)]
+    pub related_changes: Vec<FileChangeV1>,
+    #[serde(default)]
+    pub checked_paths: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl TemporalRevalidationV1 {
+    /// Keep task-scoped temporal metadata deterministic and bounded without
+    /// removing it from a context pack. Omitted counts use the existing
+    /// warnings extension point so the V1 wire shape remains compatible.
+    pub fn bounded_for_context_pack(mut self) -> Self {
+        self.checked_paths.sort();
+        self.checked_paths.dedup();
+        let omitted_paths = self
+            .checked_paths
+            .len()
+            .saturating_sub(MAX_CONTEXT_TEMPORAL_ITEMS);
+        self.checked_paths.truncate(MAX_CONTEXT_TEMPORAL_ITEMS);
+
+        self.related_changes.sort_by(|a, b| {
+            (
+                &a.path,
+                &a.previous_path,
+                a.status as u8,
+                a.attribution as u8,
+                &a.repository_id,
+                &a.session_id,
+                &a.task_id,
+                a.additions,
+                a.deletions,
+                &a.before_head,
+                &a.after_head,
+            )
+                .cmp(&(
+                    &b.path,
+                    &b.previous_path,
+                    b.status as u8,
+                    b.attribution as u8,
+                    &b.repository_id,
+                    &b.session_id,
+                    &b.task_id,
+                    b.additions,
+                    b.deletions,
+                    &b.before_head,
+                    &b.after_head,
+                ))
+        });
+        self.related_changes.dedup();
+        let omitted_changes = self
+            .related_changes
+            .len()
+            .saturating_sub(MAX_CONTEXT_TEMPORAL_ITEMS);
+        self.related_changes.truncate(MAX_CONTEXT_TEMPORAL_ITEMS);
+
+        self.warnings.sort();
+        self.warnings.dedup();
+        if omitted_paths > 0 {
+            self.warnings.push(format!(
+                "checked_paths_omitted_count={omitted_paths}; limit={MAX_CONTEXT_TEMPORAL_ITEMS}"
+            ));
+        }
+        if omitted_changes > 0 {
+            self.warnings.push(format!(
+                "related_changes_omitted_count={omitted_changes}; limit={MAX_CONTEXT_TEMPORAL_ITEMS}"
+            ));
+        }
+        self.warnings.sort();
+        self.warnings.dedup();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentValidationV1 {
+    pub schema_version: u16,
+    pub status: TemporalStatusV1,
+    #[serde(default)]
+    pub current_head: Option<String>,
+    #[serde(default)]
+    pub verified_paths: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl CurrentValidationV1 {
+    /// Remove fields already represented by temporal revalidation while
+    /// retaining the public V1 object and any independently supplied values.
+    pub fn minimized_against(mut self, temporal: Option<&TemporalRevalidationV1>) -> Self {
+        if let Some(temporal) = temporal {
+            if self.current_head == temporal.current_head {
+                self.current_head = None;
+            }
+            self.verified_paths
+                .retain(|path| !temporal.checked_paths.contains(path));
+            self.warnings
+                .retain(|warning| !temporal.warnings.contains(warning));
+        }
+        self.verified_paths.sort();
+        self.verified_paths.dedup();
+        let omitted_paths = self
+            .verified_paths
+            .len()
+            .saturating_sub(MAX_CONTEXT_TEMPORAL_ITEMS);
+        self.verified_paths.truncate(MAX_CONTEXT_TEMPORAL_ITEMS);
+        self.warnings.sort();
+        self.warnings.dedup();
+        if omitted_paths > 0 {
+            self.warnings.push(format!(
+                "verified_paths_omitted_count={omitted_paths}; limit={MAX_CONTEXT_TEMPORAL_ITEMS}"
+            ));
+        }
+        self.warnings.sort();
+        self.warnings.dedup();
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextPackV1 {
     pub schema_version: u16,
@@ -572,6 +779,10 @@ pub struct ContextPackV1 {
     pub files: Vec<FileChangeV1>,
     #[serde(default)]
     pub tests: Vec<TestResultV1>,
+    #[serde(default)]
+    pub temporal_revalidation: Option<TemporalRevalidationV1>,
+    #[serde(default)]
+    pub current_validation: Option<CurrentValidationV1>,
     pub coverage: CoverageV1,
 }
 
@@ -593,6 +804,8 @@ pub struct TaskSuggestionV1 {
     pub score: f64,
     pub last_activity_at: DateTime<Utc>,
     pub matching_reasons: Vec<String>,
+    #[serde(default)]
+    pub continuation_advice: Option<ContinuationAdviceV1>,
 }
 
 pub fn deterministic_id(prefix: &str, parts: &[&str]) -> String {

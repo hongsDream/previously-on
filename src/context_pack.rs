@@ -1,6 +1,7 @@
 use crate::domain::{
-    ContextFactV1, ContextPackV1, CoverageV1, EvidenceIntegrity, EvidenceV1, FactKind,
-    FactLifecycle, FactV1, FileChangeV1, TestResultV1, SCHEMA_VERSION_V1,
+    ContextFactV1, ContextPackV1, CoverageV1, CurrentValidationV1, EvidenceIntegrity, EvidenceV1,
+    FactKind, FactLifecycle, FactV1, FileChangeV1, TemporalRevalidationV1, TestResultV1,
+    SCHEMA_VERSION_V1,
 };
 use crate::redaction::{redact_excerpt, redact_text};
 use anyhow::{bail, Context, Result};
@@ -24,6 +25,8 @@ pub struct ContextPackBuilder {
     task_id: String,
     token_budget: u32,
     generated_at: Option<DateTime<Utc>>,
+    temporal_revalidation: Option<TemporalRevalidationV1>,
+    current_validation: Option<CurrentValidationV1>,
 }
 
 impl ContextPackBuilder {
@@ -33,6 +36,8 @@ impl ContextPackBuilder {
             task_id: task_id.into(),
             token_budget: DEFAULT_TOKEN_BUDGET,
             generated_at: None,
+            temporal_revalidation: None,
+            current_validation: None,
         }
     }
 
@@ -46,8 +51,18 @@ impl ContextPackBuilder {
         self
     }
 
+    pub fn temporal_revalidation(mut self, value: TemporalRevalidationV1) -> Self {
+        self.temporal_revalidation = Some(value);
+        self
+    }
+
+    pub fn current_validation(mut self, value: CurrentValidationV1) -> Self {
+        self.current_validation = Some(value);
+        self
+    }
+
     pub fn build(
-        self,
+        mut self,
         goal: Option<String>,
         mut facts: Vec<FactV1>,
         evidence: Vec<EvidenceV1>,
@@ -59,6 +74,43 @@ impl ContextPackBuilder {
         if budget == 0 {
             bail!("context pack token budget must be greater than zero");
         }
+
+        self.temporal_revalidation = self.temporal_revalidation.map(|mut value| {
+            value.checked_paths = value
+                .checked_paths
+                .into_iter()
+                .map(|path| redact_excerpt(&path))
+                .collect();
+            for change in &mut value.related_changes {
+                change.path = redact_excerpt(&change.path);
+                change.previous_path = change
+                    .previous_path
+                    .take()
+                    .map(|path| redact_excerpt(&path));
+            }
+            value.warnings = value
+                .warnings
+                .into_iter()
+                .map(|warning| redact_excerpt(&warning))
+                .collect();
+            value
+        });
+        self.current_validation = self.current_validation.map(|mut value| {
+            value.verified_paths = value
+                .verified_paths
+                .into_iter()
+                .map(|path| redact_excerpt(&path))
+                .collect();
+            value.warnings = value
+                .warnings
+                .into_iter()
+                .map(|warning| redact_excerpt(&warning))
+                .collect();
+            value.minimized_against(self.temporal_revalidation.as_ref())
+        });
+        self.temporal_revalidation = self
+            .temporal_revalidation
+            .map(TemporalRevalidationV1::bounded_for_context_pack);
 
         let evidence_by_id = evidence
             .into_iter()
@@ -189,6 +241,8 @@ impl ContextPackBuilder {
             unresolved_items: std::mem::take(&mut unresolved_items),
             files,
             tests,
+            temporal_revalidation: self.temporal_revalidation,
+            current_validation: self.current_validation,
             coverage,
         };
 

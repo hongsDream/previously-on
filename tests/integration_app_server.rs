@@ -47,6 +47,26 @@ printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"cliVersion":"0.144.3
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn rejects_an_oversized_unterminated_app_server_frame() {
+    use previously_on::app_server::{AppServerClient, MAX_APP_SERVER_RPC_BYTES};
+
+    let script = format!(
+        "#!/bin/sh\nIFS= read -r initialize\nhead -c {} /dev/zero | tr '\\000' x\n",
+        MAX_APP_SERVER_RPC_BYTES + 1
+    );
+    let (_temp, fake) = fake_codex(&script);
+    let error = match AppServerClient::connect_with_program(&fake).await {
+        Ok(client) => {
+            client.shutdown().await.ok();
+            panic!("oversized App Server frame was accepted")
+        }
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("JSON-RPC frame exceeds"));
+}
+
+#[cfg(unix)]
 fn fake_codex(script: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -59,6 +79,124 @@ fn fake_codex(script: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[cfg(unix)]
+fn git_repository() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::process::Command;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&repo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    (temp, repo)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn import_verifies_returned_cwd_and_accepts_only_the_registered_logical_repository() {
+    use std::process::Command;
+
+    use previously_on::app_server::{AppServerClient, ThreadImportDisposition};
+    use previously_on::domain::CoverageStatus;
+
+    let (_repo_temp, repo) = git_repository();
+    for args in [
+        ["config", "user.email", "tests@previously.local"].as_slice(),
+        ["config", "user.name", "PreviouslyOn Tests"].as_slice(),
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(repo.join("tracked.txt"), "baseline\n").unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "tracked.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["commit", "--quiet", "-m", "baseline"])
+        .status()
+        .unwrap()
+        .success());
+
+    let linked = _repo_temp.path().join("linked");
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&linked)
+        .arg("HEAD")
+        .status()
+        .unwrap()
+        .success());
+
+    // A nested repository is physically contained by the registered checkout but belongs to a
+    // different logical Git repository and must never be projected into the parent.
+    let nested = repo.join("nested-other-repository");
+    assert!(Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&nested)
+        .status()
+        .unwrap()
+        .success());
+
+    let script = r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
+IFS= read -r initialized
+IFS= read -r list
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":4,"cwd":"__NESTED__","id":"thread-nested","preview":"wrong repository","sessionId":"session-nested","updatedAt":5},{"cliVersion":"0.144.3","createdAt":3,"cwd":"relative/repository","id":"thread-relative","preview":"relative","sessionId":"session-relative","updatedAt":4},{"cliVersion":"0.144.3","createdAt":2,"id":"thread-missing","preview":"missing cwd","sessionId":"session-missing","updatedAt":3},{"cliVersion":"0.144.3","createdAt":1,"cwd":"__LINKED__","id":"thread-linked","preview":"same logical repository","sessionId":"session-linked","updatedAt":2}],"nextCursor":null}}'
+IFS= read -r read_thread
+case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-linked"'*) ;; *) exit 20 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"turns":[{"id":"turn-linked","items":[],"status":"completed"}]}}}'
+"#
+    .replace("__NESTED__", nested.to_str().unwrap())
+    .replace("__LINKED__", linked.to_str().unwrap());
+    let (_fake_temp, fake) = fake_codex(&script);
+
+    let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
+    let report = client.import_threads_report(&repo).await.unwrap();
+
+    assert_eq!(report.coverage.status, CoverageStatus::Degraded);
+    assert_eq!(report.threads.len(), 1);
+    assert_eq!(report.threads[0].id, "thread-linked");
+    assert_eq!(report.threads[0].cwd, linked);
+    assert!(report
+        .threads
+        .iter()
+        .all(|thread| thread.id != "thread-nested"));
+    assert!(report
+        .notices
+        .iter()
+        .filter(|notice| notice.disposition == ThreadImportDisposition::Skipped)
+        .any(|notice| {
+            notice.thread_id.as_deref() == Some("thread-nested")
+                && notice.message.contains("different logical Git repository")
+        }));
+    assert!(report.notices.iter().any(|notice| {
+        notice.thread_id.as_deref() == Some("thread-relative")
+            && notice.message.contains("non-absolute cwd")
+    }));
+    assert!(report
+        .coverage
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("omitted non-empty `cwd`")));
+    client.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields() {
     use previously_on::app_server::{
@@ -66,27 +204,26 @@ async fn isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields() 
     };
     use previously_on::domain::CoverageStatus;
 
-    let (_temp, fake) = fake_codex(
+    let (_repo_temp, repo) = git_repository();
+    let script =
         r#"#!/bin/sh
 IFS= read -r initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
 IFS= read -r initialized
 IFS= read -r list
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":3,"cwd":"/tmp/repo","id":"thread-deleted","preview":"gone","sessionId":"session-deleted","updatedAt":4},{"cliVersion":"0.141.0","createdAt":2,"cwd":"/tmp/repo","id":"thread-compact","preview":"compact","sessionId":"session-compact","updatedAt":3},{"cliVersion":"0.144.2","createdAt":1,"cwd":"/tmp/repo","id":"thread-good","preview":"good","updatedAt":2}],"nextCursor":null}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":3,"cwd":"__REPO__","id":"thread-deleted","preview":"gone","sessionId":"session-deleted","updatedAt":4},{"cliVersion":"0.141.0","createdAt":2,"cwd":"__REPO__","id":"thread-compact","preview":"compact","sessionId":"session-compact","updatedAt":3},{"cliVersion":"0.144.2","createdAt":1,"cwd":"__REPO__","id":"thread-good","preview":"good","updatedAt":2}],"nextCursor":null}}'
 IFS= read -r deleted
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32004,"message":"thread not found","data":{"kind":"thread_not_found","threadId":"thread-deleted"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32004,"message":"thread not found; password=super-secret-rpc-password","data":{"kind":"thread_not_found","threadId":"thread-deleted","authorization":"Bearer super-secret-rpc-bearer","nested":{"password":"super-secret-rpc-data"}}}}'
 IFS= read -r compact
 printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"compacted":true,"status":{"type":"incomplete"},"turns":[{"items":[{"type":"futureItem","payload":"untrusted"}],"status":"interrupted"}]}}}'
 IFS= read -r good
 printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"turns":[{"id":"turn-good","items":[{"id":"item-good","type":"agentMessage"}],"status":"completed"}]}}}'
-"#,
-    );
+"#
+        .replace("__REPO__", repo.to_str().unwrap());
+    let (_temp, fake) = fake_codex(&script);
 
     let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
-    let report = client
-        .import_threads_report(std::path::Path::new("/tmp/repo"))
-        .await
-        .unwrap();
+    let report = client.import_threads_report(&repo).await.unwrap();
 
     assert_eq!(report.threads.len(), 2);
     assert_eq!(report.coverage.status, CoverageStatus::Degraded);
@@ -99,6 +236,23 @@ printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"turns":[{"id":"turn-
     let error = deleted.rpc_error.as_ref().unwrap();
     assert_eq!(error.code, Some(-32004));
     assert_eq!(error.data.as_ref().unwrap()["kind"], "thread_not_found");
+    assert!(error.message.contains("password=[REDACTED]"));
+    assert_eq!(error.data.as_ref().unwrap()["authorization"], "[REDACTED]");
+    assert_eq!(
+        error.data.as_ref().unwrap()["nested"]["password"],
+        "[REDACTED]"
+    );
+    let serialized_report = serde_json::to_string(&report).unwrap();
+    for secret in [
+        "super-secret-rpc-password",
+        "super-secret-rpc-bearer",
+        "super-secret-rpc-data",
+    ] {
+        assert!(
+            !serialized_report.contains(secret),
+            "raw RPC secret remained in serialized import report"
+        );
+    }
 
     let compact = report
         .threads
@@ -194,6 +348,58 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":"not-an-array","nextCurs
     client.shutdown().await.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn malformed_token_usage_notification_degrades_import_without_stopping_rpc_collection() {
+    use previously_on::app_server::{project_thread_events, AppServerClient};
+    use previously_on::domain::{CoverageStatus, EventKind};
+
+    let (_repo_temp, repo) = git_repository();
+    let script =
+        r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
+IFS= read -r initialized
+IFS= read -r list
+printf '%s\n' '{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"thread-1"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":1,"cwd":"__REPO__","id":"thread-1","preview":"one","sessionId":"session-1","updatedAt":2}],"nextCursor":null}}'
+IFS= read -r read_thread
+printf '%s\n' '{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"last":{"cachedInputTokens":10,"inputTokens":20,"outputTokens":30,"reasoningOutputTokens":40,"totalTokens":100},"total":{"cachedInputTokens":100,"inputTokens":200,"outputTokens":300,"reasoningOutputTokens":400,"totalTokens":1000},"modelContextWindow":128000}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"turns":[{"id":"turn-1","items":[],"status":"completed"}]}}}'
+"#
+        .replace("__REPO__", repo.to_str().unwrap());
+    let (_temp, fake) = fake_codex(&script);
+
+    let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
+    let report = client.import_threads_report(&repo).await.unwrap();
+
+    assert_eq!(report.threads.len(), 1);
+    assert_eq!(report.coverage.status, CoverageStatus::Degraded);
+    let warning = "ignored malformed thread/tokenUsage/updated notification; token-usage coverage is degraded";
+    assert!(report
+        .coverage
+        .warnings
+        .iter()
+        .any(|candidate| candidate == warning));
+    let imported = &report.threads[0];
+    assert_eq!(
+        imported.thread["_previously_token_usage"]["tokenUsage"]["last"]["totalTokens"],
+        100
+    );
+    let projection = project_thread_events(imported, "repo-id", std::path::Path::new("/tmp/repo"));
+    let usage = projection
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::ContextUsageUpdated)
+        .expect("valid notification collected after malformed notification");
+    assert_eq!(usage.payload["context_usage"]["total_tokens"], 100);
+    assert_eq!(
+        usage.payload["context_usage"]["model_context_window"],
+        128000
+    );
+    client.shutdown().await.unwrap();
+}
+
 #[test]
 fn documented_turn_items_project_to_bounded_idempotent_lineage_events() {
     use std::process::Command;
@@ -276,6 +482,11 @@ fn documented_turn_items_project_to_bounded_idempotent_lineage_events() {
                         }]
                     },
                     {
+                        "id": "item-compaction",
+                        "type": "contextCompaction",
+                        "createdAt": 1700000008
+                    },
+                    {
                         "id": "item-final",
                         "type": "agentMessage",
                         "phase": "final_answer",
@@ -287,7 +498,7 @@ fn documented_turn_items_project_to_bounded_idempotent_lineage_events() {
     };
 
     let projection = project_thread_events(&imported, &identity.id, &identity.root);
-    assert_eq!(projection.events.len(), 6);
+    assert_eq!(projection.events.len(), 7);
     assert!(projection
         .events
         .iter()
@@ -296,6 +507,40 @@ fn documented_turn_items_project_to_bounded_idempotent_lineage_events() {
         .events
         .iter()
         .any(|event| event.kind == EventKind::AssistantFinal));
+    let compaction = projection
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::ContextCompaction)
+        .unwrap();
+    assert_eq!(
+        compaction.source_id,
+        "codex-app-server:thread:thread-semantic:item:item-compaction:context-compaction"
+    );
+    assert_eq!(compaction.payload["thread_id"], "thread-semantic");
+    assert_eq!(compaction.payload["turn_id"], "turn-1");
+    assert_eq!(compaction.payload["item_id"], "item-compaction");
+    assert_eq!(compaction.payload["raw_transcript_stored"], false);
+
+    let started = projection
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::SessionStarted)
+        .unwrap();
+    assert_eq!(started.payload["source_thread_id"], "thread-semantic");
+    assert_eq!(started.payload["thread_created_at"], "2023-11-14T22:13:20Z");
+    assert_eq!(started.payload["thread_updated_at"], "2023-11-14T22:13:30Z");
+    assert_eq!(started.payload["turn_count"], 1);
+    assert_eq!(started.payload["raw_transcript_stored"], false);
+    let stopped = projection
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::SessionStopped)
+        .unwrap();
+    assert_eq!(stopped.payload["source_thread_id"], "thread-semantic");
+    assert_eq!(stopped.payload["thread_created_at"], "2023-11-14T22:13:20Z");
+    assert_eq!(stopped.payload["thread_updated_at"], "2023-11-14T22:13:30Z");
+    assert_eq!(stopped.payload["turn_count"], 1);
+    assert_eq!(stopped.payload["raw_transcript_stored"], false);
     assert_eq!(
         projection
             .events
@@ -333,7 +578,29 @@ fn documented_turn_items_project_to_bounded_idempotent_lineage_events() {
     let tests = store.list_test_results(task_id).unwrap();
     assert_eq!(tests.len(), 1);
     assert_eq!(tests[0].status, TestStatus::Passed);
-    assert_eq!(store.list_checkpoints(task_id).unwrap().len(), 1);
+    assert!(
+        store.list_checkpoints(task_id).unwrap().is_empty(),
+        "an import-time Git snapshot must never be presented as the historical baseline"
+    );
+    assert!(store
+        .list_session_events(&identity.id, "session-semantic")
+        .unwrap()
+        .iter()
+        .all(|event| event
+            .coverage
+            .missing
+            .contains(&"historical_git_snapshot".to_string())));
+    let session = store
+        .get_session("session-semantic")
+        .unwrap()
+        .expect("projected session");
+    assert_eq!(session.source_thread_id.as_deref(), Some("thread-semantic"));
+    assert_eq!(session.turn_count, 1);
+    assert_eq!(session.compaction_count, 1);
+    assert_eq!(
+        session.last_activity_at.unwrap().to_rfc3339(),
+        "2023-11-14T22:13:30+00:00"
+    );
     let exported = store.export_json(None).unwrap();
     let export = exported.to_string();
     assert!(export.contains("Auth work continued and tests pass."));
@@ -342,6 +609,197 @@ fn documented_turn_items_project_to_bounded_idempotent_lineage_events() {
         "secret remained at JSON paths: {:?}",
         json_paths_containing(&exported, "do-not-store", "$"),
     );
+}
+
+#[test]
+fn malformed_semantic_items_degrade_coverage_without_unstable_projection_ids() {
+    use previously_on::app_server::{project_thread_events, ImportedThreadV1};
+    use previously_on::domain::{CoverageStatus, CoverageV1, EventKind};
+    use serde_json::json;
+
+    let imported = ImportedThreadV1 {
+        schema_version: 1,
+        id: "thread-malformed".to_string(),
+        session_id: "session-malformed".to_string(),
+        cwd: std::path::PathBuf::from("/tmp/repo"),
+        cli_version: "0.144.3".to_string(),
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_010,
+        coverage: CoverageV1::default(),
+        thread: json!({
+            "turns": [
+                {"items": [{"id": "would-be-unstable", "type": "contextCompaction"}]},
+                {
+                    "id": "turn-stable",
+                    "items": [
+                        {"type": "contextCompaction"},
+                        {"id": "item-missing-type"},
+                        {"id": "item-unknown", "type": "futureItem"},
+                        "opaque"
+                    ]
+                }
+            ]
+        }),
+    };
+
+    let first = project_thread_events(&imported, "repo-id", std::path::Path::new("/tmp/repo"));
+    let second = project_thread_events(&imported, "repo-id", std::path::Path::new("/tmp/repo"));
+
+    assert_eq!(first.coverage.status, CoverageStatus::Degraded);
+    assert!(first
+        .coverage
+        .missing
+        .iter()
+        .any(|missing| missing == "stable turn source ID"));
+    assert!(first
+        .coverage
+        .missing
+        .iter()
+        .any(|missing| missing == "stable item source ID"));
+    assert!(first
+        .coverage
+        .missing
+        .iter()
+        .any(|missing| missing == "known thread item schema"));
+    assert!(!first
+        .events
+        .iter()
+        .any(|event| event.kind == EventKind::ContextCompaction));
+    assert_eq!(
+        first
+            .events
+            .iter()
+            .map(|event| event.source_id.as_str())
+            .collect::<Vec<_>>(),
+        second
+            .events
+            .iter()
+            .map(|event| event.source_id.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn imported_file_changes_reject_unsafe_and_sensitive_repository_paths() {
+    use previously_on::app_server::{project_thread_events, ImportedThreadV1};
+    use previously_on::domain::{CoverageStatus, CoverageV1, EventKind};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    let repo = TempDir::new().unwrap();
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    let imported = ImportedThreadV1 {
+        schema_version: 1,
+        id: "thread-path-safety".to_string(),
+        session_id: "session-path-safety".to_string(),
+        cwd: repo.path().to_path_buf(),
+        cli_version: "0.144.3".to_string(),
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_010,
+        coverage: CoverageV1::default(),
+        thread: json!({
+            "turns": [{
+                "id": "turn-1",
+                "items": [{
+                    "id": "item-file",
+                    "type": "fileChange",
+                    "changes": [
+                        {"path": "src/good.rs", "kind": "update"},
+                        {"path": "/tmp/absolute.rs", "kind": "update"},
+                        {"path": "../outside.rs", "kind": "update"},
+                        {"path": "src/./non-normal.rs", "kind": "update"},
+                        {"path": "src//non-normal.rs", "kind": "update"},
+                        {"path": "src\\non-normal.rs", "kind": "update"},
+                        {"path": ".env.production", "kind": "update"},
+                        {"path": "credentials.json", "kind": "update"},
+                        {
+                            "path": "src/renamed.rs",
+                            "previousPath": "../../outside.rs",
+                            "kind": "rename"
+                        }
+                    ]
+                }]
+            }]
+        }),
+    };
+
+    let projection = project_thread_events(&imported, "repo-id", repo.path());
+    assert_eq!(projection.coverage.status, CoverageStatus::Degraded);
+    assert!(projection
+        .coverage
+        .missing
+        .iter()
+        .any(|missing| missing == "safe repository-relative file change path"));
+    let file_event = projection
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::ToolFinished)
+        .unwrap();
+    let changes = file_event.payload["file_changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["path"], "src/good.rs");
+    let serialized = serde_json::to_string(&projection).unwrap();
+    for rejected in [
+        "/tmp/absolute.rs",
+        "../outside.rs",
+        "src/./non-normal.rs",
+        "src//non-normal.rs",
+        "src\\non-normal.rs",
+        ".env.production",
+        "credentials.json",
+    ] {
+        assert!(!serialized.contains(rejected), "import leaked {rejected}");
+    }
+}
+
+#[test]
+fn parses_documented_token_usage_notification() {
+    use previously_on::app_server::parse_token_usage_notification;
+    use serde_json::json;
+
+    let parsed = parse_token_usage_notification(&json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "tokenUsage": {
+                "last": {
+                    "cachedInputTokens": 10,
+                    "inputTokens": 20,
+                    "outputTokens": 30,
+                    "reasoningOutputTokens": 40,
+                    "totalTokens": 100
+                },
+                "total": {
+                    "cachedInputTokens": 100,
+                    "inputTokens": 200,
+                    "outputTokens": 300,
+                    "reasoningOutputTokens": 400,
+                    "totalTokens": 1000
+                },
+                "modelContextWindow": 128000
+            }
+        }
+    }))
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(parsed.thread_id, "thread-1");
+    assert_eq!(parsed.turn_id, "turn-1");
+    assert_eq!(parsed.token_usage.last.total_tokens, 100);
+    assert_eq!(parsed.token_usage.total.total_tokens, 1000);
+    assert_eq!(parsed.token_usage.model_context_window, Some(128000));
+    assert!(
+        parse_token_usage_notification(&json!({"method": "turn/completed"}))
+            .unwrap()
+            .is_none()
+    );
+    assert!(parse_token_usage_notification(&json!({
+        "method": "thread/tokenUsage/updated",
+        "params": {"threadId": "thread-1"}
+    }))
+    .is_err());
 }
 
 fn json_paths_containing(value: &serde_json::Value, needle: &str, prefix: &str) -> Vec<String> {

@@ -8,6 +8,9 @@ Thank you for helping make Codex handoffs more inspectable.
 - Discuss new runtime dependencies before adding them. The `0.1` default mode is keyless,
   telemetry-free, and has no outbound network code.
 - Never add real prompts, credentials, private repository data, or unredacted logs to fixtures.
+- Do not suppress secret scanning by path or detector. A synthetic credential fixture may be added to
+  `.gitguardian.yaml` only by its exact occurrence SHA after the redaction assertion and scanner
+  output have both been reviewed.
 - Add a regression test for ingestion, recovery, privacy, attribution, and compatibility fixes.
 
 ## Local checks
@@ -26,6 +29,16 @@ npm --prefix ui run build
 npm --prefix ui audit --audit-level=high
 cargo package --locked
 ```
+
+When ggshield is available and authenticated, also run:
+
+```bash
+ggshield --config-path .gitguardian.yaml secret scan path --recursive .
+```
+
+Review ignored synthetic fixtures separately with `--all-secrets`; never treat a zero finding from
+the configured scan as evidence that the ignored fixtures were removed or made safe. GitGuardian
+dashboard status is managed separately from `.gitguardian.yaml`.
 
 `./scripts/build-release.sh` is the release-level gate on Apple Silicon. It performs additional
 packaging, offline-install, checksum, SBOM, and reproducibility checks.

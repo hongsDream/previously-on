@@ -1,4 +1,6 @@
-use previously_on::redaction::{redact_excerpt, redact_text, redact_value, REDACTED};
+use previously_on::redaction::{
+    is_sensitive_path, redact_excerpt, redact_text, redact_value, REDACTED,
+};
 use serde_json::json;
 
 #[test]
@@ -87,4 +89,44 @@ fn recursively_redacts_json_and_caps_unicode_excerpt() {
 
     let excerpt = redact_excerpt(&"🙂".repeat(700));
     assert_eq!(excerpt.chars().count(), 500);
+}
+
+#[test]
+fn redacts_sensitive_json_object_keys_without_collapsing_the_map() {
+    let value = serde_json::json!({
+        ".env.production": "first",
+        "credentials.json": "second",
+        "safe.rs": "third"
+    });
+    let redacted = redact_value(&value);
+    let serialized = serde_json::to_string(&redacted).unwrap();
+    assert!(!serialized.contains(".env.production"));
+    assert!(!serialized.contains("credentials.json"));
+    assert!(serialized.contains("safe.rs"));
+    assert_eq!(redacted.as_object().unwrap().len(), 3);
+}
+
+#[test]
+fn classifies_sensitive_paths_by_component_without_hiding_source_modules() {
+    for path in [
+        ".env",
+        ".envrc",
+        ".env.production",
+        "config/credentials.json",
+        "nested/id_ed25519",
+        r"windows\nested\secrets.yaml",
+    ] {
+        assert!(is_sensitive_path(path), "expected sensitive path: {path}");
+    }
+    for path in [
+        "src/credentials.rs",
+        "docs/secret-management.md",
+        "src/environment.rs",
+        "keys/id_ed25519_fixture.txt",
+    ] {
+        assert!(
+            !is_sensitive_path(path),
+            "unexpected sensitive path: {path}"
+        );
+    }
 }

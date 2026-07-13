@@ -34,17 +34,22 @@ uninstall can preserve later user edits. Those backups can contain the same sens
 the original Codex configuration and are deleted only when the user removes the local
 PreviouslyOn data directory.
 
-## Deferred AI extraction
+## AI fact refresh is not included in v0.1
 
-AI fact extraction is not included in `v0.1.0-alpha.1`. Facts can enter a context pack only after
-they have verified evidence and the user confirms or pins them. A later experimental extractor
-must preserve that gate; model output will never count as evidence.
+The review UI does not invoke Codex or another model. This avoids giving untrusted historical
+evidence to an agent that can read repository or credential files. An AI-assisted candidate path
+is deferred until a deny-read boundary and adversarial prompt-injection tests are available; model
+output will not count as evidence when that path is introduced.
 
 ## Prompt injection
 
 Stored prompts and tool output can contain malicious instructions. PreviouslyOn wraps them
 as historical evidence, labels them untrusted, and never maps their text to developer or system
 instructions. MCP tools return data; they do not execute commands from history.
+
+Resume suggestions and new-thread continuation advice contain metadata only. PreviouslyOn never
+injects a Context Pack automatically; the user must approve a resume and Codex must call the
+read-only `resume_task` MCP tool.
 
 ## Legacy development data
 

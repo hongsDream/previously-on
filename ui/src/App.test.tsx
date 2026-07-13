@@ -37,6 +37,50 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getAllByText('864 tokens').length).toBeGreaterThan(0);
   });
 
+  it('renders session age, rollover pressure, and Git revalidation details', async () => {
+    render(<App />);
+
+    expect(await screen.findByText('New thread suggested')).toBeInTheDocument();
+    expect(screen.getAllByText('6 compactions').length).toBeGreaterThan(0);
+    expect(screen.getByText('81% used')).toBeInTheDocument();
+    expect(screen.getAllByText('Relevant code changed').length).toBeGreaterThan(0);
+    expect(screen.getByText('src/middleware/auth.ts → src/middleware/access.ts')).toBeInTheDocument();
+    expect(screen.getByText('src/interfaces/legacy-auth.ts')).toBeInTheDocument();
+    expect(screen.getAllByText(/last year|year ago/).length).toBeGreaterThan(0);
+    expect(screen.getByText('Then')).toBeInTheDocument();
+    expect(screen.getByText('Since')).toBeInTheDocument();
+    expect(screen.getByText('Now')).toBeInTheDocument();
+    expect(screen.getByText('Needs review')).toBeInTheDocument();
+  });
+
+  it('keeps rendering bootstrap payloads without timeline extensions', async () => {
+    const data = liveWorkspace();
+    for (const checkpoint of data.checkpoints) {
+      delete checkpoint.sourceThreadId;
+      delete checkpoint.lastActivityAt;
+      delete checkpoint.turnCount;
+      delete checkpoint.compactionCount;
+      delete checkpoint.contextUsage;
+      delete checkpoint.continuationState;
+      delete checkpoint.continuationAdvice;
+      delete checkpoint.temporalRevalidation;
+    }
+    const pack = data.contextPacks[data.tasks[0].id];
+    delete pack.temporal_revalidation;
+    delete pack.current_validation;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Refactor authentication boundary' })).toBeInTheDocument();
+    expect(screen.queryByText('New thread suggested')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Token usage unavailable').length).toBeGreaterThan(0);
+    expect(screen.getByText('Then')).toBeInTheDocument();
+    expect(screen.getByText('Since')).toBeInTheDocument();
+    expect(screen.getByText('Now')).toBeInTheDocument();
+    expect(screen.getByText('Needs review')).toBeInTheDocument();
+  });
+
   it('keeps resume data read-only in sample mode', async () => {
     const user = userEvent.setup();
     render(<App />);

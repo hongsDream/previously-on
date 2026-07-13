@@ -1,6 +1,7 @@
-use previously_on::domain::{ChangeAttribution, ChangeStatus, Freshness};
+use previously_on::domain::{ChangeAttribution, ChangeStatus, Freshness, TemporalStatusV1};
 use previously_on::git::{
     assess_task_freshness, capture_snapshot, correlate_changes, is_ancestor, repository_identity,
+    revalidate_task,
 };
 use std::process::Command;
 use tempfile::TempDir;
@@ -59,6 +60,13 @@ fn preserves_rename_and_binary_metadata_without_overclaiming_external_changes() 
     assert_eq!(binary.additions, None);
     assert_eq!(binary.deletions, None);
     assert_eq!(binary.attribution, ChangeAttribution::ObservedChangedIn);
+    let temporal = revalidate_task(temp.path(), Some(&before), &changes).unwrap();
+    assert_eq!(temporal.status, TemporalStatusV1::Changed);
+    assert!(temporal.related_changes.iter().any(|change| {
+        change.status == ChangeStatus::Renamed
+            && change.previous_path.as_deref() == Some("old-name.txt")
+            && change.path == "new-name.txt"
+    }));
 }
 
 #[test]
@@ -127,7 +135,26 @@ fn captures_repo_and_only_claims_causality_for_tool_observed_paths() {
         assess_task_freshness(temp.path(), Some(&baseline), &changes).unwrap(),
         Freshness::Fresh
     );
+    std::fs::write(temp.path().join("unrelated.md"), "unrelated\n").unwrap();
+    git(temp.path(), &["add", "unrelated.md"]);
+    git(temp.path(), &["commit", "-qm", "unrelated change"]);
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Unchanged
+    );
+    assert_eq!(
+        assess_task_freshness(temp.path(), Some(&baseline), &changes).unwrap(),
+        Freshness::Fresh
+    );
     std::fs::write(temp.path().join("tracked.txt"), "changed again\n").unwrap();
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Changed
+    );
     assert_eq!(
         assess_task_freshness(temp.path(), Some(&baseline), &changes).unwrap(),
         Freshness::Stale
@@ -217,7 +244,7 @@ fn detached_head_snapshots_remain_valid_and_conservative() {
 #[test]
 fn rebased_history_never_implies_tool_causality() {
     let temp = TempDir::new().unwrap();
-    git(temp.path(), &["init", "-q"]);
+    git(temp.path(), &["init", "-q", "-b", "master"]);
     git(
         temp.path(),
         &["config", "user.email", "previously@example.test"],
@@ -257,4 +284,301 @@ fn rebased_history_never_implies_tool_causality() {
     assert!(changes
         .iter()
         .all(|change| change.attribution == ChangeAttribution::ObservedChangedIn));
+}
+
+#[test]
+fn dirty_checkpoint_is_unchanged_until_its_content_changes_again() {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "previously@example.test"],
+    );
+    git(temp.path(), &["config", "user.name", "PreviouslyOn"]);
+    std::fs::write(temp.path().join("dirty.txt"), "initial\n").unwrap();
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-qm", "initial"]);
+
+    let before = capture_snapshot(temp.path()).unwrap();
+    std::fs::write(temp.path().join("dirty.txt"), "checkpoint\n").unwrap();
+    let baseline = capture_snapshot(temp.path()).unwrap();
+    let changes = correlate_changes(
+        temp.path(),
+        &before,
+        &baseline,
+        "dirty-session",
+        Some("dirty-task"),
+        &["dirty.txt".into()],
+    )
+    .unwrap();
+
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Unchanged
+    );
+    std::fs::write(temp.path().join("dirty.txt"), "changed later\n").unwrap();
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Changed
+    );
+}
+
+#[test]
+fn deleted_checkpoint_treats_the_historical_path_as_intentionally_absent() {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "previously@example.test"],
+    );
+    git(temp.path(), &["config", "user.name", "PreviouslyOn"]);
+    std::fs::write(temp.path().join("deleted.txt"), "delete me\n").unwrap();
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-qm", "initial"]);
+
+    let before = capture_snapshot(temp.path()).unwrap();
+    std::fs::remove_file(temp.path().join("deleted.txt")).unwrap();
+    let dirty_baseline = capture_snapshot(temp.path()).unwrap();
+    let changes = correlate_changes(
+        temp.path(),
+        &before,
+        &dirty_baseline,
+        "delete-session",
+        Some("delete-task"),
+        &["deleted.txt".into()],
+    )
+    .unwrap();
+    assert_eq!(changes[0].status, ChangeStatus::Deleted);
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&dirty_baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Unchanged
+    );
+
+    git(temp.path(), &["add", "-A"]);
+    git(temp.path(), &["commit", "-qm", "delete file"]);
+    let clean_baseline = capture_snapshot(temp.path()).unwrap();
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&clean_baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Unchanged
+    );
+}
+
+#[test]
+fn renamed_checkpoint_treats_the_historical_source_as_intentionally_absent() {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "previously@example.test"],
+    );
+    git(temp.path(), &["config", "user.name", "PreviouslyOn"]);
+    std::fs::write(temp.path().join("old.txt"), "rename me\n").unwrap();
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-qm", "initial"]);
+
+    let before = capture_snapshot(temp.path()).unwrap();
+    git(temp.path(), &["mv", "old.txt", "new.txt"]);
+    let dirty_baseline = capture_snapshot(temp.path()).unwrap();
+    let changes = correlate_changes(
+        temp.path(),
+        &before,
+        &dirty_baseline,
+        "rename-session",
+        Some("rename-task"),
+        &["new.txt".into()],
+    )
+    .unwrap();
+    assert_eq!(changes[0].status, ChangeStatus::Renamed);
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&dirty_baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Unchanged
+    );
+
+    git(temp.path(), &["add", "-A"]);
+    git(temp.path(), &["commit", "-qm", "rename file"]);
+    let clean_baseline = capture_snapshot(temp.path()).unwrap();
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&clean_baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Unchanged
+    );
+}
+
+#[test]
+fn committing_the_dirty_checkpoint_content_does_not_make_it_stale() {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "previously@example.test"],
+    );
+    git(temp.path(), &["config", "user.name", "PreviouslyOn"]);
+    std::fs::write(temp.path().join("commit-me.txt"), "initial\n").unwrap();
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-qm", "initial"]);
+
+    let before = capture_snapshot(temp.path()).unwrap();
+    std::fs::write(temp.path().join("commit-me.txt"), "checkpoint\n").unwrap();
+    let baseline = capture_snapshot(temp.path()).unwrap();
+    let changes = correlate_changes(
+        temp.path(),
+        &before,
+        &baseline,
+        "commit-session",
+        Some("commit-task"),
+        &["commit-me.txt".into()],
+    )
+    .unwrap();
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-qm", "commit checkpoint state"]);
+
+    assert_eq!(
+        revalidate_task(temp.path(), Some(&baseline), &changes)
+            .unwrap()
+            .status,
+        TemporalStatusV1::Unchanged
+    );
+}
+
+#[test]
+fn revalidation_degrades_when_the_baseline_is_from_another_repository() {
+    let first = TempDir::new().unwrap();
+    let second = TempDir::new().unwrap();
+    for repo in [&first, &second] {
+        git(repo.path(), &["init", "-q"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "previously@example.test"],
+        );
+        git(repo.path(), &["config", "user.name", "PreviouslyOn"]);
+        std::fs::write(repo.path().join("tracked.txt"), "same\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-qm", "initial"]);
+    }
+    let baseline = capture_snapshot(first.path()).unwrap();
+    let before = capture_snapshot(first.path()).unwrap();
+    std::fs::write(first.path().join("tracked.txt"), "task\n").unwrap();
+    let after = capture_snapshot(first.path()).unwrap();
+    let changes = correlate_changes(
+        first.path(),
+        &before,
+        &after,
+        "repo-session",
+        Some("repo-task"),
+        &["tracked.txt".into()],
+    )
+    .unwrap();
+
+    let result = revalidate_task(second.path(), Some(&baseline), &changes).unwrap();
+    assert_eq!(result.status, TemporalStatusV1::Degraded);
+    assert!(result.warnings[0].contains("different logical repository"));
+}
+
+#[test]
+fn omits_sensitive_paths_from_every_serialized_snapshot_projection() {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "previously@example.test"],
+    );
+    git(temp.path(), &["config", "user.name", "PreviouslyOn"]);
+    std::fs::create_dir_all(temp.path().join("nested")).unwrap();
+    std::fs::write(temp.path().join("safe.txt"), "safe\n").unwrap();
+    std::fs::write(temp.path().join(".env.production"), "TOKEN=do-not-store\n").unwrap();
+    std::fs::write(
+        temp.path().join("nested/credentials.json"),
+        r#"{"password":"do-not-store"}"#,
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("nested/id_ed25519"), "do-not-store\n").unwrap();
+
+    let snapshot = capture_snapshot(temp.path()).unwrap();
+    assert_eq!(snapshot.dirty_files, vec!["safe.txt"]);
+    assert!(snapshot
+        .working_tree_changes
+        .iter()
+        .all(|change| change.path == "safe.txt"));
+    assert_eq!(
+        snapshot
+            .content_fingerprints
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["safe.txt".to_string()]
+    );
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    for secret in [
+        ".env.production",
+        "credentials.json",
+        "id_ed25519",
+        "do-not-store",
+    ] {
+        assert!(!serialized.contains(secret), "snapshot leaked {secret}");
+    }
+}
+
+#[test]
+fn fingerprints_detect_same_numstat_edits_to_an_already_dirty_file() {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "previously@example.test"],
+    );
+    git(temp.path(), &["config", "user.name", "PreviouslyOn"]);
+    std::fs::write(temp.path().join("untracked.txt"), "aaaa\n").unwrap();
+    let before = capture_snapshot(temp.path()).unwrap();
+    std::fs::write(temp.path().join("untracked.txt"), "bbbb\n").unwrap();
+    let after = capture_snapshot(temp.path()).unwrap();
+
+    assert_eq!(
+        before.working_tree_changes[0].additions,
+        after.working_tree_changes[0].additions
+    );
+    let changes = correlate_changes(
+        temp.path(),
+        &before,
+        &after,
+        "dirty-edit-session",
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].path, "untracked.txt");
+    assert_eq!(changes[0].status, ChangeStatus::Modified);
+    assert_eq!(changes[0].attribution, ChangeAttribution::ObservedChangedIn);
+}
+
+#[cfg(unix)]
+#[test]
+fn streams_large_files_and_hashes_symlinks_without_following_final_targets() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "previously@example.test"],
+    );
+    git(temp.path(), &["config", "user.name", "PreviouslyOn"]);
+    let large = vec![0x5a; 8 * 1024 * 1024];
+    std::fs::write(temp.path().join("large.bin"), large).unwrap();
+    symlink("missing-target", temp.path().join("link.txt")).unwrap();
+
+    let snapshot = capture_snapshot(temp.path()).unwrap();
+    assert!(snapshot.content_fingerprints["large.bin"].is_some());
+    assert!(snapshot.content_fingerprints["link.txt"].is_some());
 }

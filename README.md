@@ -11,7 +11,10 @@ not an instruction and not a replacement for checking the current source.
 
 - one Rust `previously` binary for collection, storage, Git correlation, MCP, and the review UI;
 - an embedded React evidence inspector;
+- a task timeline with source-thread identity, relative activity age, turn and compaction counts,
+  and observed context usage;
 - deterministic context packs with provenance, freshness, and capture-coverage warnings;
+- one-time new-thread advice after a session crosses a continuation threshold;
 - no API key, telemetry, or outbound network access in the default mode;
 - repository-scoped JSON export and complete local purge.
 
@@ -62,6 +65,9 @@ previously doctor
 previously ui
 ```
 
+The review UI is deterministic and local. v0.1 does not invoke an AI model from the UI; facts are
+activated only through explicit user review.
+
 Restart Codex after setup so it loads the managed Hooks and `previously_on` MCP server. Other
 public commands are:
 
@@ -94,8 +100,16 @@ already uses that command name.
    verification results.
 5. On a later first prompt, Codex may show a small resume candidate. Nothing is loaded until the
    user approves it and `resume_task` is called through MCP.
-6. The localhost inspector shows why each item was selected, its evidence, and freshness. Facts
-   can be confirmed, pinned, invalidated, or superseded.
+6. The localhost inspector shows the source thread, relative activity age, turns, compactions,
+   observed context usage, and the Git changes since the checkpoint. Facts can be confirmed,
+   pinned, invalidated, or superseded.
+7. When a session reaches six compactions or at least 80% observed context usage, the next user
+   prompt receives one suggestion to continue in a new thread. A session inactive for at least
+   72 hours receives the same one-time suggestion only when relevant code has changed. This is
+   advice, not an automatic thread switch or Context Pack injection.
+
+Context usage is recorded only when the App Server actually emits a token-usage notification.
+PreviouslyOn does not infer a percentage from prompt size or other incomplete observations.
 
 Transparent capture from an independently launched Codex process is experimental in this alpha.
 The mapped 30-row regression driver and live App Server schema probe do not prove 30 real Codex

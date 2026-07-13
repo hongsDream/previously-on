@@ -32,3 +32,17 @@ returned in an untrusted-data envelope.
 PreviouslyOn does not protect copies made by backup software, another process running as the same
 macOS user, or data a user intentionally exports. The Apple Silicon alpha artifact is unsigned and
 not notarized; verify `SHA256SUMS` and the GitHub artifact attestation before use.
+
+## Synthetic secret fixtures
+
+The redaction and persistence tests deliberately contain credential-shaped values. They are inert,
+repository-specific test strings and must never be replaced with real credentials. GitGuardian
+exceptions in `.gitguardian.yaml` are limited to the reviewed occurrence SHA-256 values for those
+fixtures. Do not add `ignored_paths`, disable a detector, or exclude an entire test directory to
+silence a finding.
+
+A repository-local `ignored_matches` entry only affects ggshield. It does not close the corresponding
+GitGuardian dashboard incident. Before an alpha release, a maintainer must inspect every occurrence,
+confirm that its value is synthetic and exercised by a redaction assertion, then mark that dashboard
+incident **Ignored → Test credential**. Any occurrence outside the documented fixture must remain open
+until it is independently investigated.

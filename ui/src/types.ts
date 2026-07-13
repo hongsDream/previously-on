@@ -1,6 +1,43 @@
 export type Freshness = 'fresh' | 'stale' | 'broken';
+export type TemporalStatus = 'unchanged' | 'changed' | 'diverged' | 'broken' | 'degraded';
 export type FactStatus = 'candidate' | 'confirmed' | 'pinned' | 'invalid' | 'superseded';
 export type TaskStatus = 'active' | 'completed' | 'abandoned';
+export type ContinuationState = 'normal' | 'eligible' | 'suggested';
+
+export interface ContextUsage {
+  totalTokens: number;
+  modelContextWindow: number;
+  observedAt?: string;
+}
+
+export interface ContinuationAdvice {
+  action: 'same_thread' | 'new_thread';
+  reasons: Array<'compaction_limit' | 'context_usage_limit' | 'old_session_code_changed' | string>;
+  taskId?: string;
+  taskTitle?: string;
+  lastActivityAt?: string;
+  compactionCount?: number;
+  contextUsage?: ContextUsage;
+  message?: string;
+  suggestedAt?: string;
+}
+
+export interface RelatedChange {
+  path: string;
+  previousPath?: string;
+  status: 'added' | 'modified' | 'renamed' | 'deleted' | 'copied' | 'type_changed' | 'unmerged' | 'unknown';
+  additions?: number;
+  deletions?: number;
+}
+
+export interface TemporalRevalidation {
+  status: TemporalStatus;
+  baselineSha?: string;
+  currentSha?: string;
+  validatedAt?: string;
+  changes?: RelatedChange[];
+  warnings?: string[];
+}
 
 export interface FileChange {
   path: string;
@@ -24,6 +61,14 @@ export interface Checkpoint {
   coverageDelta: number;
   freshness: Freshness;
   state: 'confirmed' | 'draft';
+  sourceThreadId?: string;
+  lastActivityAt?: string;
+  turnCount?: number;
+  compactionCount?: number;
+  contextUsage?: ContextUsage;
+  continuationState?: ContinuationState;
+  continuationAdvice?: ContinuationAdvice;
+  temporalRevalidation?: TemporalRevalidation;
 }
 
 export interface Evidence {
@@ -69,6 +114,8 @@ export interface ResumeCandidate {
   uncompletedSessions: number;
   reason: string;
   score: number;
+  lastActivityAt?: string;
+  continuationAdvice?: ContinuationAdvice;
 }
 
 export interface ContextPackFact {
@@ -89,6 +136,7 @@ export interface ContextPack {
   unresolved_items: ContextPackFact[];
   files: Array<{
     path: string;
+    previous_path?: string;
     status: string;
     attribution: string;
   }>;
@@ -100,6 +148,27 @@ export interface ContextPack {
     status: 'complete' | 'degraded' | 'unsupported';
     missing: string[];
     warnings: string[];
+  };
+  temporal_revalidation?: {
+    status: TemporalStatus;
+    baseline_head?: string;
+    current_head?: string;
+    merge_base?: string;
+    related_changes?: Array<{
+      path: string;
+      previous_path?: string;
+      status: RelatedChange['status'];
+      additions?: number;
+      deletions?: number;
+    }>;
+    checked_paths?: string[];
+    warnings?: string[];
+  };
+  current_validation?: {
+    status: TemporalStatus;
+    current_head?: string;
+    verified_paths?: string[];
+    warnings?: string[];
   };
 }
 

@@ -1,7 +1,17 @@
 use anyhow::Result;
+use chrono::Utc;
 use previously_on::context_pack::count_tokens;
-use previously_on::mcp::{handle_request, tool_definitions, McpBackend};
+use previously_on::domain::{
+    ChangeAttribution, ChangeStatus, CheckpointV1, CoverageV1, FileChangeV1, RepositoryV1,
+    TaskLifecycle, TaskV1, MAX_CONTEXT_TEMPORAL_ITEMS, SCHEMA_VERSION_V1,
+};
+use previously_on::mcp::{
+    handle_request, run_stdio, tool_definitions, McpBackend, StoreMcpBackend, MAX_MCP_REQUEST_BYTES,
+};
+use previously_on::store::Store;
 use serde_json::{json, Value};
+use std::process::Command;
+use tempfile::TempDir;
 
 struct ReadOnlyFixture;
 
@@ -19,6 +29,19 @@ const SECRET_CORPUS: &str = concat!(
     ".env.production id_ed25519 credentials.json"
 );
 
+#[tokio::test]
+async fn stdio_rejects_an_oversized_unterminated_request() {
+    let input = std::io::Cursor::new(vec![b'x'; MAX_MCP_REQUEST_BYTES + 1]);
+    let mut output = Vec::new();
+
+    let error = run_stdio(&ReadOnlyFixture, input, &mut output)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("MCP JSON-RPC frame exceeds"));
+    assert!(output.is_empty());
+}
+
 fn with_history(mut value: Value) -> Value {
     let object = value.as_object_mut().unwrap();
     object.insert(
@@ -27,6 +50,20 @@ fn with_history(mut value: Value) -> Value {
     );
     object.insert("secret_corpus".into(), Value::String(SECRET_CORPUS.into()));
     value
+}
+
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 impl McpBackend for ReadOnlyFixture {
@@ -288,4 +325,282 @@ fn tool_error_boundary_redacts_secret_values_and_distinctive_substrings() {
         assert!(!serialized.contains(leaked), "MCP error leaked {leaked}");
     }
     assert!(serialized.contains("[REDACTED]"));
+}
+
+#[test]
+fn store_resume_task_bounds_one_hundred_file_temporal_metadata_and_is_byte_identical() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(
+        temp.path(),
+        &["init", "--initial-branch=main", repo.to_str().unwrap()],
+    );
+    for index in 0..101 {
+        std::fs::write(
+            repo.join(format!("src/file-{index:03}.rs")),
+            format!("pub const VALUE_{index}: usize = {index};\n"),
+        )
+        .unwrap();
+    }
+    git(&repo, &["add", "src"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=PreviouslyOn Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "baseline",
+        ],
+    );
+
+    let baseline = previously_on::git::capture_snapshot(&repo).unwrap();
+    let repository_id = baseline.repository_id.clone();
+    let baseline_head = baseline.head.clone();
+    let now = Utc::now();
+    let changes = (0..101)
+        .map(|index| FileChangeV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            repository_id: repository_id.clone(),
+            session_id: "session-many-files".into(),
+            task_id: Some("task-many-files".into()),
+            path: format!("src/file-{index:03}.rs"),
+            previous_path: None,
+            status: ChangeStatus::Modified,
+            additions: Some(1),
+            deletions: Some(1),
+            attribution: ChangeAttribution::ObservedChangedIn,
+            before_head: baseline_head.clone(),
+            after_head: baseline_head.clone(),
+        })
+        .collect::<Vec<_>>();
+    let database = temp.path().join("previously.sqlite3");
+    let store = Store::open(&database).unwrap();
+    store
+        .upsert_repository(&RepositoryV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: repository_id.clone(),
+            path: repo.to_string_lossy().into_owned(),
+            remote_url: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_task(&TaskV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "task-many-files".into(),
+            repository_id: repository_id.clone(),
+            title: "Continue a broad deterministic refactor".into(),
+            goal: Some("Finish the bounded refactor safely".into()),
+            lifecycle: TaskLifecycle::Active,
+            branch: Some("main".into()),
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_checkpoint(&CheckpointV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "checkpoint-many-files".into(),
+            repository_id: repository_id.clone(),
+            task_id: "task-many-files".into(),
+            session_id: "session-many-files".into(),
+            created_at: now,
+            goal_hint: Some("Continue a broad deterministic refactor".into()),
+            git_before: Some(baseline.clone()),
+            git_after: baseline,
+            changed_files: changes,
+            tests: Vec::new(),
+            failures: Vec::new(),
+            unresolved_items: Vec::new(),
+            coverage: CoverageV1::default(),
+        })
+        .unwrap();
+
+    for index in 0..101 {
+        std::fs::write(
+            repo.join(format!("src/file-{index:03}.rs")),
+            format!("pub const VALUE_{index}: usize = {};\n", index + 1),
+        )
+        .unwrap();
+    }
+    git(&repo, &["add", "src"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=PreviouslyOn Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "change task files",
+        ],
+    );
+
+    let backend = StoreMcpBackend::open(&database, repository_id).unwrap();
+    let request = json!({
+        "jsonrpc":"2.0",
+        "id":77,
+        "method":"tools/call",
+        "params":{
+            "name":"resume_task",
+            "arguments":{"task_id":"task-many-files"}
+        }
+    });
+    let first = handle_request(&backend, &request).unwrap();
+    let second = handle_request(&backend, &request).unwrap();
+    assert_eq!(first["result"]["isError"], false);
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&second).unwrap()
+    );
+    assert!(count_tokens(&serde_json::to_string(&first).unwrap()).unwrap() <= 2_000);
+
+    let envelope: Value =
+        serde_json::from_str(first["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let temporal = &envelope["data"]["temporal_revalidation"];
+    assert_eq!(
+        temporal["checked_paths"].as_array().unwrap().len(),
+        MAX_CONTEXT_TEMPORAL_ITEMS
+    );
+    assert_eq!(
+        temporal["related_changes"].as_array().unwrap().len(),
+        MAX_CONTEXT_TEMPORAL_ITEMS
+    );
+    assert!(temporal["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "checked_paths_omitted_count=93; limit=8"));
+    assert!(temporal["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "related_changes_omitted_count=93; limit=8"));
+    assert_eq!(
+        envelope["data"]["current_validation"]["verified_paths"],
+        json!([])
+    );
+    assert_eq!(
+        envelope["data"]["current_validation"]["current_head"],
+        Value::Null
+    );
+}
+
+#[test]
+fn store_resume_task_revalidates_the_checkpoint_worktree_not_the_registered_sibling() {
+    let temp = TempDir::new().unwrap();
+    let primary = temp.path().join("primary");
+    let linked = temp.path().join("linked");
+    std::fs::create_dir_all(&primary).unwrap();
+    git(&primary, &["init", "--initial-branch=main"]);
+    std::fs::write(primary.join("state.txt"), "main\n").unwrap();
+    git(&primary, &["add", "state.txt"]);
+    git(
+        &primary,
+        &[
+            "-c",
+            "user.name=PreviouslyOn Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "baseline",
+        ],
+    );
+    let before_head = previously_on::git::capture_snapshot(&primary).unwrap().head;
+    git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(linked.join("state.txt"), "feature\n").unwrap();
+    git(&linked, &["add", "state.txt"]);
+    git(
+        &linked,
+        &[
+            "-c",
+            "user.name=PreviouslyOn Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "feature checkpoint",
+        ],
+    );
+    let checkpoint_snapshot = previously_on::git::capture_snapshot(&linked).unwrap();
+    let repository_id = checkpoint_snapshot.repository_id.clone();
+    let now = Utc::now();
+    let change = FileChangeV1 {
+        schema_version: SCHEMA_VERSION_V1,
+        repository_id: repository_id.clone(),
+        session_id: "linked-session".into(),
+        task_id: Some("linked-task".into()),
+        path: "state.txt".into(),
+        previous_path: None,
+        status: ChangeStatus::Modified,
+        additions: Some(1),
+        deletions: Some(1),
+        attribution: ChangeAttribution::ObservedChangedIn,
+        before_head,
+        after_head: checkpoint_snapshot.head.clone(),
+    };
+    let database = temp.path().join("previously.sqlite3");
+    let store = Store::open(&database).unwrap();
+    store
+        .upsert_repository(&RepositoryV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: repository_id.clone(),
+            path: primary.to_string_lossy().into_owned(),
+            remote_url: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_task(&TaskV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "linked-task".into(),
+            repository_id: repository_id.clone(),
+            title: "Continue linked worktree task".into(),
+            goal: Some("Continue linked worktree task".into()),
+            lifecycle: TaskLifecycle::Active,
+            branch: Some("feature".into()),
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_checkpoint(&CheckpointV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "linked-checkpoint".into(),
+            repository_id: repository_id.clone(),
+            task_id: "linked-task".into(),
+            session_id: "linked-session".into(),
+            created_at: now,
+            goal_hint: Some("Continue linked worktree task".into()),
+            git_before: None,
+            git_after: checkpoint_snapshot,
+            changed_files: vec![change],
+            tests: Vec::new(),
+            failures: Vec::new(),
+            unresolved_items: Vec::new(),
+            coverage: CoverageV1::default(),
+        })
+        .unwrap();
+
+    let backend = StoreMcpBackend::open(&database, repository_id).unwrap();
+    let pack = backend.resume_task("linked-task", Some(1_200)).unwrap();
+    assert_eq!(pack["temporal_revalidation"]["status"], "unchanged");
 }

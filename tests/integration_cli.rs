@@ -20,6 +20,7 @@ fn parses_public_cli_surface() {
     ] {
         Cli::try_parse_from(args).unwrap();
     }
+    assert!(Cli::try_parse_from(["previously", "ui", "--enable-ai-refresh"]).is_err());
     let uninstall = Cli::try_parse_from(["previously", "uninstall", "codex"]).unwrap();
     assert!(matches!(
         uninstall.command,

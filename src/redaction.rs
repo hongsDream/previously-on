@@ -5,6 +5,52 @@ use serde_json::Value;
 
 pub const REDACTED: &str = "[REDACTED]";
 
+/// Returns whether a repository-relative path names a credential-bearing file that must never
+/// cross a capture boundary.
+///
+/// This is deliberately component based rather than substring based: `src/credentials.rs` is
+/// ordinary source code, while `.env.production`, `credentials.json`, and SSH private-key names
+/// are sensitive regardless of their containing directory. Callers must omit matching paths
+/// entirely instead of replacing them with a marker, because even the path itself may disclose a
+/// secret's location.
+pub fn is_sensitive_path(path: &str) -> bool {
+    path.replace('\\', "/").split('/').any(|component| {
+        let component = component.to_ascii_lowercase();
+        component.starts_with(".env")
+            || matches!(
+                component.as_str(),
+                "credentials"
+                    | "credentials.json"
+                    | "credentials.yaml"
+                    | "credentials.yml"
+                    | "credentials.toml"
+                    | "credentials.ini"
+                    | "credential"
+                    | "credential.json"
+                    | "credential.yaml"
+                    | "credential.yml"
+                    | "credential.toml"
+                    | "credential.ini"
+                    | "secrets"
+                    | "secrets.json"
+                    | "secrets.yaml"
+                    | "secrets.yml"
+                    | "secrets.toml"
+                    | "secrets.ini"
+                    | "secret"
+                    | "secret.json"
+                    | "secret.yaml"
+                    | "secret.yml"
+                    | "secret.toml"
+                    | "secret.ini"
+            )
+            || matches!(
+                component.as_str(),
+                "id_rsa" | "id_rsa.pub" | "id_dsa" | "id_dsa.pub" | "id_ed25519" | "id_ed25519.pub"
+            )
+    })
+}
+
 static AUTHORIZATION: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?im)(authorization\s*:\s*)(?:bearer|basic|token)?\s*[^\s,;]+")
         .expect("authorization regex")
@@ -86,21 +132,32 @@ pub fn redact_value(value: &Value) -> Value {
         Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
         Value::String(text) => Value::String(redact_text(text)),
         Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| {
-                    let value = if is_sensitive_key(key) {
-                        Value::String(REDACTED.to_string())
-                    } else if key.eq_ignore_ascii_case("excerpt") {
-                        Value::String(redact_excerpt(value.as_str().unwrap_or_default()))
-                    } else {
-                        redact_value(value)
-                    };
-                    (key.clone(), value)
-                })
-                .collect(),
-        ),
+        Value::Object(object) => {
+            let mut output = serde_json::Map::new();
+            let mut redacted_key_index = 0_u32;
+            for (key, value) in object {
+                let value = if is_sensitive_key(key) {
+                    Value::String(REDACTED.to_string())
+                } else if key.eq_ignore_ascii_case("excerpt") {
+                    Value::String(redact_excerpt(value.as_str().unwrap_or_default()))
+                } else {
+                    redact_value(value)
+                };
+                let output_key = if redact_text(key) == *key {
+                    key.clone()
+                } else {
+                    loop {
+                        let candidate = format!("[REDACTED_KEY_{redacted_key_index}]");
+                        redacted_key_index = redacted_key_index.saturating_add(1);
+                        if !object.contains_key(&candidate) && !output.contains_key(&candidate) {
+                            break candidate;
+                        }
+                    }
+                };
+                output.insert(output_key, value);
+            }
+            Value::Object(output)
+        }
     }
 }
 

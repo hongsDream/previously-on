@@ -39,6 +39,12 @@ fn session(lifecycle: SessionLifecycle) -> SessionV1 {
         ended_at: None,
         branch: Some("main".into()),
         head: Some("abc".into()),
+        source_thread_id: None,
+        last_activity_at: Some(at(1)),
+        turn_count: 0,
+        compaction_count: 0,
+        context_usage: None,
+        continuation_state: Default::default(),
         coverage: CoverageV1::default(),
     }
 }

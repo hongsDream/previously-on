@@ -1,7 +1,8 @@
 use crate::domain::{
-    deterministic_id, CheckpointV1, CoverageV1, EventEnvelopeV1, EventKind, EvidenceV1,
-    FactLifecycle, FactV1, FileChangeV1, GitSnapshotV1, RepositoryV1, SessionLifecycle, SessionV1,
-    TaskLifecycle, TaskSuggestionV1, TaskTimelineV1, TaskV1, TestResultV1, SCHEMA_VERSION_V1,
+    deterministic_id, CheckpointV1, ContextUsageV1, ContinuationAdviceV1, ContinuationReasonV1,
+    ContinuationStateV1, CoverageV1, EventEnvelopeV1, EventKind, EvidenceV1, FactLifecycle, FactV1,
+    FileChangeV1, GitSnapshotV1, RepositoryV1, SessionLifecycle, SessionV1, TaskLifecycle,
+    TaskSuggestionV1, TaskTimelineV1, TaskV1, TestResultV1, SCHEMA_VERSION_V1,
 };
 use crate::redaction::{redact_excerpt, redact_text, redact_value};
 use anyhow::{bail, Context, Result};
@@ -655,6 +656,37 @@ impl Store {
             } else if branch_ancestor {
                 matching_reasons.push("branch_ancestor".to_string());
             }
+            let latest_session = self.get_task_timeline(&hit.task.id)?.and_then(|timeline| {
+                timeline
+                    .sessions
+                    .into_iter()
+                    .max_by_key(|session| session.last_activity_at.unwrap_or(session.started_at))
+            });
+            let continuation_advice = latest_session.and_then(|session| {
+                (session.continuation_state != ContinuationStateV1::Normal).then(|| {
+                    let mut reasons = Vec::new();
+                    if session.compaction_count >= 6 {
+                        reasons.push(ContinuationReasonV1::CompactionLimit);
+                    }
+                    if session
+                        .context_usage
+                        .as_ref()
+                        .and_then(ContextUsageV1::utilization)
+                        .is_some_and(|ratio| ratio >= 0.8)
+                    {
+                        reasons.push(ContinuationReasonV1::ContextUsageLimit);
+                    }
+                    ContinuationAdviceV1 {
+                        action: "new_thread".to_string(),
+                        reasons,
+                        task_id: hit.task.id.clone(),
+                        task_title: hit.task.title.clone(),
+                        last_activity_at: session.last_activity_at.unwrap_or(session.started_at),
+                        compaction_count: session.compaction_count,
+                        context_usage: session.context_usage,
+                    }
+                })
+            });
             suggestions.push(TaskSuggestionV1 {
                 task_id: hit.task.id,
                 title: hit.task.title,
@@ -668,6 +700,7 @@ impl Store {
                 .clamp(0.0, 1.0),
                 last_activity_at: hit.task.updated_at,
                 matching_reasons,
+                continuation_advice,
             });
         }
         suggestions.sort_by(|a, b| {
@@ -1350,6 +1383,75 @@ fn ensure_session_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> 
                 changed = true;
             }
         }
+        if let Some(thread_id) = event
+            .payload
+            .get("source_thread_id")
+            .or_else(|| event.payload.get("thread_id"))
+            .and_then(Value::as_str)
+        {
+            if session.source_thread_id.as_deref() != Some(thread_id) {
+                session.source_thread_id = Some(thread_id.to_string());
+                changed = true;
+            }
+        }
+        let last_activity = event
+            .payload
+            .get("thread_updated_at")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(event.occurred_at);
+        if session
+            .last_activity_at
+            .is_none_or(|current| last_activity > current)
+        {
+            session.last_activity_at = Some(last_activity);
+            changed = true;
+        }
+        if let Some(turn_count) = event
+            .payload
+            .get("turn_count")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        {
+            if turn_count > session.turn_count {
+                session.turn_count = turn_count;
+                changed = true;
+            }
+        } else if event.kind == EventKind::UserPrompt && session.source_thread_id.is_none() {
+            session.turn_count = session.turn_count.saturating_add(1);
+            changed = true;
+        }
+        if event.kind == EventKind::ContextCompaction {
+            session.compaction_count = session.compaction_count.saturating_add(1);
+            if session.compaction_count >= 6
+                && session.continuation_state == ContinuationStateV1::Normal
+            {
+                session.continuation_state = ContinuationStateV1::Eligible;
+            }
+            changed = true;
+        }
+        if let Some(usage) = context_usage(&event.payload, event.occurred_at) {
+            if usage.utilization().is_some_and(|ratio| ratio >= 0.8)
+                && session.continuation_state == ContinuationStateV1::Normal
+            {
+                session.continuation_state = ContinuationStateV1::Eligible;
+            }
+            session.context_usage = Some(usage);
+            changed = true;
+        }
+        if event.kind == EventKind::ContinuationSuggested {
+            let next_state = if event.payload.get("delivery_state").and_then(Value::as_str)
+                == Some("pending_replay")
+            {
+                ContinuationStateV1::Eligible
+            } else {
+                ContinuationStateV1::Suggested
+            };
+            if session.continuation_state != next_state {
+                session.continuation_state = next_state;
+                changed = true;
+            }
+        }
         let coverage = CoverageV1::merge([&session.coverage, &event.coverage]);
         if coverage != session.coverage {
             session.coverage = coverage;
@@ -1360,13 +1462,21 @@ fn ensure_session_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> 
         }
         return Ok(());
     }
+    let started_at = event
+        .payload
+        .get("thread_created_at")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(event.occurred_at);
+    let context_usage = context_usage(&event.payload, event.occurred_at);
+    let compaction_count = u32::from(event.kind == EventKind::ContextCompaction);
     let session = SessionV1 {
         schema_version: SCHEMA_VERSION_V1,
         id: event.session_id.clone(),
         repository_id: event.repository_id.clone(),
         task_id: event.task_id.clone(),
         lifecycle: SessionLifecycle::Active,
-        started_at: event.occurred_at,
+        started_at,
         ended_at: None,
         branch: event
             .payload
@@ -1378,9 +1488,65 @@ fn ensure_session_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> 
             .get("head")
             .and_then(Value::as_str)
             .map(str::to_string),
+        source_thread_id: event
+            .payload
+            .get("source_thread_id")
+            .or_else(|| event.payload.get("thread_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        last_activity_at: Some(
+            event
+                .payload
+                .get("thread_updated_at")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(event.occurred_at),
+        ),
+        turn_count: event
+            .payload
+            .get("turn_count")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(u32::from(event.kind == EventKind::UserPrompt)),
+        compaction_count,
+        context_usage: context_usage.clone(),
+        continuation_state: if event.kind == EventKind::ContinuationSuggested {
+            if event.payload.get("delivery_state").and_then(Value::as_str) == Some("pending_replay")
+            {
+                ContinuationStateV1::Eligible
+            } else {
+                ContinuationStateV1::Suggested
+            }
+        } else if compaction_count >= 6
+            || context_usage
+                .as_ref()
+                .and_then(ContextUsageV1::utilization)
+                .is_some_and(|ratio| ratio >= 0.8)
+        {
+            ContinuationStateV1::Eligible
+        } else {
+            ContinuationStateV1::Normal
+        },
         coverage: event.coverage.clone(),
     };
     upsert_session_tx(transaction, &session)
+}
+
+fn context_usage(payload: &Value, occurred_at: DateTime<Utc>) -> Option<ContextUsageV1> {
+    let usage = payload.get("context_usage").unwrap_or(payload);
+    let total_tokens = usage
+        .get("total_tokens")
+        .or_else(|| usage.get("totalTokens"))
+        .and_then(Value::as_u64)?;
+    let model_context_window = usage
+        .get("model_context_window")
+        .or_else(|| usage.get("modelContextWindow"))
+        .and_then(Value::as_u64)?;
+    Some(ContextUsageV1 {
+        total_tokens,
+        model_context_window,
+        observed_at: Some(occurred_at),
+    })
 }
 
 fn ensure_task_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> Result<()> {

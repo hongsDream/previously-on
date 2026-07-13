@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use uuid::Uuid;
 
@@ -16,11 +16,15 @@ use crate::domain::{
     ChangeAttribution, ChangeStatus, CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind,
     FileChangeV1, SCHEMA_VERSION_V1,
 };
+use crate::git::{repository_identity, RepositoryIdentity};
 use crate::APP_VERSION;
 
 pub const TESTED_CODEX_VERSION: &str = "0.144.3";
 pub const SUPPORTED_CODEX_VERSIONS: [&str; 2] = ["0.144.3", "0.144.2"];
 const MAX_PAGES: usize = 1_000;
+pub const MAX_APP_SERVER_RPC_BYTES: usize = 8 * 1024 * 1024;
+const MALFORMED_TOKEN_USAGE_WARNING: &str =
+    "ignored malformed thread/tokenUsage/updated notification; token-usage coverage is degraded";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +98,56 @@ pub struct SemanticThreadProjectionV1 {
     pub coverage: CoverageV1,
 }
 
+/// A validated `thread/tokenUsage/updated` notification payload.
+///
+/// The App Server client collects the latest valid notification observed while it waits for an RPC
+/// response. Imports attach that bounded value to the matching thread without inferring token usage
+/// from transcript size or turn count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerTokenUsageNotificationV1 {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub token_usage: AppServerThreadTokenUsageV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerThreadTokenUsageV1 {
+    pub last: AppServerTokenUsageBreakdownV1,
+    pub total: AppServerTokenUsageBreakdownV1,
+    pub model_context_window: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerTokenUsageBreakdownV1 {
+    pub cached_input_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// Parse the documented server notification without collecting or persisting it directly.
+///
+/// `Ok(None)` means the JSON-RPC message is not a token-usage notification. A matching method with
+/// malformed parameters is an error so callers can degrade coverage instead of silently guessing.
+pub fn parse_token_usage_notification(
+    message: &Value,
+) -> Result<Option<AppServerTokenUsageNotificationV1>> {
+    if message.get("method").and_then(Value::as_str) != Some("thread/tokenUsage/updated") {
+        return Ok(None);
+    }
+    let params = message
+        .get("params")
+        .cloned()
+        .context("thread/tokenUsage/updated notification omitted params")?;
+    let parsed = serde_json::from_value(params)
+        .context("invalid thread/tokenUsage/updated notification params")?;
+    Ok(Some(parsed))
+}
+
 /// Project the documented, stable `thread/read` item variants into bounded canonical events.
 ///
 /// This deliberately ignores reasoning, plan, image, and tool-detail payloads. Text, command
@@ -109,6 +163,12 @@ pub fn project_thread_events(
     let created_at = timestamp_seconds(thread.created_at);
     let updated_at = timestamp_seconds(thread.updated_at);
     let repository_path = repository_root.to_string_lossy().to_string();
+    let turn_count = thread
+        .thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
 
     events.push(semantic_event(
         format!("codex-app-server:thread:{}:start", thread.id),
@@ -119,14 +179,53 @@ pub fn project_thread_events(
         0,
         json!({
             "thread_id": thread.id,
+            "source_thread_id": thread.id,
             "session_id": thread.session_id,
             "repository_path": repository_path,
+            "thread_created_at": created_at,
+            "thread_updated_at": updated_at,
+            "turn_count": turn_count,
             "app_server_source": "thread/read",
             "untrusted_data": true,
             "raw_transcript_stored": false
         }),
         &coverage,
     ));
+
+    if let Some(notification) = thread
+        .thread
+        .get("_previously_token_usage")
+        .and_then(|value| {
+            serde_json::from_value::<AppServerTokenUsageNotificationV1>(value.clone()).ok()
+        })
+    {
+        events.push(semantic_event(
+            format!(
+                "codex-app-server:thread:{}:turn:{}:token-usage",
+                thread.id, notification.turn_id
+            ),
+            repository_id,
+            &thread.session_id,
+            EventKind::ContextUsageUpdated,
+            updated_at,
+            1,
+            json!({
+                "thread_id": thread.id,
+                "source_thread_id": thread.id,
+                "turn_id": notification.turn_id,
+                "session_id": thread.session_id,
+                "repository_path": repository_path,
+                "context_usage": {
+                    "total_tokens": notification.token_usage.last.total_tokens,
+                    "model_context_window": notification.token_usage.model_context_window
+                },
+                "app_server_source": "thread/tokenUsage/updated",
+                "untrusted_data": true,
+                "raw_transcript_stored": false
+            }),
+            &coverage,
+        ));
+    }
 
     let mut saw_prompt = false;
     let mut saw_final = false;
@@ -150,24 +249,63 @@ pub fn project_thread_events(
 
     for (turn_index, turn) in turns.iter().enumerate() {
         let Some(turn_object) = turn.as_object() else {
+            degrade(
+                &mut coverage,
+                "well-formed turn",
+                format!("turn {turn_index} was not an object and was not projected"),
+            );
             continue;
         };
-        let turn_id = turn_object
+        let Some(turn_id) = turn_object
             .get("id")
             .and_then(Value::as_str)
-            .unwrap_or("unknown-turn");
+            .filter(|turn_id| !turn_id.is_empty())
+        else {
+            degrade(
+                &mut coverage,
+                "stable turn source ID",
+                format!("turn {turn_index} omitted a stable ID and was not projected"),
+            );
+            continue;
+        };
         let Some(items) = turn_object.get("items").and_then(Value::as_array) else {
+            degrade(
+                &mut coverage,
+                "turn items",
+                format!("turn {turn_index} omitted an items array"),
+            );
             continue;
         };
         let mut turn_final: Option<(String, String, i64, DateTime<Utc>, bool)> = None;
         for (item_index, item) in items.iter().enumerate() {
             let Some(item_object) = item.as_object() else {
+                degrade(
+                    &mut coverage,
+                    "well-formed thread item",
+                    format!("turn {turn_index} item {item_index} was not an object"),
+                );
                 continue;
             };
-            let Some(item_id) = item_object.get("id").and_then(Value::as_str) else {
+            let Some(item_id) = item_object
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|item_id| !item_id.is_empty())
+            else {
+                degrade(
+                    &mut coverage,
+                    "stable item source ID",
+                    format!(
+                        "turn {turn_index} item {item_index} omitted a stable ID and was not projected"
+                    ),
+                );
                 continue;
             };
             let Some(item_type) = item_object.get("type").and_then(Value::as_str) else {
+                degrade(
+                    &mut coverage,
+                    "known thread item schema",
+                    format!("turn {turn_index} item {item_index} omitted its type"),
+                );
                 continue;
             };
             let sequence = 1 + (turn_index as i64 * 10_000) + item_index as i64;
@@ -284,6 +422,8 @@ pub fn project_thread_events(
                         item_object.get("changes"),
                         repository_id,
                         &thread.session_id,
+                        repository_root,
+                        &mut coverage,
                     );
                     if changes.is_empty() {
                         degrade(
@@ -325,6 +465,37 @@ pub fn project_thread_events(
                         &coverage,
                     ));
                 }
+                "contextCompaction" => {
+                    events.push(semantic_event(
+                        format!(
+                            "codex-app-server:thread:{}:item:{}:context-compaction",
+                            thread.id, item_id
+                        ),
+                        repository_id,
+                        &thread.session_id,
+                        EventKind::ContextCompaction,
+                        occurred_at,
+                        sequence,
+                        json!({
+                            "thread_id": thread.id,
+                            "turn_id": turn_id,
+                            "item_id": item_id,
+                            "session_id": thread.session_id,
+                            "repository_path": repository_path,
+                            "app_server_item_type": item_type,
+                            "untrusted_data": true,
+                            "raw_transcript_stored": false
+                        }),
+                        &coverage,
+                    ));
+                }
+                item_type if !is_known_thread_item_type(item_type) => degrade(
+                    &mut coverage,
+                    "known thread item schema",
+                    format!(
+                        "turn {turn_index} item {item_index} has unknown type `{item_type}` and was not projected"
+                    ),
+                ),
                 _ => {}
             }
         }
@@ -401,6 +572,13 @@ fn finish_semantic_projection(
     latest_final: Option<String>,
 ) -> SemanticThreadProjectionV1 {
     let sequence = i64::MAX - 1;
+    let turn_count = thread
+        .thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let created_at = timestamp_seconds(thread.created_at);
     events.push(semantic_event(
         format!("codex-app-server:thread:{}:stop", thread.id),
         repository_id,
@@ -410,8 +588,12 @@ fn finish_semantic_projection(
         sequence,
         json!({
             "thread_id": thread.id,
+            "source_thread_id": thread.id,
             "session_id": thread.session_id,
             "repository_path": repository_root.to_string_lossy(),
+            "thread_created_at": created_at,
+            "thread_updated_at": updated_at,
+            "turn_count": turn_count,
             "last_assistant_message": latest_final,
             "app_server_source": "thread/read",
             "untrusted_data": true,
@@ -507,48 +689,85 @@ fn project_file_changes(
     changes: Option<&Value>,
     repository_id: &str,
     session_id: &str,
+    repository_root: &Path,
+    coverage: &mut CoverageV1,
 ) -> Vec<FileChangeV1> {
-    changes
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|change| {
-            let path = change.get("path")?.as_str()?.trim();
-            if path.is_empty() {
-                return None;
+    let mut projected = Vec::new();
+    let mut rejected = 0_usize;
+    for change in changes.and_then(Value::as_array).into_iter().flatten() {
+        let Some(raw_path) = change.get("path").and_then(Value::as_str) else {
+            rejected += 1;
+            continue;
+        };
+        let Some(path) = crate::git::validated_repository_relative_path(raw_path) else {
+            rejected += 1;
+            continue;
+        };
+        if path != raw_path {
+            rejected += 1;
+            continue;
+        }
+        let previous_path = match change.get("previousPath").and_then(Value::as_str) {
+            Some(raw_previous) => {
+                let Some(previous) = crate::git::validated_repository_relative_path(raw_previous)
+                else {
+                    rejected += 1;
+                    continue;
+                };
+                if previous != raw_previous {
+                    rejected += 1;
+                    continue;
+                }
+                Some(previous)
             }
-            let status = match change
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "add" | "added" | "create" | "created" => ChangeStatus::Added,
-                "delete" | "deleted" | "remove" | "removed" => ChangeStatus::Deleted,
-                "rename" | "renamed" | "move" | "moved" => ChangeStatus::Renamed,
-                "update" | "updated" | "modify" | "modified" => ChangeStatus::Modified,
-                _ => ChangeStatus::Unknown,
-            };
-            Some(FileChangeV1 {
-                schema_version: SCHEMA_VERSION_V1,
-                repository_id: repository_id.to_string(),
-                session_id: session_id.to_string(),
-                task_id: None,
-                path: crate::redaction::redact_excerpt(path),
-                previous_path: change
-                    .get("previousPath")
-                    .and_then(Value::as_str)
-                    .map(crate::redaction::redact_excerpt),
-                status,
-                additions: None,
-                deletions: None,
-                attribution: ChangeAttribution::ObservedChangedIn,
-                before_head: None,
-                after_head: None,
-            })
-        })
-        .collect()
+            None => None,
+        };
+        // The lexical validation above is the durable storage boundary. Joining it to the
+        // supplied repository root must remain contained even when the imported item refers to a
+        // file that no longer exists.
+        let joined = repository_root.join(&path);
+        if !joined.starts_with(repository_root) {
+            rejected += 1;
+            continue;
+        }
+        let status = match change
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "add" | "added" | "create" | "created" => ChangeStatus::Added,
+            "delete" | "deleted" | "remove" | "removed" => ChangeStatus::Deleted,
+            "rename" | "renamed" | "move" | "moved" => ChangeStatus::Renamed,
+            "update" | "updated" | "modify" | "modified" => ChangeStatus::Modified,
+            _ => ChangeStatus::Unknown,
+        };
+        projected.push(FileChangeV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            repository_id: repository_id.to_string(),
+            session_id: session_id.to_string(),
+            task_id: None,
+            path,
+            previous_path,
+            status,
+            additions: None,
+            deletions: None,
+            attribution: ChangeAttribution::ObservedChangedIn,
+            before_head: None,
+            after_head: None,
+        });
+    }
+    if rejected > 0 {
+        degrade(
+            coverage,
+            "safe repository-relative file change path",
+            format!(
+                "ignored {rejected} imported file change path(s) that were sensitive, absolute, parent-traversing, or non-normal"
+            ),
+        );
+    }
+    projected
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -626,6 +845,8 @@ pub struct AppServerClient {
     stdout: BufReader<ChildStdout>,
     next_id: u64,
     initialize_result: Value,
+    token_usage_notifications: BTreeMap<String, AppServerTokenUsageNotificationV1>,
+    collector_warnings: Vec<String>,
 }
 
 impl AppServerClient {
@@ -657,6 +878,8 @@ impl AppServerClient {
             stdout: BufReader::new(stdout),
             next_id: 1,
             initialize_result: Value::Null,
+            token_usage_notifications: BTreeMap::new(),
+            collector_warnings: Vec::new(),
         };
         let initialized = client
             .request_timed(
@@ -788,11 +1011,12 @@ impl AppServerClient {
             }
             match page.next_cursor {
                 None => {
+                    self.apply_collector_warnings(&mut coverage);
                     return Ok(ThreadListReportV1 {
                         schema_version: 1,
                         threads,
                         coverage,
-                    })
+                    });
                 }
                 Some(next) if !seen_cursors.insert(next.clone()) => {
                     degrade(
@@ -812,6 +1036,7 @@ impl AppServerClient {
                 format!("Codex thread/list exceeded {MAX_PAGES} pages"),
             );
         }
+        self.apply_collector_warnings(&mut coverage);
         Ok(ThreadListReportV1 {
             schema_version: 1,
             threads,
@@ -838,12 +1063,35 @@ impl AppServerClient {
     }
 
     pub async fn import_threads_report(&mut self, cwd: &Path) -> Result<ThreadImportReportV1> {
+        let registered_repository = repository_identity(cwd).with_context(|| {
+            format!(
+                "identify registered Git repository before Codex App Server import: {}",
+                cwd.display()
+            )
+        })?;
         let listed = self.list_threads_report(Some(cwd)).await?;
         let mut imported = Vec::with_capacity(listed.threads.len());
         let mut notices = Vec::new();
         let mut coverages = vec![listed.coverage.clone()];
         for summary in listed.threads {
-            let thread = match self.read_thread(&summary.id).await {
+            if let Err(warning) = validate_thread_repository(&summary.cwd, &registered_repository) {
+                let mut coverage = summary.coverage.clone();
+                degrade(
+                    &mut coverage,
+                    "matching repository cwd",
+                    warning.to_string(),
+                );
+                coverages.push(coverage.clone());
+                notices.push(ThreadImportNoticeV1 {
+                    thread_id: Some(summary.id),
+                    disposition: ThreadImportDisposition::Skipped,
+                    message: coverage.warnings.join("; "),
+                    coverage,
+                    rpc_error: None,
+                });
+                continue;
+            }
+            let mut thread = match self.read_thread(&summary.id).await {
                 Ok(thread) => thread,
                 Err(error) => {
                     let rpc_error = error.downcast_ref::<AppServerRpcError>().cloned();
@@ -858,6 +1106,7 @@ impl AppServerClient {
                             format!("thread/read failed; thread skipped: {error}")
                         },
                     );
+                    self.apply_collector_warnings(&mut coverage);
                     coverages.push(coverage.clone());
                     notices.push(ThreadImportNoticeV1 {
                         thread_id: Some(summary.id),
@@ -869,8 +1118,17 @@ impl AppServerClient {
                     continue;
                 }
             };
-            let (thread, thread_coverage) =
+            if let Some(notification) = self.token_usage_notifications.remove(&summary.id) {
+                if let Some(object) = thread.as_object_mut() {
+                    object.insert(
+                        "_previously_token_usage".to_string(),
+                        serde_json::to_value(notification)?,
+                    );
+                }
+            }
+            let (thread, mut thread_coverage) =
                 normalize_and_assess_thread(thread, &summary.cli_version);
+            self.apply_collector_warnings(&mut thread_coverage);
             let coverage = CoverageV1::merge([&summary.coverage, &thread_coverage]);
             if coverage.status != CoverageStatus::Complete {
                 notices.push(ThreadImportNoticeV1 {
@@ -926,30 +1184,55 @@ impl AppServerClient {
             "params": params
         }))
         .await?;
-        let mut line = String::new();
         loop {
-            line.clear();
-            let read = self.stdout.read_line(&mut line).await?;
-            if read == 0 {
-                bail!("Codex app-server closed stdout while waiting for {method}");
-            }
-            let message: Value = serde_json::from_str(line.trim_end())
-                .context("invalid JSON from Codex app-server")?;
+            let line = match crate::bounded_io::read_bounded_line_async(
+                &mut self.stdout,
+                MAX_APP_SERVER_RPC_BYTES,
+                false,
+            )
+            .await?
+            {
+                crate::bounded_io::BoundedLine::Eof => {
+                    bail!("Codex app-server closed stdout while waiting for {method}")
+                }
+                crate::bounded_io::BoundedLine::TooLong => bail!(
+                    "Codex app-server JSON-RPC frame exceeds {MAX_APP_SERVER_RPC_BYTES} byte limit"
+                ),
+                crate::bounded_io::BoundedLine::Line(line) => line,
+            };
+            let message: Value =
+                serde_json::from_slice(&line).context("invalid JSON from Codex app-server")?;
             if message.get("id").and_then(Value::as_u64) != Some(id) {
-                // Server notifications are intentionally ignored by the importer. They are not
-                // transcript evidence and do not change the requested response.
+                match parse_token_usage_notification(&message) {
+                    Ok(Some(notification)) => {
+                        self.token_usage_notifications
+                            .insert(notification.thread_id.clone(), notification);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        if !self
+                            .collector_warnings
+                            .iter()
+                            .any(|warning| warning == MALFORMED_TOKEN_USAGE_WARNING)
+                        {
+                            self.collector_warnings
+                                .push(MALFORMED_TOKEN_USAGE_WARNING.to_string());
+                        }
+                    }
+                }
                 continue;
             }
             if let Some(error) = message.get("error") {
                 let rpc_error = AppServerRpcError {
                     method: method.to_string(),
                     code: error.get("code").and_then(Value::as_i64),
-                    message: error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unspecified JSON-RPC error")
-                        .to_string(),
-                    data: error.get("data").cloned(),
+                    message: crate::redaction::redact_excerpt(
+                        error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unspecified JSON-RPC error"),
+                    ),
+                    data: error.get("data").map(crate::redaction::redact_value),
                 };
                 return Err(anyhow::Error::new(rpc_error));
             }
@@ -969,6 +1252,12 @@ impl AppServerClient {
         .with_context(|| format!("Codex app-server {method} timed out"))?
     }
 
+    fn apply_collector_warnings(&self, coverage: &mut CoverageV1) {
+        for warning in &self.collector_warnings {
+            degrade(coverage, "valid token-usage notification", warning.clone());
+        }
+    }
+
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
         self.write_message(&json!({
             "jsonrpc": "2.0",
@@ -985,6 +1274,20 @@ impl AppServerClient {
         self.stdin.flush().await?;
         Ok(())
     }
+}
+
+fn validate_thread_repository(cwd: &Path, registered: &RepositoryIdentity) -> Result<()> {
+    if !cwd.is_absolute() {
+        bail!("Codex thread/list returned a non-absolute cwd; thread skipped")
+    }
+    let returned = repository_identity(cwd)
+        .context("Codex thread/list cwd is not a readable Git worktree; thread skipped")?;
+    if returned.common_dir != registered.common_dir {
+        bail!(
+            "Codex thread/list returned a cwd owned by a different logical Git repository; thread skipped"
+        )
+    }
+    Ok(())
 }
 
 pub async fn inspect_capabilities() -> AppServerCapabilityReport {

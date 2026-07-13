@@ -1,6 +1,7 @@
 /target/
 /dist/
 /ui/node_modules/
+/node_modules/
 /ui/dist/
 /outputs/
 /.omx/

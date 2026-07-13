@@ -12,6 +12,7 @@ import {
   buildWorkflowFixture,
   computeEligibility,
   packageEvidenceBundle,
+  prepareResumeArtifact,
   validateMappedArtifact,
   validateFixtureContract,
   verifyScenarioEvidence,
@@ -143,15 +144,174 @@ test("release eligibility is true only for two complete distinct 30-scenario run
         { role: "previous", version: "1.9.0", scenarios: structuredClone(scenarioResults) },
       ],
     },
-    releaseEligibility: { dataLossEvents: 0 },
+    releaseEligibility: {
+      dataLossEvents: 0,
+      seriousStaleApplications: {
+        status: "measured",
+        count: 0,
+        evidenceSha256: "d".repeat(64),
+        evidencePath: "evidence/stale.json",
+      },
+    },
     codexApp: {
-      current: { status: "passed", build: "current-build", evidenceSha256: "b".repeat(64) },
+      current: {
+        status: "passed",
+        build: "current-build",
+        evidenceSha256: "b".repeat(64),
+        evidencePath: "evidence/current-app.json",
+      },
       previous: { status: "unavailable", reason: "vendor build unavailable", checkedAt: "2026-07-13T00:00:00Z" },
     },
   };
   assert.equal(computeEligibility(artifact, ids), true);
+  artifact.releaseEligibility.seriousStaleApplications = { status: "unmeasured" };
+  assert.equal(computeEligibility(artifact, ids), false);
+  artifact.releaseEligibility.seriousStaleApplications = {
+    status: "measured",
+    count: 0,
+    evidenceSha256: "d".repeat(64),
+    evidencePath: "evidence/stale.json",
+  };
   artifact.codexCli.runs[1].scenarios[12].reconstruction.testCommand = false;
   assert.equal(computeEligibility(artifact, ids), false);
+});
+
+test("resume validates immutable bindings and skips only intact passed checkpoints", () => {
+  const directory = mkdtempSync(join(tmpdir(), "previously-live-resume-test-"));
+  try {
+    const output = join(directory, "live-compatibility.json");
+    const evidenceRoot = join(directory, "live-compatibility.json.evidence");
+    const mappedBytes = "mapped evidence\n";
+    const mappedSha = createHash("sha256").update(mappedBytes).digest("hex");
+    mkdirSync(evidenceRoot, { recursive: true });
+    writeFileSync(join(evidenceRoot, "mapped-compatibility-results.json"), mappedBytes);
+    const scenario = matrix.scenarios[0];
+    const assertion = {
+      status: "passed",
+      testTarget: scenario.testTarget,
+      testFilter: scenario.testFilter,
+      expectation: scenario.expectation,
+      mappedArtifactSha256: mappedSha,
+    };
+    const reconstruction = Object.fromEntries(contract.requiredReconstruction.map((field) => [field, true]));
+    const evidence = {
+      schemaVersion: 1,
+      role: "latest",
+      codexVersion: "2.0.0",
+      scenario: { id: scenario.id, category: scenario.category },
+      scenarioAssertion: assertion,
+      verification: { passed: true, reconstruction },
+    };
+    const evidenceBytes = `${JSON.stringify(evidence)}\n`;
+    const evidencePath = join(evidenceRoot, "latest", scenario.id, "evidence.json");
+    mkdirSync(join(evidenceRoot, "latest", scenario.id), { recursive: true });
+    writeFileSync(evidencePath, evidenceBytes);
+    const appEvidence = {
+      schemaVersion: 1,
+      evidenceClass: "codex_app_verification",
+      product: "Codex App",
+      status: "passed",
+      build: "current",
+      checkedAt: "2026-07-13T00:00:00Z",
+    };
+    const appEvidenceBytes = `${JSON.stringify(appEvidence)}\n`;
+    const appEvidencePath = join(evidenceRoot, "codex-app", "current.json");
+    mkdirSync(join(evidenceRoot, "codex-app"), { recursive: true });
+    writeFileSync(appEvidencePath, appEvidenceBytes);
+    const codexApp = {
+      current: {
+        status: "passed",
+        build: "current",
+        evidenceSha256: createHash("sha256").update(appEvidenceBytes).digest("hex"),
+        evidencePath: "live-compatibility.json.evidence/codex-app/current.json",
+      },
+      previous: { status: "unavailable", reason: "not obtainable", checkedAt: "2026-07-13T00:00:00Z" },
+    };
+    const seriousStaleApplications = { status: "unmeasured", reason: "not evaluated" };
+    const codexRuns = [
+      { role: "latest", version: "2.0.0", binarySha256: "4".repeat(64), scenarios: [] },
+      { role: "previous", version: "1.9.0", binarySha256: "5".repeat(64), scenarios: [] },
+    ];
+    const expected = {
+      productVersion: "0.1.0-alpha.1",
+      gitCommit: "d".repeat(40),
+      runner: { os: "macOS", arch: "arm64" },
+      categories: Object.fromEntries(
+        Object.entries(matrix.scenarios.reduce((counts, scenario) => {
+          counts[scenario.category] = (counts[scenario.category] ?? 0) + 1;
+          return counts;
+        }, {})),
+      ),
+      fixtureContractSha256: "1".repeat(64),
+      scenarioMatrixSha256: "2".repeat(64),
+      previouslyBinarySha256: "3".repeat(64),
+      codexRuns,
+      codexApp,
+      seriousStaleApplications,
+      mappedArtifactSha256: mappedSha,
+      scenarioIds: matrix.scenarios.map(({ id }) => id),
+      scenarios: matrix.scenarios,
+    };
+    const passed = {
+      id: scenario.id,
+      category: scenario.category,
+      status: "passed",
+      reconstruction,
+      scenarioAssertion: assertion,
+      dataLossEvents: 0,
+      evidenceSha256: createHash("sha256").update(evidenceBytes).digest("hex"),
+      evidencePath: `live-compatibility.json.evidence/latest/${scenario.id}/evidence.json`,
+    };
+    const artifact = {
+      schemaVersion: 1,
+      evidenceClass: "live_codex_workflow_matrix",
+      product: "PreviouslyOn",
+      productVersion: expected.productVersion,
+      gitCommit: expected.gitCommit,
+      runner: expected.runner,
+      categories: expected.categories,
+      supportMode: "explicit_run_and_import",
+      fixtureContractSha256: expected.fixtureContractSha256,
+      scenarioMatrixSha256: expected.scenarioMatrixSha256,
+      previouslyBinarySha256: expected.previouslyBinarySha256,
+      codexApp,
+      localMappedRegression: { artifactSha256: mappedSha, gitCommit: expected.gitCommit },
+      codexCli: {
+        runs: [
+          { ...codexRuns[0], scenarios: [passed, { id: matrix.scenarios[1].id, status: "failed" }] },
+          { ...codexRuns[1], scenarios: [] },
+        ],
+      },
+      liveCodexWorkflowMatrix: { status: "failed", requiredRuns: 60, completedRuns: 999 },
+      transparentCaptureReleaseGate: { eligible: false },
+      releaseEligibility: { eligible: false, dataLossEvents: 999, seriousStaleApplications },
+    };
+    const resumed = prepareResumeArtifact(structuredClone(artifact), expected, output, evidenceRoot);
+    assert.equal(resumed.liveCodexWorkflowMatrix.completedRuns, 1);
+    assert.equal(resumed.codexCli.runs[0].scenarios.length, 1);
+    assert.equal(resumed.releaseEligibility.dataLossEvents, 0);
+    assert.equal(resumed.liveCodexWorkflowMatrix.status, "running");
+
+    const changedBinary = structuredClone(expected);
+    changedBinary.previouslyBinarySha256 = "9".repeat(64);
+    assert.throws(
+      () => prepareResumeArtifact(structuredClone(artifact), changedBinary, output, evidenceRoot),
+      /does not match the current commit, product binary, or fixture bytes/,
+    );
+    writeFileSync(appEvidencePath, "tampered\n");
+    assert.throws(
+      () => prepareResumeArtifact(structuredClone(artifact), expected, output, evidenceRoot),
+      /retained file hash changed/,
+    );
+    writeFileSync(appEvidencePath, appEvidenceBytes);
+    writeFileSync(evidencePath, "tampered\n");
+    assert.throws(
+      () => prepareResumeArtifact(structuredClone(artifact), expected, output, evidenceRoot),
+      /missing or has changed/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("mapped artifact validation binds all scenario assertions to the same commit and CLI versions", () => {
@@ -159,6 +319,14 @@ test("mapped artifact validation binds all scenario assertions to the same commi
   try {
     const matrixBytes = readFileSync(new URL("../../fixtures/compatibility/scenarios.json", import.meta.url));
     const ids = matrix.scenarios.map((scenario) => scenario.id);
+    const actualRows = matrix.scenarios.map((scenario) => ({
+      id: scenario.id,
+      testTarget: scenario.testTarget,
+      testFilter: scenario.testFilter,
+      expectation: scenario.expectation,
+      status: "passed",
+      exitCode: 0,
+    }));
     const artifact = {
       schemaVersion: 1,
       product: "PreviouslyOn",
@@ -171,8 +339,8 @@ test("mapped artifact validation binds all scenario assertions to the same commi
       localMappedRegression: {
         scenarioCount: 30,
         runs: [
-          { codexVersionSlot: "2.0.0", passed: ids, failed: [] },
-          { codexVersionSlot: "1.9.0", passed: ids, failed: [] },
+          { codexVersionSlot: "2.0.0", scenarioResults: structuredClone(actualRows), passed: ids, failed: [] },
+          { codexVersionSlot: "1.9.0", scenarioResults: structuredClone(actualRows), passed: ids, failed: [] },
         ],
       },
       liveCodexWorkflowMatrix: { status: "not_run" },
@@ -190,11 +358,11 @@ test("mapped artifact validation binds all scenario assertions to the same commi
     );
     assert.equal(validated.status, "separate_artifact_passed");
     assert.match(validated.artifactSha256, /^[0-9a-f]{64}$/);
-    artifact.localMappedRegression.runs[1].failed.push(ids[0]);
+    artifact.localMappedRegression.runs[1].scenarioResults[0].testFilter = "misspelled-filter";
     writeFileSync(path, `${JSON.stringify(artifact)}\n`);
     assert.throws(
       () => validateMappedArtifact(path, matrix.scenarios, "d".repeat(40), "0.1.0-alpha.1", "2.0.0", "1.9.0"),
-      /did not pass/,
+      /invalid actual row outcome/,
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -227,10 +395,24 @@ test("release validator accepts only a complete bound 60-run artifact", () => {
     const commit = "e".repeat(40);
     const evidenceRoot = join(directory, "live-compatibility.json.evidence");
     mkdirSync(evidenceRoot, { recursive: true });
+    const actualRows = matrix.scenarios.map((scenario) => ({
+      id: scenario.id,
+      testTarget: scenario.testTarget,
+      testFilter: scenario.testFilter,
+      expectation: scenario.expectation,
+      status: "passed",
+      exitCode: 0,
+    }));
     const mappedEvidence = {
       schemaVersion: 1,
       gitCommit: commit,
-      localMappedRegression: { scenarioCount: 30 },
+      localMappedRegression: {
+        scenarioCount: 30,
+        runs: [
+          { codexVersionSlot: "2.0.0", scenarioResults: structuredClone(actualRows) },
+          { codexVersionSlot: "1.9.0", scenarioResults: structuredClone(actualRows) },
+        ],
+      },
     };
     const mappedBytes = `${JSON.stringify(mappedEvidence)}\n`;
     const mappedPath = join(evidenceRoot, "mapped-compatibility-results.json");
@@ -279,13 +461,54 @@ test("release validator accepts only a complete bound 60-run artifact", () => {
           { role: "previous", version: "1.9.0", binarySha256: "5".repeat(64), scenarios: structuredClone(scenarios) },
         ],
       },
-      codexApp: {
-        current: { status: "passed", build: "current", evidenceSha256: "6".repeat(64) },
-        previous: { status: "unavailable", reason: "not obtainable", checkedAt: "2026-07-13T00:00:00Z" },
-      },
+      codexApp: {},
       liveCodexWorkflowMatrix: { status: "complete", completedRuns: 60 },
       transparentCaptureReleaseGate: { eligible: true },
-      releaseEligibility: { eligible: true, dataLossEvents: 0, seriousStaleApplications: 0 },
+      releaseEligibility: { eligible: true, dataLossEvents: 0 },
+    };
+    const appEvidence = {
+      schemaVersion: 1,
+      evidenceClass: "codex_app_verification",
+      product: "Codex App",
+      status: "passed",
+      build: "current",
+      checkedAt: "2026-07-13T00:00:00Z",
+    };
+    const appBytes = `${JSON.stringify(appEvidence)}\n`;
+    const appPath = join(evidenceRoot, "codex-app", "current.json");
+    mkdirSync(join(evidenceRoot, "codex-app"), { recursive: true });
+    writeFileSync(appPath, appBytes);
+    artifact.codexApp = {
+      current: {
+        status: "passed",
+        build: "current",
+        evidenceSha256: createHash("sha256").update(appBytes).digest("hex"),
+        evidencePath: "live-compatibility.json.evidence/codex-app/current.json",
+      },
+      previous: { status: "unavailable", reason: "not obtainable", checkedAt: "2026-07-13T00:00:00Z" },
+    };
+    const staleEvidence = {
+      schemaVersion: 1,
+      evidenceClass: "serious_stale_application_evaluation",
+      product: "PreviouslyOn",
+      productVersion: "0.1.0-alpha.1",
+      gitCommit: commit,
+      status: "measured",
+      scenariosEvaluated: 60,
+      seriousStaleApplications: 0,
+      evaluatedAt: "2026-07-13T00:00:00Z",
+    };
+    const staleBytes = `${JSON.stringify(staleEvidence)}\n`;
+    const stalePath = join(evidenceRoot, "evaluations", "serious-stale-applications.json");
+    mkdirSync(join(evidenceRoot, "evaluations"), { recursive: true });
+    writeFileSync(stalePath, staleBytes);
+    artifact.releaseEligibility.seriousStaleApplications = {
+      status: "measured",
+      count: 0,
+      scenariosEvaluated: 60,
+      evaluatedAt: "2026-07-13T00:00:00Z",
+      evidenceSha256: createHash("sha256").update(staleBytes).digest("hex"),
+      evidencePath: "live-compatibility.json.evidence/evaluations/serious-stale-applications.json",
     };
     for (const run of artifact.codexCli.runs) {
       for (const scenario of run.scenarios) {
@@ -318,6 +541,15 @@ test("release validator accepts only a complete bound 60-run artifact", () => {
       encoding: "utf8",
     });
     assert.equal(accepted.status, 0, accepted.stderr);
+    const measured = artifact.releaseEligibility.seriousStaleApplications;
+    artifact.releaseEligibility.seriousStaleApplications = 0;
+    writeFileSync(path, `${JSON.stringify(artifact)}\n`);
+    const hardcoded = spawnSync(process.execPath, [validator, path, "--commit", commit, "--product-version", "0.1.0-alpha.1"], {
+      encoding: "utf8",
+    });
+    assert.notEqual(hardcoded.status, 0);
+    assert.match(hardcoded.stderr, /seriousStaleApplications\.status/);
+    artifact.releaseEligibility.seriousStaleApplications = measured;
     artifact.codexCli.runs[1].scenarios[0].scenarioAssertion.testFilter = "wrong-filter";
     writeFileSync(path, `${JSON.stringify(artifact)}\n`);
     const rejected = spawnSync(process.execPath, [validator, path, "--commit", commit, "--product-version", "0.1.0-alpha.1"], {

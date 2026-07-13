@@ -1,8 +1,9 @@
 use chrono::{TimeZone, Utc};
 use previously_on::context_pack::{count_pack_tokens, ContextPackBuilder, MAX_TOKEN_BUDGET};
 use previously_on::domain::{
-    CoverageV1, EvidenceIntegrity, EvidenceV1, FactKind, FactLifecycle, FactV1, Freshness,
-    SCHEMA_VERSION_V1,
+    ChangeAttribution, ChangeStatus, CoverageV1, CurrentValidationV1, EvidenceIntegrity,
+    EvidenceV1, FactKind, FactLifecycle, FactV1, FileChangeV1, Freshness, TemporalRevalidationV1,
+    TemporalStatusV1, MAX_CONTEXT_TEMPORAL_ITEMS, SCHEMA_VERSION_V1,
 };
 
 fn at(second: i64) -> chrono::DateTime<Utc> {
@@ -48,17 +49,21 @@ fn build_is_deterministic_and_excludes_untrusted_or_stale_facts() {
     let facts = vec![
         fact("fact-1", FactLifecycle::Confirmed, Freshness::Fresh, 1),
         fact("fact-stale", FactLifecycle::Pinned, Freshness::Stale, 2),
+        fact("fact-broken", FactLifecycle::Pinned, Freshness::Broken, 3),
+        fact("fact-invalid", FactLifecycle::Invalid, Freshness::Fresh, 4),
         fact(
             "fact-candidate",
             FactLifecycle::Candidate,
             Freshness::Fresh,
-            3,
+            5,
         ),
     ];
     let evidence = vec![
         evidence("evidence-1", 1),
         evidence("evidence-stale", 2),
-        evidence("evidence-candidate", 3),
+        evidence("evidence-broken", 3),
+        evidence("evidence-invalid", 4),
+        evidence("evidence-candidate", 5),
     ];
     let first = ContextPackBuilder::new("repo-1", "task-1")
         .generated_at(at(10))
@@ -120,5 +125,72 @@ fn drops_whole_low_ranked_items_to_respect_hard_envelope_cap() {
     assert!(pack.token_count <= 550);
     assert!(pack.token_count <= MAX_TOKEN_BUDGET);
     assert!(pack.facts.len() < 5);
+    assert_eq!(pack.token_count, count_pack_tokens(&pack).unwrap());
+}
+
+#[test]
+fn temporal_metadata_is_deterministically_bounded_with_explicit_omission_counts() {
+    let changes = (0..100)
+        .rev()
+        .map(|index| FileChangeV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            repository_id: "repo-1".into(),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            path: format!("src/file-{index:03}.rs"),
+            previous_path: None,
+            status: ChangeStatus::Modified,
+            additions: Some(1),
+            deletions: Some(1),
+            attribution: ChangeAttribution::ObservedChangedIn,
+            before_head: Some("before".into()),
+            after_head: Some("after".into()),
+        })
+        .collect::<Vec<_>>();
+    let paths = (0..100)
+        .rev()
+        .map(|index| format!("src/file-{index:03}.rs"))
+        .collect::<Vec<_>>();
+    let temporal = TemporalRevalidationV1 {
+        schema_version: SCHEMA_VERSION_V1,
+        status: TemporalStatusV1::Changed,
+        baseline_head: Some("before".into()),
+        current_head: Some("after".into()),
+        merge_base: Some("before".into()),
+        related_changes: changes,
+        checked_paths: paths.clone(),
+        warnings: Vec::new(),
+    };
+    let current = CurrentValidationV1 {
+        schema_version: SCHEMA_VERSION_V1,
+        status: TemporalStatusV1::Changed,
+        current_head: Some("after".into()),
+        verified_paths: paths,
+        warnings: Vec::new(),
+    };
+
+    let pack = ContextPackBuilder::new("repo-1", "task-1")
+        .generated_at(at(30))
+        .temporal_revalidation(temporal)
+        .current_validation(current)
+        .build(None, vec![], vec![], vec![], vec![], CoverageV1::default())
+        .unwrap();
+    let temporal = pack.temporal_revalidation.as_ref().unwrap();
+    assert_eq!(temporal.checked_paths.len(), MAX_CONTEXT_TEMPORAL_ITEMS);
+    assert_eq!(temporal.related_changes.len(), MAX_CONTEXT_TEMPORAL_ITEMS);
+    assert_eq!(temporal.checked_paths[0], "src/file-000.rs");
+    assert_eq!(temporal.related_changes[0].path, "src/file-000.rs");
+    assert!(temporal
+        .warnings
+        .contains(&"checked_paths_omitted_count=92; limit=8".to_string()));
+    assert!(temporal
+        .warnings
+        .contains(&"related_changes_omitted_count=92; limit=8".to_string()));
+
+    let current = pack.current_validation.as_ref().unwrap();
+    assert_eq!(current.status, TemporalStatusV1::Changed);
+    assert_eq!(current.current_head, None);
+    assert!(current.verified_paths.is_empty());
+    assert!(current.warnings.is_empty());
     assert_eq!(pack.token_count, count_pack_tokens(&pack).unwrap());
 }

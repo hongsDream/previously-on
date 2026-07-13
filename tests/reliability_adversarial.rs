@@ -113,6 +113,131 @@ fn twenty_sessions_replay_duplicate_and_reordered_events_exactly_once() {
     assert_eq!(before, after);
 }
 
+#[test]
+fn purge_removes_legacy_secret_bytes_from_db_sidecars_queue_and_cache() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let database = data.join("previously.sqlite3");
+    let queue = data.join("queue/events.jsonl");
+    let cache = data.join("cache/raw-import.bin");
+    let store = Store::open(&database).unwrap();
+    let mut target = EventEnvelopeV1::new(
+        "legacy-secret-source",
+        "repo-secret",
+        "legacy-secret-session",
+        EventKind::Unknown,
+        Utc::now(),
+        json!({"raw": SECRETS.join(" "), "extra": "credentials.json opaque-basic"}),
+    );
+    store.insert_event(&target).unwrap();
+    store
+        .insert_event(&EventEnvelopeV1::new(
+            "retained-source",
+            "repo-retained",
+            "retained-session",
+            EventKind::Unknown,
+            Utc::now(),
+            json!({"safe": true}),
+        ))
+        .unwrap();
+
+    // Simulate bytes written by an older, pre-redaction build so purge proves physical removal
+    // instead of merely relying on the current ingestion boundary.
+    target.payload = json!({"raw": SECRETS.join(" "), "extra": "credentials.json opaque-basic"});
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER canonical_events_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE canonical_events SET event_json = ?1 WHERE event_id = ?2",
+            rusqlite::params![serde_json::to_string(&target).unwrap(), target.event_id],
+        )
+        .unwrap();
+    drop(connection);
+    std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
+    std::fs::write(
+        &queue,
+        format!("{}\n", serde_json::to_string(&target).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(queue.with_extension("corrupt.jsonl"), SECRETS.join(" ")).unwrap();
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(&cache, SECRETS.join(" ")).unwrap();
+    assert!(tree_contains_marker(&data, "opaque-"));
+
+    store.purge_repository("repo-secret").unwrap();
+    drop(store);
+    let reopened = Store::open(&database).unwrap();
+    assert!(reopened
+        .list_events(Some("repo-secret"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reopened.list_events(Some("repo-retained")).unwrap().len(),
+        1
+    );
+    drop(reopened);
+    assert_no_secrets(&data);
+    assert!(!tree_contains_marker(&data, "legacy-secret-source"));
+}
+
+#[test]
+fn captured_git_snapshots_never_persist_sensitive_relative_path_names() {
+    use std::process::Command;
+
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    let data = temp.path().join("data");
+    std::fs::create_dir_all(repo.join("nested")).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q", repo.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(repo.join("safe.txt"), "safe\n").unwrap();
+    std::fs::write(repo.join(".env.production"), "TOKEN=opaque-relative\n").unwrap();
+    std::fs::write(repo.join("nested/credentials.json"), "opaque-relative\n").unwrap();
+    std::fs::write(repo.join("nested/id_ed25519"), "opaque-relative\n").unwrap();
+
+    let snapshot = previously_on::git::capture_snapshot(&repo).unwrap();
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap();
+    for marker in [
+        ".env.production",
+        "credentials.json",
+        "id_ed25519",
+        "opaque-relative",
+    ] {
+        assert!(!snapshot_json.contains(marker), "snapshot leaked {marker}");
+    }
+
+    let store = Store::open(data.join("previously.sqlite3")).unwrap();
+    store
+        .insert_event(&EventEnvelopeV1::new(
+            "snapshot-source",
+            snapshot.repository_id.clone(),
+            "snapshot-session",
+            EventKind::GitSnapshot,
+            Utc::now(),
+            json!({"git_snapshot": snapshot}),
+        ))
+        .unwrap();
+    let export = serde_json::to_string(&store.export_json(None).unwrap()).unwrap();
+    drop(store);
+    for marker in [
+        ".env.production",
+        "credentials.json",
+        "id_ed25519",
+        "opaque-relative",
+    ] {
+        assert!(!export.contains(marker), "export leaked {marker}");
+        assert!(
+            !tree_contains_marker(&data, marker),
+            "persisted bytes leaked {marker}"
+        );
+    }
+}
+
 fn assert_no_secrets(root: &std::path::Path) {
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
@@ -124,6 +249,16 @@ fn assert_no_secrets(root: &std::path::Path) {
         let bytes = std::fs::read(entry.path()).unwrap();
         assert_bytes_have_no_secrets(&bytes);
     }
+}
+
+fn tree_contains_marker(root: &std::path::Path, marker: &str) -> bool {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .any(|entry| {
+            String::from_utf8_lossy(&std::fs::read(entry.path()).unwrap()).contains(marker)
+        })
 }
 
 fn assert_bytes_have_no_secrets(bytes: &[u8]) {
@@ -140,7 +275,12 @@ fn assert_bytes_have_no_secrets(bytes: &[u8]) {
             "secret leaked into persisted bytes: {raw_value}"
         );
     }
-    for extra in ["opaque-basic", "credentials.json"] {
+    for extra in [
+        "opaque-basic",
+        "credentials.json",
+        ".env.production",
+        "id_ed25519",
+    ] {
         assert!(!text.contains(extra), "secret leaked: {extra}");
     }
     assert!(

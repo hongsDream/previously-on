@@ -1,0 +1,15 @@
+version: 2
+
+# Keep scanning enabled for every path and detector. These entries are the
+# occurrence SHA-256 values for four reviewed, synthetic redaction fixtures.
+# They intentionally do not exclude src/, tests/, fixtures/, or a detector.
+secret:
+  ignored_matches:
+    - name: synthetic UI Basic Auth fixture (incident 34778309)
+      match: 66cd5cc17d3c0dbe1a85d0a58c76faa02699cf0d5568a5baa6a60510f4026614
+    - name: synthetic MCP Basic Auth fixture (incident 34778310)
+      match: 35106a3c612c18c3956a6cccff0ba7dba932fd85a6930824a10fbba1c4c64550
+    - name: synthetic App Server password fixture (incident 34778311)
+      match: 536b9710915ea7d9039854fb792353a003d08327c88aba38e0c83a0b9de1a705
+    - name: synthetic persistence Basic Auth fixture (incident 34778312)
+      match: 27add1d97158728485b65b572fd09de22761f5c35b8bd450e48cee53d2b34db5

@@ -20,10 +20,11 @@ use sha2::{Digest, Sha256};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::context_pack::{build_context_pack, DEFAULT_TOKEN_BUDGET};
+use crate::context_pack::{ContextPackBuilder, DEFAULT_TOKEN_BUDGET};
 use crate::domain::{
-    ChangeStatus, CoverageStatus, EventEnvelopeV1, EventKind, EvidenceIntegrity, FactKind,
-    FactLifecycle, FactV1, Freshness, TaskLifecycle, TestStatus,
+    ChangeStatus, ContinuationReasonV1, ContinuationStateV1, CoverageStatus, EventEnvelopeV1,
+    EventKind, EvidenceIntegrity, FactKind, FactLifecycle, FactV1, Freshness, TaskLifecycle,
+    TemporalStatusV1, TestStatus,
 };
 use crate::redaction::{redact_excerpt, redact_value};
 use crate::store::Store;
@@ -162,6 +163,12 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     let mut capture_degraded = false;
 
     for task in &tasks {
+        let sessions = state
+            .store
+            .get_task_timeline(&task.id)
+            .map_err(ApiError::internal)?
+            .map(|timeline| timeline.sessions)
+            .unwrap_or_default();
         let checkpoints = state
             .store
             .list_checkpoints(&task.id)
@@ -183,19 +190,41 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
             .list_test_results(&task.id)
             .map_err(ApiError::internal)?;
 
-        let repository_path = repository
+        let registered_repository_path = repository
             .filter(|item| item.id == task.repository_id)
             .map(|item| item.path.as_str())
             .filter(|path| !path.is_empty())
             .unwrap_or(&task.repository_id);
-        let task_freshness = crate::git::assess_task_freshness(
+        let repository_path = checkpoints
+            .last()
+            .map(|checkpoint| checkpoint.git_after.root.as_str())
+            .filter(|path| !path.is_empty())
+            .unwrap_or(registered_repository_path);
+        let task_temporal = crate::git::revalidate_task(
             repository_path,
             checkpoints.last().map(|checkpoint| &checkpoint.git_after),
             &changes,
         )
-        .unwrap_or(Freshness::Stale);
+        .unwrap_or_else(|error| crate::domain::TemporalRevalidationV1 {
+            schema_version: crate::domain::SCHEMA_VERSION_V1,
+            status: TemporalStatusV1::Degraded,
+            baseline_head: checkpoints
+                .last()
+                .and_then(|checkpoint| checkpoint.git_after.head.clone()),
+            current_head: None,
+            merge_base: None,
+            related_changes: Vec::new(),
+            checked_paths: Vec::new(),
+            warnings: vec![redact_excerpt(&error.to_string())],
+        });
         for fact in &mut facts {
-            fact.freshness = task_freshness;
+            fact.freshness = crate::mcp::fact_freshness(
+                registered_repository_path,
+                fact,
+                &evidence,
+                &checkpoints,
+                &changes,
+            );
         }
 
         let coverage = if checkpoints.is_empty() {
@@ -213,16 +242,17 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
                 checkpoints.iter().map(|checkpoint| &checkpoint.coverage),
             )
         };
-        if let Ok(pack) = build_context_pack(
-            &task.repository_id,
-            &task.id,
+        let builder = ContextPackBuilder::new(&task.repository_id, &task.id)
+            .token_budget(DEFAULT_TOKEN_BUDGET)
+            .current_validation(crate::git::current_validation(&task_temporal))
+            .temporal_revalidation(task_temporal.clone());
+        if let Ok(pack) = builder.build(
             task.goal.clone(),
             facts.clone(),
             evidence.clone(),
             changes.clone(),
             tests.clone(),
             coverage,
-            Some(DEFAULT_TOKEN_BUDGET),
         ) {
             context_packs.insert(
                 task.id.clone(),
@@ -324,12 +354,63 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
             } else {
                 checkpoint.coverage.captured.len() * 100 / coverage_total
             };
-            let freshness = crate::git::assess_task_freshness(
-                repository_path,
+            let temporal = crate::git::revalidate_task(
+                if checkpoint.git_after.root.is_empty() {
+                    registered_repository_path
+                } else {
+                    checkpoint.git_after.root.as_str()
+                },
                 Some(&checkpoint.git_after),
                 &checkpoint.changed_files,
             )
-            .unwrap_or(Freshness::Stale);
+            .unwrap_or_else(|error| crate::domain::TemporalRevalidationV1 {
+                schema_version: crate::domain::SCHEMA_VERSION_V1,
+                status: TemporalStatusV1::Degraded,
+                baseline_head: checkpoint.git_after.head.clone(),
+                current_head: None,
+                merge_base: None,
+                related_changes: Vec::new(),
+                checked_paths: Vec::new(),
+                warnings: vec![redact_excerpt(&error.to_string())],
+            });
+            let freshness = temporal_freshness(temporal.status);
+            let session = sessions
+                .iter()
+                .find(|session| session.id == checkpoint.session_id);
+            let context_usage = session.and_then(|session| {
+                session.context_usage.as_ref().map(|usage| {
+                    json!({
+                        "totalTokens": usage.total_tokens,
+                        "modelContextWindow": usage.model_context_window,
+                        "observedAt": usage.observed_at.map(iso)
+                    })
+                })
+            });
+            let continuation_advice = session.and_then(|session| {
+                (session.continuation_state != ContinuationStateV1::Normal).then(|| {
+                    let mut reasons = Vec::new();
+                    if session.compaction_count >= 6 {
+                        reasons.push(ContinuationReasonV1::CompactionLimit);
+                    }
+                    if session
+                        .context_usage
+                        .as_ref()
+                        .and_then(crate::domain::ContextUsageV1::utilization)
+                        .is_some_and(|ratio| ratio >= 0.8)
+                    {
+                        reasons.push(ContinuationReasonV1::ContextUsageLimit);
+                    }
+                    json!({
+                        "action": "new_thread",
+                        "reasons": reasons,
+                        "taskId": task.id,
+                        "taskTitle": task.title,
+                        "lastActivityAt": session.last_activity_at.map(iso),
+                        "compactionCount": session.compaction_count,
+                        "contextUsage": context_usage.clone()
+                    })
+                })
+            });
             let state_name = if facts.iter().any(|fact| {
                 matches!(
                     fact.lifecycle,
@@ -359,7 +440,27 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
                 "coverage": coverage_percent,
                 "coverageDelta": 0,
                 "freshness": freshness_name(freshness),
-                "state": state_name
+                "state": state_name,
+                "sourceThreadId": session.and_then(|value| value.source_thread_id.clone()),
+                "lastActivityAt": session.and_then(|value| value.last_activity_at.map(iso)),
+                "turnCount": session.map(|value| value.turn_count),
+                "compactionCount": session.map(|value| value.compaction_count),
+                "contextUsage": context_usage,
+                "continuationState": session.map(|value| continuation_state_name(value.continuation_state)),
+                "continuationAdvice": continuation_advice,
+                "temporalRevalidation": {
+                    "status": temporal_status_name(temporal.status),
+                    "baselineSha": temporal.baseline_head,
+                    "currentSha": temporal.current_head,
+                    "changes": temporal.related_changes.iter().map(|change| json!({
+                        "path": change.path,
+                        "previousPath": change.previous_path,
+                        "status": change_status(change.status),
+                        "additions": change.additions,
+                        "deletions": change.deletions
+                    })).collect::<Vec<_>>(),
+                    "warnings": temporal.warnings
+                }
             }));
         }
 
@@ -575,16 +676,21 @@ async fn revalidate_fact(
             .store
             .list_checkpoints(&fact.task_id)
             .map_err(ApiError::internal)?;
+        let evidence = state
+            .store
+            .list_evidence(&fact.task_id)
+            .map_err(ApiError::internal)?;
         let files = state
             .store
             .list_file_changes(&fact.task_id)
             .map_err(ApiError::internal)?;
-        fact.freshness = crate::git::assess_task_freshness(
-            &fact.repository_id,
-            checkpoints.last().map(|checkpoint| &checkpoint.git_after),
-            &files,
-        )
-        .unwrap_or(Freshness::Stale);
+        let repository_path = checkpoints
+            .last()
+            .map(|checkpoint| checkpoint.git_after.root.as_str())
+            .filter(|path| !path.is_empty())
+            .unwrap_or(&fact.repository_id);
+        fact.freshness =
+            crate::mcp::fact_freshness(repository_path, &fact, &evidence, &checkpoints, &files);
     } else {
         fact.freshness = Freshness::Broken;
     }
@@ -816,7 +922,34 @@ fn freshness_name(value: Freshness) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
+fn temporal_freshness(value: TemporalStatusV1) -> Freshness {
+    match value {
+        TemporalStatusV1::Unchanged => Freshness::Fresh,
+        TemporalStatusV1::Broken => Freshness::Broken,
+        TemporalStatusV1::Changed | TemporalStatusV1::Diverged | TemporalStatusV1::Degraded => {
+            Freshness::Stale
+        }
+    }
+}
+
+fn temporal_status_name(value: TemporalStatusV1) -> &'static str {
+    match value {
+        TemporalStatusV1::Unchanged => "unchanged",
+        TemporalStatusV1::Changed => "changed",
+        TemporalStatusV1::Diverged => "diverged",
+        TemporalStatusV1::Broken => "broken",
+        TemporalStatusV1::Degraded => "degraded",
+    }
+}
+
+fn continuation_state_name(value: ContinuationStateV1) -> &'static str {
+    match value {
+        ContinuationStateV1::Normal => "normal",
+        ContinuationStateV1::Eligible => "eligible",
+        ContinuationStateV1::Suggested => "suggested",
+    }
+}
+
 fn change_status(value: ChangeStatus) -> &'static str {
     match value {
         ChangeStatus::Added => "added",
@@ -833,8 +966,21 @@ fn change_status(value: ChangeStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{EvidenceV1, FactKind, RepositoryV1, TaskV1, SCHEMA_VERSION_V1};
+    use crate::domain::{
+        ChangeAttribution, CheckpointV1, CoverageV1, EvidenceV1, FactKind, FileChangeV1,
+        RepositoryV1, TaskV1, SCHEMA_VERSION_V1,
+    };
     use tempfile::TempDir;
+
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
 
     fn authorized_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1020,6 +1166,182 @@ mod tests {
         assert_eq!(
             store.get_task("task-1").unwrap().unwrap().lifecycle,
             TaskLifecycle::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn old_fact_uses_its_evidence_checkpoint_in_bootstrap_and_manual_revalidation() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.name", "PreviouslyOn Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "previously-on@example.invalid"],
+        );
+        std::fs::write(
+            repo.join("src/auth.rs"),
+            "pub const MODE: &str = \"old\";\n",
+        )
+        .unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "old auth decision"]);
+
+        let baseline_a = crate::git::capture_snapshot(&repo).unwrap();
+        let repository_id = baseline_a.repository_id.clone();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let at = Utc::now();
+        store
+            .upsert_repository(&RepositoryV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: repository_id.clone(),
+                path: repo.to_string_lossy().into_owned(),
+                remote_url: None,
+                created_at: at,
+                updated_at: at,
+            })
+            .unwrap();
+        store
+            .upsert_task(&TaskV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: "task-old-fact".to_string(),
+                repository_id: repository_id.clone(),
+                title: "Authentication decision".to_string(),
+                goal: Some("Keep authentication behavior current".to_string()),
+                lifecycle: TaskLifecycle::Active,
+                branch: Some("main".to_string()),
+                created_at: at,
+                updated_at: at,
+            })
+            .unwrap();
+        let change_a = FileChangeV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            repository_id: repository_id.clone(),
+            session_id: "session-a".to_string(),
+            task_id: Some("task-old-fact".to_string()),
+            path: "src/auth.rs".to_string(),
+            previous_path: None,
+            status: ChangeStatus::Modified,
+            additions: Some(1),
+            deletions: Some(1),
+            attribution: ChangeAttribution::ObservedChangedIn,
+            before_head: baseline_a.head.clone(),
+            after_head: baseline_a.head.clone(),
+        };
+        store
+            .upsert_checkpoint(&CheckpointV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: "checkpoint-a".to_string(),
+                repository_id: repository_id.clone(),
+                task_id: "task-old-fact".to_string(),
+                session_id: "session-a".to_string(),
+                created_at: at,
+                goal_hint: None,
+                git_before: None,
+                git_after: baseline_a,
+                changed_files: vec![change_a],
+                tests: Vec::new(),
+                failures: Vec::new(),
+                unresolved_items: Vec::new(),
+                coverage: CoverageV1::default(),
+            })
+            .unwrap();
+        let mut evidence = EvidenceV1::new(
+            "evidence-old-fact",
+            &repository_id,
+            "task-old-fact",
+            "session-a",
+            "source-old-fact",
+            "Use the old authentication mode",
+            at,
+        );
+        evidence.fact_id = Some("fact-old".to_string());
+        store.upsert_evidence(&evidence).unwrap();
+        store
+            .upsert_fact(&FactV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: "fact-old".to_string(),
+                repository_id: repository_id.clone(),
+                task_id: "task-old-fact".to_string(),
+                kind: FactKind::Decision,
+                lifecycle: FactLifecycle::Confirmed,
+                freshness: Freshness::Fresh,
+                content: "Use the old authentication mode".to_string(),
+                evidence_ids: vec!["evidence-old-fact".to_string()],
+                superseded_by: None,
+                created_at: at,
+                updated_at: at,
+            })
+            .unwrap();
+
+        std::fs::write(
+            repo.join("src/auth.rs"),
+            "pub const MODE: &str = \"new\";\n",
+        )
+        .unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "replace auth decision"]);
+        let baseline_b = crate::git::capture_snapshot(&repo).unwrap();
+        store
+            .upsert_checkpoint(&CheckpointV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: "checkpoint-b".to_string(),
+                repository_id: repository_id.clone(),
+                task_id: "task-old-fact".to_string(),
+                session_id: "session-b".to_string(),
+                created_at: at + chrono::Duration::seconds(1),
+                goal_hint: None,
+                git_before: None,
+                git_after: baseline_b.clone(),
+                changed_files: vec![FileChangeV1 {
+                    schema_version: SCHEMA_VERSION_V1,
+                    repository_id: repository_id.clone(),
+                    session_id: "session-b".to_string(),
+                    task_id: Some("task-old-fact".to_string()),
+                    path: "src/auth.rs".to_string(),
+                    previous_path: None,
+                    status: ChangeStatus::Modified,
+                    additions: Some(1),
+                    deletions: Some(1),
+                    attribution: ChangeAttribution::ObservedChangedIn,
+                    before_head: baseline_b.head.clone(),
+                    after_head: baseline_b.head.clone(),
+                }],
+                tests: Vec::new(),
+                failures: Vec::new(),
+                unresolved_items: Vec::new(),
+                coverage: CoverageV1::default(),
+            })
+            .unwrap();
+
+        let state = AppState {
+            store: store.clone(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+        let Json(payload) = bootstrap(State(state.clone()), authorized_headers())
+            .await
+            .unwrap();
+        let old_evidence = payload["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "evidence-old-fact")
+            .unwrap();
+        assert_eq!(old_evidence["freshness"], "stale");
+
+        let Json(response) = revalidate_fact(
+            State(state),
+            authorized_headers(),
+            Path("fact-old".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["freshness"], "stale");
+        assert_eq!(
+            store.get_fact("fact-old").unwrap().unwrap().freshness,
+            Freshness::Stale
         );
     }
 

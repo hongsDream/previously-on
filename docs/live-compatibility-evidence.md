@@ -20,10 +20,23 @@ Required top-level fields:
   "releaseEligibility": {
     "eligible": true,
     "dataLossEvents": 0,
-    "seriousStaleApplications": 0
+    "seriousStaleApplications": {
+      "status": "measured",
+      "count": 0,
+      "scenariosEvaluated": 60,
+      "evaluatedAt": "ISO-8601 timestamp",
+      "evidenceSha256": "64-character-digest",
+      "evidencePath": "live-compatibility.json.evidence/evaluations/serious-stale-applications.json"
+    }
   }
 }
 ```
+
+`seriousStaleApplications` is not inferred from the workflow harness. Without a separately
+reviewed evaluator artifact it is recorded as `{ "status": "unmeasured" }`, and automatic
+release eligibility remains false. The retained evaluator artifact must bind the product version
+and Git commit, state how many scenarios were evaluated, record an ISO timestamp, and report the
+observed serious-stale count.
 
 `codexCli.runs` contains exactly two entries with roles `latest` and `previous`. Their stable
 semantic versions must equal the two versions resolved from npm when the tag runs. Each entry
@@ -76,9 +89,27 @@ regression JSON is copied into the evidence directory and bound by its own SHA-2
 opens every referenced file, rejects reused or escaping paths, verifies its digest and identity,
 and rejects raw prompt/tool/source/credential/path fields.
 
-`codexApp.current` must contain `status: "passed"`, a non-empty `build`, and an evidence digest.
-`codexApp.previous` has the same shape when obtainable. If the prior build is genuinely not
-obtainable, it may instead contain `status: "unavailable"`, a non-empty `reason`, and `checkedAt`.
+## Resuming an interrupted producer run
+
+The producer checkpoints the JSON artifact and retained scenario verdict after each completed
+workflow. To continue an interrupted 60-workflow run, repeat the original live command with
+`--resume` and the same `--output` path. Resume never trusts the stored completed-run count: it
+revalidates every passed row against its referenced retained evidence file and SHA-256 digest,
+recomputes the checkpoint set, and reruns failed or incomplete scenarios.
+
+Resume is permitted only for the same evidence identity. The clean Git commit, product version,
+PreviouslyOn binary digest, both Codex binary digests and versions, fixture-contract digest,
+scenario-matrix digest, mapped-artifact digest, runner identity, and supplied Codex App evidence
+must remain bound to the original artifact. A missing or modified evidence file, changed binding,
+or incompatible artifact fails closed. Start a new output/evidence path and generate a new
+artifact instead of reusing checkpoints across that boundary.
+
+`codexApp.current` must reference a retained sanitized `codex_app_verification` JSON file with a
+non-empty build, ISO timestamp, status, path, and matching SHA-256. A `degraded` current result is
+recorded truthfully but is not release-eligible. `codexApp.previous` has the same retained-file
+shape when obtainable. If the prior build is genuinely not obtainable, it may instead contain
+`status: "unavailable"`, a non-empty `reason`, and `checkedAt`. Resume reopens every passed or
+degraded App evidence file and rejects missing, symlinked, modified, or identity-mismatched bytes.
 
 The protected release environment pins the entire tarball with
 `LIVE_COMPATIBILITY_BUNDLE_SHA256` and downloads it only from
