@@ -7,6 +7,7 @@ VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' 
 EXPECTED_VERSION="${EXPECTED_VERSION:-0.1.0-alpha.1}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/outputs}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
+RELEASE_GIT_COMMIT=""
 
 [[ "$PACKAGE_NAME" == "previously-on" ]] || { echo "error: unexpected package: $PACKAGE_NAME" >&2; exit 1; }
 [[ "$VERSION" == "$EXPECTED_VERSION" ]] || { echo "error: expected $EXPECTED_VERSION, found $VERSION" >&2; exit 1; }
@@ -29,6 +30,9 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   echo "error: release builds require a clean checkout (set RELEASE_ALLOW_DIRTY=1 only for local rehearsal)" >&2
   exit 1
 fi
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  RELEASE_GIT_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+fi
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
@@ -47,7 +51,14 @@ echo "==> quality gates"
   npm --prefix ui run build
   npm --prefix ui audit --audit-level=high
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ "${RELEASE_ALLOW_DIRTY:-0}" != "1" ]]; then
-    git diff --exit-code -- ui/dist
+    [[ "$(git rev-parse HEAD)" == "$RELEASE_GIT_COMMIT" ]] || {
+      echo "error: HEAD changed while the release gates were running" >&2
+      exit 1
+    }
+    [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || {
+      echo "error: tracked or non-ignored files changed while the release gates were running" >&2
+      exit 1
+    }
   fi
   cargo fmt --check
   cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -66,7 +77,10 @@ cmp "$ROOT/THIRD_PARTY_LICENSES.md" "$STAGE/THIRD_PARTY_LICENSES.md" || {
 echo "==> crates.io package and extracted-source offline install"
 (
   cd "$ROOT"
-  cargo package --locked
+  # ui/dist is generated from a clean checkout and intentionally ignored by Git,
+  # but Cargo includes it in the crate. The clean/HEAD checks above constrain the
+  # otherwise necessary --allow-dirty exception to these generated assets.
+  cargo package --locked --allow-dirty
 )
 CRATE_ARCHIVE="$TARGET_DIR/package/$PACKAGE_NAME-$VERSION.crate"
 [[ -f "$CRATE_ARCHIVE" ]] || { echo "error: cargo package did not produce $CRATE_ARCHIVE" >&2; exit 1; }
