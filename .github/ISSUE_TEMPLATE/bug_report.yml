@@ -17,7 +17,7 @@ body:
     id: codex
     attributes:
       label: Codex version and surface
-      placeholder: Codex CLI 0.144.2 or Codex App build
+      placeholder: Codex CLI 0.144.3 or Codex App build
     validations:
       required: true
   - type: dropdown

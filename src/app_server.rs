@@ -18,8 +18,8 @@ use crate::domain::{
 };
 use crate::APP_VERSION;
 
-pub const TESTED_CODEX_VERSION: &str = "0.144.2";
-pub const SUPPORTED_CODEX_VERSIONS: [&str; 2] = ["0.144.2", "0.144.1"];
+pub const TESTED_CODEX_VERSION: &str = "0.144.3";
+pub const SUPPORTED_CODEX_VERSIONS: [&str; 2] = ["0.144.3", "0.144.2"];
 const MAX_PAGES: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

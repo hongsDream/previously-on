@@ -14,20 +14,20 @@ async fn uses_only_documented_app_server_initialize_list_and_read_shapes() {
         r#"#!/bin/sh
 IFS= read -r initialize
 case "$initialize" in *'"method":"initialize"'*'"clientInfo"'*) ;; *) exit 10 ;; esac
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.2"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-cli/0.144.3"}}'
 IFS= read -r initialized
 case "$initialized" in *'"method":"initialized"'*) ;; *) exit 11 ;; esac
 IFS= read -r list
 case "$list" in *'"method":"thread/list"'*'"cwd":"/tmp/repo"'*) ;; *) exit 12 ;; esac
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.2","createdAt":100,"cwd":"/tmp/repo","ephemeral":false,"id":"thread-1","modelProvider":"openai","preview":"hello","sessionId":"session-1","source":"cli","status":{"type":"idle"},"turns":[],"updatedAt":101}],"nextCursor":"page-2"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":100,"cwd":"/tmp/repo","ephemeral":false,"id":"thread-1","modelProvider":"openai","preview":"hello","sessionId":"session-1","source":"cli","status":{"type":"idle"},"turns":[],"updatedAt":101}],"nextCursor":"page-2"}}'
 IFS= read -r list_page_2
 case "$list_page_2" in *'"method":"thread/list"'*'"cursor":"page-2"'*) ;; *) exit 16 ;; esac
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"data":[{"cliVersion":"0.144.1","createdAt":90,"cwd":"/tmp/repo","ephemeral":false,"id":"thread-2","modelProvider":"openai","preview":"older","sessionId":"session-2","source":"cli","status":{"type":"idle"},"turns":[],"updatedAt":91}],"nextCursor":null}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"data":[{"cliVersion":"0.144.2","createdAt":90,"cwd":"/tmp/repo","ephemeral":false,"id":"thread-2","modelProvider":"openai","preview":"older","sessionId":"session-2","source":"cli","status":{"type":"idle"},"turns":[],"updatedAt":91}],"nextCursor":null}}'
 IFS= read -r read_thread
 case "$read_thread" in *'"method":"thread/read"'*) ;; *) exit 13 ;; esac
 case "$read_thread" in *'"threadId":"thread-1"'*) ;; *) exit 14 ;; esac
 case "$read_thread" in *'"includeTurns":true'*) ;; *) exit 15 ;; esac
-printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"cliVersion":"0.144.2","createdAt":100,"cwd":"/tmp/repo","ephemeral":false,"id":"thread-1","modelProvider":"openai","preview":"hello","sessionId":"session-1","source":"cli","status":{"type":"idle"},"turns":[{"id":"turn-1","items":[],"status":"completed"}],"updatedAt":101}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"cliVersion":"0.144.3","createdAt":100,"cwd":"/tmp/repo","ephemeral":false,"id":"thread-1","modelProvider":"openai","preview":"hello","sessionId":"session-1","source":"cli","status":{"type":"idle"},"turns":[{"id":"turn-1","items":[],"status":"completed"}],"updatedAt":101}}}'
 "#,
     )
     .unwrap();
@@ -69,10 +69,10 @@ async fn isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields() 
     let (_temp, fake) = fake_codex(
         r#"#!/bin/sh
 IFS= read -r initialize
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.2"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
 IFS= read -r initialized
 IFS= read -r list
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.2","createdAt":3,"cwd":"/tmp/repo","id":"thread-deleted","preview":"gone","sessionId":"session-deleted","updatedAt":4},{"cliVersion":"0.141.0","createdAt":2,"cwd":"/tmp/repo","id":"thread-compact","preview":"compact","sessionId":"session-compact","updatedAt":3},{"cliVersion":"0.144.1","createdAt":1,"cwd":"/tmp/repo","id":"thread-good","preview":"good","updatedAt":2}],"nextCursor":null}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":3,"cwd":"/tmp/repo","id":"thread-deleted","preview":"gone","sessionId":"session-deleted","updatedAt":4},{"cliVersion":"0.141.0","createdAt":2,"cwd":"/tmp/repo","id":"thread-compact","preview":"compact","sessionId":"session-compact","updatedAt":3},{"cliVersion":"0.144.2","createdAt":1,"cwd":"/tmp/repo","id":"thread-good","preview":"good","updatedAt":2}],"nextCursor":null}}'
 IFS= read -r deleted
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32004,"message":"thread not found","data":{"kind":"thread_not_found","threadId":"thread-deleted"}}}'
 IFS= read -r compact
@@ -144,12 +144,12 @@ async fn repeated_cursor_keeps_validated_pages_and_stops_degraded() {
     let (_temp, fake) = fake_codex(
         r#"#!/bin/sh
 IFS= read -r initialize
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.2"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
 IFS= read -r initialized
 IFS= read -r list
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.2","createdAt":1,"cwd":"/tmp/repo","id":"thread-1","preview":"one","sessionId":"session-1","updatedAt":2}],"nextCursor":"repeat"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":1,"cwd":"/tmp/repo","id":"thread-1","preview":"one","sessionId":"session-1","updatedAt":2}],"nextCursor":"repeat"}}'
 IFS= read -r list_again
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"data":[{"cliVersion":"0.144.1","createdAt":2,"cwd":"/tmp/repo","id":"thread-2","preview":"two","sessionId":"session-2","updatedAt":3}],"nextCursor":"repeat"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"data":[{"cliVersion":"0.144.2","createdAt":2,"cwd":"/tmp/repo","id":"thread-2","preview":"two","sessionId":"session-2","updatedAt":3}],"nextCursor":"repeat"}}'
 "#,
     );
     let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
@@ -176,7 +176,7 @@ async fn malformed_page_is_contained_without_accepting_partial_items() {
     let (_temp, fake) = fake_codex(
         r#"#!/bin/sh
 IFS= read -r initialize
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.2"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
 IFS= read -r initialized
 IFS= read -r list
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":"not-an-array","nextCursor":null}}'
@@ -243,7 +243,7 @@ fn documented_turn_items_project_to_bounded_idempotent_lineage_events() {
         id: "thread-semantic".to_string(),
         session_id: "session-semantic".to_string(),
         cwd: repo.clone(),
-        cli_version: "0.144.2".to_string(),
+        cli_version: "0.144.3".to_string(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_010,
         coverage: CoverageV1::default(),
