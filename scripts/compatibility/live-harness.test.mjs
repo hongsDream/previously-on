@@ -68,6 +68,15 @@ test("evidence verifier requires prompt final paired file tools tests and stable
     ),
     event("session_stopped", { last_assistant_message: fixture.RESUME_FINAL }),
   ];
+  events.splice(
+    1,
+    0,
+    event("tool_started", {
+      tool_use_id: "failed-tool-initial",
+      tool_name: "apply_patch",
+      tool_input: { command: `*** Update File: state.txt\n+${fixture.INITIAL_VALUE}` },
+    }),
+  );
   const verified = verifyScenarioEvidence({
     fixture,
     exportData: { canonical_events: events },

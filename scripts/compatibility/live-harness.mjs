@@ -594,16 +594,18 @@ function findAssistantFinal(events, needle, sessionId) {
 }
 
 function findToolPair(events, sessionId, pathNeedle, valueNeedle) {
-  const pre = events.find(
+  const candidates = events.filter(
     (event) => event.kind === "tool_started" && event.session_id === sessionId && includesBoth(event.payload, pathNeedle, valueNeedle),
   );
-  if (!pre) return null;
-  const toolUseId = toolId(pre.payload);
-  if (!toolUseId) return null;
-  const post = events.find(
-    (event) => event.kind === "tool_finished" && event.session_id === sessionId && toolId(event.payload) === toolUseId,
-  );
-  return post ? { pre, post, toolUseId } : null;
+  for (const pre of candidates) {
+    const toolUseId = toolId(pre.payload);
+    if (!toolUseId) continue;
+    const post = events.find(
+      (event) => event.kind === "tool_finished" && event.session_id === sessionId && toolId(event.payload) === toolUseId,
+    );
+    if (post) return { pre, post, toolUseId };
+  }
+  return null;
 }
 
 function toolId(payload) {
