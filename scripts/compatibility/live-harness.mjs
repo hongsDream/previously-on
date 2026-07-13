@@ -81,12 +81,13 @@ export function validateFixtureContract(matrix, contract) {
 }
 
 export function buildWorkflowFixture(scenario, contract) {
+  const workflowMarker = scenario.id.replace(/secret/gi, "redacted");
   const replacements = {
-    SCENARIO_ID: scenario.id,
-    INITIAL_VALUE: render(contract.fixture.initialValueTemplate, { SCENARIO_ID: scenario.id }),
-    RESUME_VALUE: render(contract.fixture.resumeValueTemplate, { SCENARIO_ID: scenario.id }),
-    INITIAL_FINAL: render(contract.fixture.initialFinalTemplate, { SCENARIO_ID: scenario.id }),
-    RESUME_FINAL: render(contract.fixture.resumeFinalTemplate, { SCENARIO_ID: scenario.id }),
+    SCENARIO_ID: workflowMarker,
+    INITIAL_VALUE: render(contract.fixture.initialValueTemplate, { SCENARIO_ID: workflowMarker }),
+    RESUME_VALUE: render(contract.fixture.resumeValueTemplate, { SCENARIO_ID: workflowMarker }),
+    INITIAL_FINAL: render(contract.fixture.initialFinalTemplate, { SCENARIO_ID: workflowMarker }),
+    RESUME_FINAL: render(contract.fixture.resumeFinalTemplate, { SCENARIO_ID: workflowMarker }),
   };
   return {
     id: scenario.id,

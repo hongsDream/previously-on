@@ -33,6 +33,14 @@ test("live fixture contract expands to 60 two-turn workflow slots without execut
   assert.match(plan.workflows[0].resumePrompt, /verify\.sh/);
 });
 
+test("live workflow markers never collide with the secret redaction corpus", () => {
+  const scenario = matrix.scenarios.find(({ id }) => id === "privacy-secret-corpus");
+  const fixture = buildWorkflowFixture(scenario, contract);
+  assert.equal(fixture.id, "privacy-secret-corpus");
+  assert.doesNotMatch(fixture.initialPrompt, /secret/i);
+  assert.match(fixture.initialPrompt, /privacy-redacted-corpus/);
+});
+
 test("evidence verifier requires prompt final paired file tools tests and stable linked IDs", () => {
   const fixture = buildWorkflowFixture(matrix.scenarios[0], contract);
   const sessionId = "019f0000-0000-7000-8000-000000000001";
