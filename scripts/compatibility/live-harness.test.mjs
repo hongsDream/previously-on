@@ -11,8 +11,10 @@ import {
   buildDryRunPlan,
   buildWorkflowFixture,
   computeEligibility,
+  finalizeCompletedArtifact,
   packageEvidenceBundle,
   prepareResumeArtifact,
+  requireLiveArguments,
   validateMappedArtifact,
   validateFixtureContract,
   verifyScenarioEvidence,
@@ -20,6 +22,143 @@ import {
 
 const matrix = JSON.parse(readFileSync(new URL("../../fixtures/compatibility/scenarios.json", import.meta.url), "utf8"));
 const contract = JSON.parse(readFileSync(new URL("../../fixtures/compatibility/live-workflow-contract.json", import.meta.url), "utf8"));
+
+function createFinalizeFixture() {
+  const directory = mkdtempSync(join(tmpdir(), "previously-live-finalize-test-"));
+  const output = join(directory, "live-compatibility.json");
+  const evidenceRoot = join(directory, "live-compatibility.json.evidence");
+  mkdirSync(evidenceRoot, { recursive: true });
+  const mappedBytes = "retained mapped evidence\n";
+  const mappedSha = createHash("sha256").update(mappedBytes).digest("hex");
+  writeFileSync(join(evidenceRoot, "mapped-compatibility-results.json"), mappedBytes);
+  const reconstruction = Object.fromEntries(contract.requiredReconstruction.map((field) => [field, true]));
+  const runs = [
+    { role: "latest", version: "2.0.0", binarySha256: "4".repeat(64), scenarios: [] },
+    { role: "previous", version: "1.9.0", binarySha256: "5".repeat(64), scenarios: [] },
+  ];
+  for (const run of runs) {
+    for (const scenario of matrix.scenarios) {
+      const scenarioAssertion = {
+        status: "passed",
+        testTarget: scenario.testTarget,
+        testFilter: scenario.testFilter,
+        expectation: scenario.expectation,
+        mappedArtifactSha256: mappedSha,
+      };
+      const evidence = {
+        schemaVersion: 1,
+        role: run.role,
+        codexVersion: run.version,
+        scenario: { id: scenario.id, category: scenario.category },
+        scenarioAssertion,
+        verification: { passed: true, reconstruction },
+      };
+      const bytes = `${JSON.stringify(evidence)}\n`;
+      const path = join(evidenceRoot, run.role, scenario.id, "evidence.json");
+      mkdirSync(join(evidenceRoot, run.role, scenario.id), { recursive: true });
+      writeFileSync(path, bytes);
+      run.scenarios.push({
+        id: scenario.id,
+        category: scenario.category,
+        status: "passed",
+        reconstruction,
+        scenarioAssertion,
+        dataLossEvents: 0,
+        evidenceSha256: createHash("sha256").update(bytes).digest("hex"),
+        evidencePath: `live-compatibility.json.evidence/${run.role}/${scenario.id}/evidence.json`,
+      });
+    }
+  }
+  const appEvidence = {
+    schemaVersion: 1,
+    evidenceClass: "codex_app_verification",
+    product: "Codex App",
+    status: "passed",
+    build: "current-build",
+    checkedAt: "2026-07-13T00:00:00Z",
+  };
+  const appBytes = `${JSON.stringify(appEvidence)}\n`;
+  const appPath = join(evidenceRoot, "codex-app", "current.json");
+  mkdirSync(join(evidenceRoot, "codex-app"), { recursive: true });
+  writeFileSync(appPath, appBytes);
+  const codexApp = {
+    current: {
+      status: "passed",
+      build: "current-build",
+      evidenceSha256: createHash("sha256").update(appBytes).digest("hex"),
+      evidencePath: "live-compatibility.json.evidence/codex-app/current.json",
+    },
+    previous: { status: "unavailable", reason: "not obtainable", checkedAt: "2026-07-13T00:00:00Z" },
+  };
+  const categories = Object.fromEntries(
+    Object.entries(matrix.scenarios.reduce((counts, scenario) => {
+      counts[scenario.category] = (counts[scenario.category] ?? 0) + 1;
+      return counts;
+    }, {})),
+  );
+  const expected = {
+    productVersion: "0.1.0-alpha.1",
+    gitCommit: "d".repeat(40),
+    runner: { os: "macOS", arch: "arm64" },
+    categories,
+    fixtureContractSha256: "1".repeat(64),
+    scenarioMatrixSha256: "2".repeat(64),
+    previouslyBinarySha256: "3".repeat(64),
+    codexRuns: runs.map(({ role, version, binarySha256 }) => ({ role, version, binarySha256, scenarios: [] })),
+    codexApp,
+    mappedArtifactSha256: mappedSha,
+    scenarioIds: matrix.scenarios.map(({ id }) => id),
+    scenarios: matrix.scenarios,
+  };
+  const artifact = {
+    schemaVersion: 1,
+    evidenceClass: "live_codex_workflow_matrix",
+    product: "PreviouslyOn",
+    productVersion: expected.productVersion,
+    gitCommit: expected.gitCommit,
+    generatedAt: "2026-07-13T00:00:00Z",
+    supportMode: "explicit_run_and_import",
+    runner: expected.runner,
+    categories,
+    fixtureContractSha256: expected.fixtureContractSha256,
+    scenarioMatrixSha256: expected.scenarioMatrixSha256,
+    previouslyBinarySha256: expected.previouslyBinarySha256,
+    codexCli: { runs },
+    codexApp,
+    localMappedRegression: { artifactSha256: mappedSha, gitCommit: expected.gitCommit },
+    liveCodexWorkflowMatrix: { status: "complete", requiredRuns: 60, completedRuns: 60 },
+    transparentCaptureReleaseGate: { eligible: false, reason: "serious stale applications remain unmeasured" },
+    releaseEligibility: {
+      eligible: false,
+      dataLossEvents: 0,
+      seriousStaleApplications: { status: "unmeasured", reason: "not evaluated" },
+    },
+  };
+  const staleEvidence = {
+    schemaVersion: 1,
+    evidenceClass: "serious_stale_application_evaluation",
+    product: "PreviouslyOn",
+    productVersion: expected.productVersion,
+    gitCommit: expected.gitCommit,
+    status: "measured",
+    scenariosEvaluated: 60,
+    seriousStaleApplications: 0,
+    evaluatedAt: "2026-07-13T01:00:00Z",
+  };
+  const staleBytes = `${JSON.stringify(staleEvidence)}\n`;
+  const stalePath = join(evidenceRoot, "evaluations", "serious-stale-applications.json");
+  mkdirSync(join(evidenceRoot, "evaluations"), { recursive: true });
+  writeFileSync(stalePath, staleBytes);
+  const measured = {
+    status: "measured",
+    count: 0,
+    scenariosEvaluated: 60,
+    evaluatedAt: staleEvidence.evaluatedAt,
+    evidenceSha256: createHash("sha256").update(staleBytes).digest("hex"),
+    evidencePath: "live-compatibility.json.evidence/evaluations/serious-stale-applications.json",
+  };
+  return { directory, output, evidenceRoot, expected, artifact, measured, stalePath, staleBytes };
+}
 
 test("live fixture contract expands to 60 two-turn workflow slots without executing sessions", () => {
   const validated = validateFixtureContract(matrix, contract);
@@ -32,6 +171,23 @@ test("live fixture contract expands to 60 two-turn workflow slots without execut
   assert.equal(plan.workflows.length, 30);
   assert.match(plan.workflows[0].initialPrompt, /apply_patch/);
   assert.match(plan.workflows[0].resumePrompt, /verify\.sh/);
+});
+
+test("normal live and resume modes reject pre-attached stale evaluation evidence", () => {
+  for (const resume of [false, true]) {
+    assert.throws(
+      () => requireLiveArguments(
+        {
+          confirm: contract.confirmationPhrase,
+          resume,
+          staleEvaluationArtifact: "/tmp/stale-evaluation.json",
+          staleEvaluationSha256: "a".repeat(64),
+        },
+        contract,
+      ),
+      /finalize-only; live run\/resume must remain unmeasured/,
+    );
+  }
 });
 
 test("live workflow markers never collide with the secret redaction corpus", () => {
@@ -311,6 +467,110 @@ test("resume validates immutable bindings and skips only intact passed checkpoin
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("stale-evaluation finalize revalidates all 60 retained workflows without rerunning them", () => {
+  const fixture = createFinalizeFixture();
+  try {
+    const retainedBefore = fixture.artifact.codexCli.runs.flatMap((run) =>
+      run.scenarios.map((scenario) => [scenario.evidencePath, scenario.evidenceSha256]),
+    );
+    const finalized = finalizeCompletedArtifact(
+      structuredClone(fixture.artifact),
+      fixture.expected,
+      fixture.output,
+      fixture.evidenceRoot,
+      fixture.measured,
+    );
+    assert.equal(finalized.liveCodexWorkflowMatrix.status, "complete");
+    assert.equal(finalized.liveCodexWorkflowMatrix.completedRuns, 60);
+    assert.equal(finalized.releaseEligibility.seriousStaleApplications.status, "measured");
+    assert.equal(finalized.releaseEligibility.eligible, true);
+    assert.equal(finalized.transparentCaptureReleaseGate.eligible, true);
+    assert.deepEqual(
+      finalized.codexCli.runs.flatMap((run) =>
+        run.scenarios.map((scenario) => [scenario.evidencePath, scenario.evidenceSha256]),
+      ),
+      retainedBefore,
+    );
+    assert.equal(finalized.codexCli.runs.flatMap((run) => run.scenarios).length, 60);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("stale-evaluation finalize rejects replacement, incomplete, modified, or rebound evidence", async (t) => {
+  const fixture = createFinalizeFixture();
+  try {
+    await t.test("measured evidence cannot be replaced", () => {
+      const artifact = structuredClone(fixture.artifact);
+      artifact.releaseEligibility.seriousStaleApplications = fixture.measured;
+      assert.throws(
+        () => finalizeCompletedArtifact(artifact, fixture.expected, fixture.output, fixture.evidenceRoot, fixture.measured),
+        /requires an unmeasured artifact/,
+      );
+    });
+    await t.test("incomplete matrices and data loss are rejected", () => {
+      const incomplete = structuredClone(fixture.artifact);
+      incomplete.codexCli.runs[1].scenarios.pop();
+      incomplete.liveCodexWorkflowMatrix.completedRuns = 59;
+      assert.throws(
+        () => finalizeCompletedArtifact(incomplete, fixture.expected, fixture.output, fixture.evidenceRoot, fixture.measured),
+        /complete, ineligible, lossless 60-run artifact/,
+      );
+      const lossy = structuredClone(fixture.artifact);
+      lossy.releaseEligibility.dataLossEvents = 1;
+      assert.throws(
+        () => finalizeCompletedArtifact(lossy, fixture.expected, fixture.output, fixture.evidenceRoot, fixture.measured),
+        /complete, ineligible, lossless 60-run artifact/,
+      );
+    });
+    await t.test("modified scenario evidence is rejected", () => {
+      const scenario = fixture.artifact.codexCli.runs[0].scenarios[0];
+      const path = join(fixture.directory, scenario.evidencePath);
+      const original = readFileSync(path);
+      writeFileSync(path, "tampered\n");
+      assert.throws(
+        () => finalizeCompletedArtifact(structuredClone(fixture.artifact), fixture.expected, fixture.output, fixture.evidenceRoot, fixture.measured),
+        /missing or has changed/,
+      );
+      writeFileSync(path, original);
+    });
+    await t.test("App and immutable binary bindings cannot change", () => {
+      const changedApp = structuredClone(fixture.expected);
+      changedApp.codexApp.current.build = "different-build";
+      assert.throws(
+        () => finalizeCompletedArtifact(structuredClone(fixture.artifact), changedApp, fixture.output, fixture.evidenceRoot, fixture.measured),
+        /does not match the supplied Codex App evidence/,
+      );
+      const changedBinary = structuredClone(fixture.expected);
+      changedBinary.previouslyBinarySha256 = "9".repeat(64);
+      assert.throws(
+        () => finalizeCompletedArtifact(structuredClone(fixture.artifact), changedBinary, fixture.output, fixture.evidenceRoot, fixture.measured),
+        /does not match the current commit, product binary, or fixture bytes/,
+      );
+    });
+    await t.test("evaluator must cover 60 workflows and retain its exact digest", () => {
+      assert.throws(
+        () => finalizeCompletedArtifact(
+          structuredClone(fixture.artifact),
+          fixture.expected,
+          fixture.output,
+          fixture.evidenceRoot,
+          { ...fixture.measured, scenariosEvaluated: 59 },
+        ),
+        /covering all 60 workflows/,
+      );
+      writeFileSync(fixture.stalePath, "tampered\n");
+      assert.throws(
+        () => finalizeCompletedArtifact(structuredClone(fixture.artifact), fixture.expected, fixture.output, fixture.evidenceRoot, fixture.measured),
+        /retained file hash changed/,
+      );
+      writeFileSync(fixture.stalePath, fixture.staleBytes);
+    });
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
   }
 });
 

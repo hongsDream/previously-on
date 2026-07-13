@@ -95,7 +95,9 @@ The producer checkpoints the JSON artifact and retained scenario verdict after e
 workflow. To continue an interrupted 60-workflow run, repeat the original live command with
 `--resume` and the same `--output` path. Resume never trusts the stored completed-run count: it
 revalidates every passed row against its referenced retained evidence file and SHA-256 digest,
-recomputes the checkpoint set, and reruns failed or incomplete scenarios.
+recomputes the checkpoint set, and reruns failed or incomplete scenarios. Normal live and resume
+modes reject stale-evaluator arguments so the retained matrix stays `unmeasured` until all 60
+workflows are available for review.
 
 Resume is permitted only for the same evidence identity. The clean Git commit, product version,
 PreviouslyOn binary digest, both Codex binary digests and versions, fixture-contract digest,
@@ -103,6 +105,21 @@ scenario-matrix digest, mapped-artifact digest, runner identity, and supplied Co
 must remain bound to the original artifact. A missing or modified evidence file, changed binding,
 or incompatible artifact fails closed. Start a new output/evidence path and generate a new
 artifact instead of reusing checkpoints across that boundary.
+
+## Finalizing the stale-application evaluation
+
+The serious-stale evaluator is created after the 60 retained workflows have been reviewed. Attach
+it with `--finalize-stale-evaluation` and the same binary, mapped-artifact, and Codex App evidence
+arguments used for the original run. This mode does not require `CODEX_HOME`, a model, or the paid
+execution confirmation because it never starts an authenticated workflow subprocess. Version and
+command-shape probes still run against the supplied binaries. Finalize revalidates all 60
+scenario evidence files and digests plus the commit, product, binaries, resolved CLI versions,
+fixtures, mapped artifact, runner, and App evidence before retaining the evaluator.
+
+Only `unmeasured -> measured` is permitted. The input must already be a complete, lossless 60-run
+matrix, and the evaluator must bind the same commit and product version and report exactly 60
+evaluated scenarios. Measured evidence cannot be replaced; incomplete, modified, rebound, or
+data-loss-bearing evidence fails closed. See `docs/compatibility.md` for the exact command.
 
 `codexApp.current` must reference a retained sanitized `codex_app_verification` JSON file with a
 non-empty build, ISO timestamp, status, path, and matching SHA-256. A `degraded` current result is

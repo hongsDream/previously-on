@@ -386,6 +386,71 @@ export function prepareResumeArtifact(artifact, expected, outputPath, evidenceRo
   return artifact;
 }
 
+export function finalizeCompletedArtifact(
+  artifact,
+  expected,
+  outputPath,
+  evidenceRoot,
+  seriousStaleApplications,
+) {
+  const revalidated = revalidateCompletedArtifactForFinalize(artifact, expected, outputPath, evidenceRoot);
+  return attachStaleEvaluation(revalidated, expected.scenarioIds, outputPath, seriousStaleApplications);
+}
+
+export function revalidateCompletedArtifactForFinalize(artifact, expected, outputPath, evidenceRoot) {
+  const expectedScenarioIds = expected.scenarioIds;
+  const existingStale = artifact.releaseEligibility?.seriousStaleApplications;
+  if (existingStale?.status !== "unmeasured") {
+    throw new Error("stale-evaluation finalize requires an unmeasured artifact and cannot replace measured evidence");
+  }
+  if (
+    artifact.liveCodexWorkflowMatrix?.status !== "complete" ||
+    artifact.liveCodexWorkflowMatrix?.requiredRuns !== 60 ||
+    artifact.liveCodexWorkflowMatrix?.completedRuns !== 60 ||
+    artifact.releaseEligibility?.eligible !== false ||
+    artifact.transparentCaptureReleaseGate?.eligible !== false ||
+    artifact.releaseEligibility?.dataLossEvents !== 0 ||
+    !hasCompleteWorkflowMatrix(artifact, expectedScenarioIds)
+  ) {
+    throw new Error("stale-evaluation finalize requires a complete, ineligible, lossless 60-run artifact");
+  }
+  const revalidated = prepareResumeArtifact(
+    artifact,
+    { ...expected, seriousStaleApplications: existingStale },
+    outputPath,
+    evidenceRoot,
+  );
+  if (
+    revalidated.liveCodexWorkflowMatrix.completedRuns !== 60 ||
+    !hasCompleteWorkflowMatrix(revalidated, expectedScenarioIds) ||
+    revalidated.releaseEligibility.dataLossEvents !== 0
+  ) {
+    throw new Error("stale-evaluation finalize lost one or more validated workflow checkpoints");
+  }
+  return revalidated;
+}
+
+function attachStaleEvaluation(revalidated, expectedScenarioIds, outputPath, seriousStaleApplications) {
+  if (
+    seriousStaleApplications?.status !== "measured" ||
+    seriousStaleApplications.scenariosEvaluated !== 60 ||
+    !Number.isInteger(seriousStaleApplications.count) ||
+    seriousStaleApplications.count < 0
+  ) {
+    throw new Error("stale-evaluation finalize requires a measured evaluator covering all 60 workflows");
+  }
+  validateArtifactEvidenceBindings(revalidated.codexApp, seriousStaleApplications, outputPath);
+  revalidated.releaseEligibility.seriousStaleApplications = seriousStaleApplications;
+  const eligible = computeEligibility(revalidated, expectedScenarioIds);
+  revalidated.generatedAt = new Date().toISOString();
+  revalidated.liveCodexWorkflowMatrix = { status: "complete", requiredRuns: 60, completedRuns: 60 };
+  revalidated.transparentCaptureReleaseGate = eligible
+    ? { eligible: true, reason: "all 60 workflows and separately retained release evidence passed" }
+    : { eligible: false, reason: releaseIneligibilityReason(revalidated) };
+  revalidated.releaseEligibility.eligible = eligible;
+  return revalidated;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const matrix = readJson(MATRIX_PATH);
@@ -398,7 +463,8 @@ async function main() {
     return;
   }
 
-  requireLiveArguments(args, contract);
+  if (args.finalizeStaleEvaluation) requireFinalizeArguments(args);
+  else requireLiveArguments(args, contract);
   const latestVersion = await validateCodexBinary(args.latestBin, "latest");
   const previousVersion = await validateCodexBinary(args.previousBin, "previous");
   if (compareSemver(latestVersion, previousVersion) <= 0) {
@@ -422,18 +488,91 @@ async function main() {
     previousVersion,
   );
 
-  const sourceAuth = join(args.codexHome, contract.auth.sourceFile);
-  if (!existsSync(sourceAuth)) throw new Error(`authenticated CODEX_HOME omitted ${contract.auth.sourceFile}`);
-  if (existsSync(args.output) && !args.resume) {
+  const sourceAuth = args.finalizeStaleEvaluation ? null : join(args.codexHome, contract.auth.sourceFile);
+  if (!args.finalizeStaleEvaluation && !existsSync(sourceAuth)) {
+    throw new Error(`authenticated CODEX_HOME omitted ${contract.auth.sourceFile}`);
+  }
+  if (existsSync(args.output) && !args.resume && !args.finalizeStaleEvaluation) {
     throw new Error("--output already exists; use a new path so partial and reviewed evidence cannot be mixed");
   }
   const evidenceRoot = resolve(args.evidenceDir ?? `${args.output}.evidence`);
   requireContainedEvidenceRoot(args.output, evidenceRoot);
-  if (existsSync(evidenceRoot) && !args.resume) {
+  if (existsSync(evidenceRoot) && !args.resume && !args.finalizeStaleEvaluation) {
     throw new Error("evidence directory already exists; use a new path so stale scenario files cannot be retained");
   }
   if (args.resume && (!existsSync(args.output) || !existsSync(evidenceRoot))) {
     throw new Error("--resume requires an existing output artifact and evidence directory");
+  }
+  if (args.finalizeStaleEvaluation && (!existsSync(args.output) || !existsSync(evidenceRoot))) {
+    throw new Error("--finalize-stale-evaluation requires an existing output artifact and evidence directory");
+  }
+  if (args.finalizeStaleEvaluation) {
+    const codexRuns = [
+      { role: "latest", version: latestVersion, binarySha256: sha256(readFileSync(args.latestBin)), scenarios: [] },
+      { role: "previous", version: previousVersion, binarySha256: sha256(readFileSync(args.previousBin)), scenarios: [] },
+    ];
+    const existingArtifact = readJson(args.output);
+    const codexApp = buildAppEvidence(args, args.output, evidenceRoot, true, existingArtifact?.codexApp?.previous);
+    const expected = {
+      productVersion,
+      gitCommit,
+      runner: { os: "macOS", arch: "arm64" },
+      categories,
+      fixtureContractSha256: sha256(readFileSync(CONTRACT_PATH)),
+      scenarioMatrixSha256: sha256(readFileSync(MATRIX_PATH)),
+      previouslyBinarySha256: sha256(readFileSync(args.previouslyBin)),
+      codexRuns,
+      codexApp,
+      mappedArtifactSha256: mappedRegression.artifactSha256,
+      scenarioIds: scenarios.map((scenario) => scenario.id),
+      scenarios,
+    };
+    const revalidated = revalidateCompletedArtifactForFinalize(
+      existingArtifact,
+      expected,
+      args.output,
+      evidenceRoot,
+    );
+    const seriousStaleApplications = buildStaleEvaluationEvidence({
+      args,
+      outputPath: args.output,
+      evidenceRoot,
+      resume: false,
+      allowExistingIdentical: true,
+      productVersion,
+      gitCommit,
+    });
+    const artifact = attachStaleEvaluation(
+      revalidated,
+      expected.scenarioIds,
+      args.output,
+      seriousStaleApplications,
+    );
+    writeJson(args.output, artifact);
+    if (artifact.releaseEligibility.eligible) {
+      checked(process.execPath, [
+        join(ROOT, "scripts/validate-live-compatibility.mjs"),
+        args.output,
+        "--commit",
+        gitCommit,
+        "--product-version",
+        productVersion,
+      ]);
+    }
+    const bundlePath = packageEvidenceBundle(
+      args.output,
+      evidenceRoot,
+      args.bundle ?? `${args.output}.finalized.tar.gz`,
+    );
+    process.stdout.write(
+      `${artifact.releaseEligibility.eligible ? "eligible" : "ineligible"} finalized live compatibility evidence written: ${args.output}\n` +
+        `release evidence bundle: ${bundlePath}\n` +
+        `bundle sha256: ${sha256(readFileSync(bundlePath))}\n`,
+    );
+    if (!artifact.releaseEligibility.eligible) {
+      throw new Error(`finalized live evidence remains release-ineligible: ${releaseIneligibilityReason(artifact)}`);
+    }
+    return;
   }
   const tempRoot = mkdtempSync(join(tmpdir(), "previously-live-compat-"));
   chmodSync(tempRoot, 0o700);
@@ -880,9 +1019,14 @@ function isolatedEnvironment({ tempRoot, codexHome, shimDir }) {
   return env;
 }
 
-function requireLiveArguments(args, contract) {
+export function requireLiveArguments(args, contract) {
   if (args.confirm !== contract.confirmationPhrase) {
     throw new Error(`live execution requires --confirm ${contract.confirmationPhrase}`);
+  }
+  if (args.staleEvaluationArtifact || args.staleEvaluationSha256) {
+    throw new Error(
+      "--stale-evaluation-artifact and --stale-evaluation-sha256 are finalize-only; live run/resume must remain unmeasured",
+    );
   }
   for (const key of [
     "latestBin",
@@ -940,12 +1084,68 @@ function requireLiveArguments(args, contract) {
   ) {
     throw new Error("--codex-app-previous-checked-at must be an ISO-8601 timestamp");
   }
-  const hasStaleEvidence = Boolean(args.staleEvaluationArtifact || args.staleEvaluationSha256);
-  if (hasStaleEvidence) {
-    requireRegularAbsoluteFile(args.staleEvaluationArtifact, "--stale-evaluation-artifact");
-    if (!/^[0-9a-f]{64}$/i.test(args.staleEvaluationSha256 ?? "")) {
-      throw new Error("--stale-evaluation-sha256 must accompany the stale evaluator artifact");
-    }
+}
+
+function requireFinalizeArguments(args) {
+  if (args.resume) {
+    throw new Error("--finalize-stale-evaluation is a distinct one-way mode and cannot be combined with --resume");
+  }
+  for (const key of [
+    "latestBin",
+    "previousBin",
+    "previouslyBin",
+    "mappedArtifact",
+    "output",
+    "codexAppCurrentBuild",
+    "codexAppCurrentEvidence",
+    "codexAppCurrentEvidenceSha256",
+    "staleEvaluationArtifact",
+    "staleEvaluationSha256",
+  ]) {
+    if (!args[key]) throw new Error(`stale-evaluation finalize omitted --${camelToKebab(key)}`);
+  }
+  if (!isAbsolute(args.output) || basename(args.output) !== "live-compatibility.json") {
+    throw new Error("--output must be an absolute path ending in live-compatibility.json");
+  }
+  if (args.bundle && !isAbsolute(args.bundle)) {
+    throw new Error("--bundle must be an absolute path when provided");
+  }
+  if (args.evidenceDir && !isAbsolute(args.evidenceDir)) {
+    throw new Error("--evidence-dir must be an absolute path when provided");
+  }
+  if (!isAbsolute(args.mappedArtifact) || !existsSync(args.mappedArtifact)) {
+    throw new Error("--mapped-artifact must be an existing absolute path");
+  }
+  if (!/^[0-9a-f]{64}$/i.test(args.codexAppCurrentEvidenceSha256)) {
+    throw new Error("--codex-app-current-evidence-sha256 must be 64 hexadecimal characters");
+  }
+  requireRegularAbsoluteFile(args.codexAppCurrentEvidence, "--codex-app-current-evidence");
+  const hasPreviousBuild = Boolean(
+    args.codexAppPreviousBuild || args.codexAppPreviousEvidence || args.codexAppPreviousEvidenceSha256,
+  );
+  const hasUnavailable = Boolean(args.codexAppPreviousUnavailableReason);
+  if (hasPreviousBuild === hasUnavailable) {
+    throw new Error("provide either previous App build/evidence or --codex-app-previous-unavailable-reason");
+  }
+  if (
+    hasPreviousBuild &&
+    (!args.codexAppPreviousBuild ||
+      !args.codexAppPreviousEvidence ||
+      !/^[0-9a-f]{64}$/i.test(args.codexAppPreviousEvidenceSha256 ?? ""))
+  ) {
+    throw new Error("previous App evidence requires build, retained evidence file, and SHA-256");
+  }
+  if (hasPreviousBuild) requireRegularAbsoluteFile(args.codexAppPreviousEvidence, "--codex-app-previous-evidence");
+  if (
+    args.codexAppPreviousUnavailableReason &&
+    args.codexAppPreviousCheckedAt &&
+    !Number.isFinite(Date.parse(args.codexAppPreviousCheckedAt))
+  ) {
+    throw new Error("--codex-app-previous-checked-at must be an ISO-8601 timestamp");
+  }
+  requireRegularAbsoluteFile(args.staleEvaluationArtifact, "--stale-evaluation-artifact");
+  if (!/^[0-9a-f]{64}$/i.test(args.staleEvaluationSha256)) {
+    throw new Error("--stale-evaluation-sha256 must be 64 hexadecimal characters");
   }
 }
 
@@ -1133,7 +1333,15 @@ function buildPreviousAppEvidence(args, outputPath, evidenceRoot, resume) {
   };
 }
 
-function buildStaleEvaluationEvidence({ args, outputPath, evidenceRoot, resume, productVersion, gitCommit }) {
+function buildStaleEvaluationEvidence({
+  args,
+  outputPath,
+  evidenceRoot,
+  resume,
+  allowExistingIdentical = false,
+  productVersion,
+  gitCommit,
+}) {
   if (!args.staleEvaluationArtifact) {
     return {
       status: "unmeasured",
@@ -1141,13 +1349,32 @@ function buildStaleEvaluationEvidence({ args, outputPath, evidenceRoot, resume, 
     };
   }
   const destinationPath = join(evidenceRoot, "evaluations", "serious-stale-applications.json");
+  const sourceBytes = readFileSync(args.staleEvaluationArtifact);
+  if (sha256(sourceBytes) !== args.staleEvaluationSha256.toLowerCase()) {
+    throw new Error("serious stale application evaluation SHA-256 does not match the supplied file");
+  }
+  const sourceDocument = parseSanitizedEvidence(sourceBytes, "serious stale application evaluation");
+  validateStaleEvaluationDocument(sourceDocument, productVersion, gitCommit);
   const document = retainJsonEvidence({
     sourcePath: args.staleEvaluationArtifact,
     destinationPath,
     expectedSha256: args.staleEvaluationSha256,
     label: "serious stale application evaluation",
     resume,
+    allowExistingIdentical,
   });
+  validateStaleEvaluationDocument(document, productVersion, gitCommit);
+  return {
+    status: "measured",
+    count: document.seriousStaleApplications,
+    scenariosEvaluated: document.scenariosEvaluated,
+    evaluatedAt: document.evaluatedAt,
+    evidenceSha256: args.staleEvaluationSha256.toLowerCase(),
+    evidencePath: relative(dirname(outputPath), destinationPath),
+  };
+}
+
+function validateStaleEvaluationDocument(document, productVersion, gitCommit) {
   if (
     document.schemaVersion !== 1 ||
     document.evidenceClass !== "serious_stale_application_evaluation" ||
@@ -1163,18 +1390,16 @@ function buildStaleEvaluationEvidence({ args, outputPath, evidenceRoot, resume, 
   ) {
     throw new Error("serious stale application evaluator artifact has an invalid or mismatched contract");
   }
-  return {
-    status: "measured",
-    count: document.seriousStaleApplications,
-    scenariosEvaluated: document.scenariosEvaluated,
-    evaluatedAt: document.evaluatedAt,
-    evidenceSha256: args.staleEvaluationSha256.toLowerCase(),
-    evidencePath: relative(dirname(outputPath), destinationPath),
-  };
 }
 
 function parseArgs(raw) {
-  const args = { dryRun: false, keepTemporary: false, resume: false, timeoutMs: 10 * 60_000 };
+  const args = {
+    dryRun: false,
+    keepTemporary: false,
+    resume: false,
+    finalizeStaleEvaluation: false,
+    timeoutMs: 10 * 60_000,
+  };
   const names = {
     "--latest-bin": "latestBin",
     "--previous-bin": "previousBin",
@@ -1203,6 +1428,7 @@ function parseArgs(raw) {
     if (token === "--dry-run") args.dryRun = true;
     else if (token === "--keep-temporary") args.keepTemporary = true;
     else if (token === "--resume") args.resume = true;
+    else if (token === "--finalize-stale-evaluation") args.finalizeStaleEvaluation = true;
     else if (names[token]) args[names[token]] = raw[++index];
     else throw new Error(`unknown argument ${token}`);
   }
@@ -1214,7 +1440,14 @@ function parseArgs(raw) {
   return args;
 }
 
-function retainJsonEvidence({ sourcePath, destinationPath, expectedSha256, label, resume }) {
+function retainJsonEvidence({
+  sourcePath,
+  destinationPath,
+  expectedSha256,
+  label,
+  resume,
+  allowExistingIdentical = false,
+}) {
   requireRegularAbsoluteFile(sourcePath, label);
   const sourceBytes = readFileSync(sourcePath);
   if (sha256(sourceBytes) !== expectedSha256.toLowerCase()) {
@@ -1222,6 +1455,8 @@ function retainJsonEvidence({ sourcePath, destinationPath, expectedSha256, label
   }
   const document = parseSanitizedEvidence(sourceBytes, label);
   if (resume) {
+    validateBoundEvidenceFile(destinationPath, expectedSha256, label);
+  } else if (allowExistingIdentical && existsSync(destinationPath)) {
     validateBoundEvidenceFile(destinationPath, expectedSha256, label);
   } else {
     writePrivateBytes(destinationPath, sourceBytes);

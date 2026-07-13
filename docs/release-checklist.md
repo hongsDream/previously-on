@@ -33,6 +33,9 @@ cannot be overwritten.
       retained sanitized evidence files. A degraded signature result remains release-blocking.
 - [ ] Serious stale applications are measured by a retained evaluator artifact bound to this
       commit and version; an unmeasured or hardcoded zero is not accepted.
+- [ ] If stale evaluation was attached after the live run, `--finalize-stale-evaluation`
+      revalidated all 60 retained scenario digests and unchanged commit, binary, mapped, runner,
+      and App bindings without rerunning a Codex workflow.
 - [ ] The outbound-denied smoke exercised setup, daemon/hook persistence, MCP initialize and
       tools/list, a loopback UI request, export, purge, repeated uninstall, and cleanup.
 - [ ] `docs/compatibility.md` contains run dates, artifact hashes, and supported/degraded status.

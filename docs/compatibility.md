@@ -118,8 +118,6 @@ node scripts/compatibility/live-harness.mjs \
   --codex-app-previous-build <build> \
   --codex-app-previous-evidence /absolute/path/to/previous-app-evidence.json \
   --codex-app-previous-evidence-sha256 <sha256> \
-  --stale-evaluation-artifact /absolute/path/to/stale-evaluation.json \
-  --stale-evaluation-sha256 <sha256> \
   --output /absolute/path/to/live-compatibility.json \
   --confirm RUN_60_AUTHENTICATED_CODEX_WORKFLOWS
 ```
@@ -128,8 +126,48 @@ If an authenticated matrix is interrupted, rerun the same command with `--resume
 opens the existing output and evidence directory, verifies each completed scenario's retained
 evidence, and skips only checkpoints that are still valid. Resume fails closed if the Git commit,
 PreviouslyOn or Codex binary digest, resolved Codex version, fixture contract, scenario matrix,
-mapped artifact, App evidence, or stale-evaluator evidence binding differs. In that case, choose a new output path and
+mapped artifact, or App evidence binding differs. Normal live and `--resume` modes reject
+`--stale-evaluation-*` arguments and remain `unmeasured`; only finalize may attach the evaluator.
+In case any other immutable binding differs, choose a new output path and
 produce a new artifact; do not copy completed rows into a differently bound matrix.
+
+When all 60 workflows are complete, produce the serious-stale evaluator from those retained
+results and attach it with the one-way finalize mode. Repeat the same binary, mapped-artifact,
+and Codex App arguments from the original run; finalize reopens all 60 scenario files and hashes,
+revalidates every immutable binding, and never starts an authenticated Codex workflow. It only
+uses the supplied binaries for version and command-shape identity checks:
+
+```sh
+node scripts/compatibility/live-harness.mjs \
+  --finalize-stale-evaluation \
+  --latest-bin /absolute/path/to/latest/codex \
+  --previous-bin /absolute/path/to/previous/codex \
+  --previously-bin /absolute/path/to/previously \
+  --mapped-artifact /absolute/path/to/mapped-compatibility-results.json \
+  --codex-app-current-build <build> \
+  --codex-app-current-evidence /absolute/path/to/current-app-evidence.json \
+  --codex-app-current-evidence-sha256 <sha256> \
+  --codex-app-previous-build <build> \
+  --codex-app-previous-evidence /absolute/path/to/previous-app-evidence.json \
+  --codex-app-previous-evidence-sha256 <sha256> \
+  --stale-evaluation-artifact /absolute/path/to/stale-evaluation.json \
+  --stale-evaluation-sha256 <sha256> \
+  --output /absolute/path/to/live-compatibility.json \
+  --bundle /absolute/path/to/live-compatibility-finalized.tar.gz
+```
+
+Finalize is allowed only from a complete, lossless, release-ineligible artifact whose stale
+status is still `unmeasured`. The evaluator must bind the same product version and Git commit and
+cover all 60 workflows. A measured artifact cannot be replaced, even by a different evaluator;
+an incomplete matrix, modified scenario/mapped/App evidence, changed binary/version/runner, or
+evaluator mismatch fails closed. If finalize is interrupted after retaining the evaluator but
+before updating the artifact, repeating the exact command accepts only the identical evaluator
+bytes. The default finalized bundle name is `live-compatibility.json.finalized.tar.gz`, so it does
+not overwrite the original unmeasured bundle.
+
+The initial 60-run command intentionally exits non-zero after retaining a complete matrix when
+stale evaluation is still `unmeasured`; this is a release-gate result, not a request to rerun the
+workflows. Generate the evaluator from those retained results and use finalize as shown above.
 
 The source `CODEX_HOME` is never modified. Only its `auth.json` is copied into a permission-limited
 temporary home; existing config, Hooks, rules, plugins, memories, and sessions are excluded. Each
