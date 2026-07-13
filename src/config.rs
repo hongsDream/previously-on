@@ -1,0 +1,633 @@
+use std::ffi::OsString;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, ExitCode, Stdio};
+
+use anyhow::{bail, Context, Result};
+use chrono::{TimeZone, Utc};
+use clap::{Parser, Subcommand, ValueEnum};
+use directories::BaseDirs;
+use serde::Serialize;
+use serde_json::json;
+
+use crate::app_server::{codex_version, AppServerClient, SUPPORTED_CODEX_VERSIONS};
+use crate::domain::{CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind};
+use crate::hook::{HookEvent, HookIngressConfig};
+use crate::setup::{self, SetupPaths, MANAGED_ID};
+use crate::store::Store;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "previously",
+    version,
+    about = "Verifiable local Codex work handoffs"
+)]
+pub struct Cli {
+    /// Override ~/.previously-on (primarily for testing and portable installations).
+    #[arg(long, env = "PREVIOUSLY_ON_DATA_DIR", global = true)]
+    pub data_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Install a PreviouslyOn integration.
+    Setup {
+        #[command(subcommand)]
+        target: SetupTarget,
+    },
+    /// Show repository, queue, and database state.
+    Status,
+    /// Check local prerequisites and installation integrity.
+    Doctor,
+    /// Open the local review interface.
+    Ui {
+        #[arg(long, default_value = "127.0.0.1:43129")]
+        bind: SocketAddr,
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Export all local project lineage data as JSON.
+    Export {
+        #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+        format: ExportFormat,
+    },
+    /// Permanently purge one repository from local storage.
+    Purge {
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Remove a PreviouslyOn integration without touching user-owned config.
+    Uninstall {
+        #[command(subcommand)]
+        target: UninstallTarget,
+    },
+    /// Explicitly import Codex data through a supported integration.
+    Import {
+        #[command(subcommand)]
+        target: ImportTarget,
+    },
+    /// Run a tool under explicit PreviouslyOn capture and repair its import afterward.
+    Run {
+        #[command(subcommand)]
+        target: RunTarget,
+    },
+    /// Rebuild SQLite projections from the canonical event log.
+    #[command(hide = true)]
+    Reconcile,
+    /// Codex hook ingress. This command is managed by `previously setup codex`.
+    #[command(hide = true)]
+    Hook { event: String },
+    /// Run the local Unix-socket ingestion daemon.
+    #[command(hide = true, alias = "server")]
+    Daemon,
+    /// Run the read-only MCP server over stdio.
+    #[command(hide = true)]
+    Mcp,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SetupTarget {
+    Codex {
+        #[arg(long)]
+        repo: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UninstallTarget {
+    Codex,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImportTarget {
+    Codex {
+        #[arg(long)]
+        repo: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RunTarget {
+    Codex {
+        #[arg(long)]
+        repo: PathBuf,
+        /// Arguments passed verbatim to Codex after `--`.
+        #[arg(last = true)]
+        codex_args: Vec<OsString>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormat {
+    Json,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub data_dir: PathBuf,
+    pub database_path: PathBuf,
+    pub socket_path: PathBuf,
+    pub queue_path: PathBuf,
+    pub codex_home: PathBuf,
+    pub executable: PathBuf,
+}
+
+impl AppConfig {
+    pub fn resolve(data_dir: Option<PathBuf>) -> Result<Self> {
+        let base = BaseDirs::new().context("home directory is unavailable")?;
+        let data_dir = data_dir.unwrap_or_else(|| base.home_dir().join(".previously-on"));
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| base.home_dir().join(".codex"));
+        let executable = std::env::current_exe().context("resolve PreviouslyOn executable path")?;
+        Ok(Self {
+            database_path: data_dir.join("previously.sqlite3"),
+            socket_path: data_dir.join("previously.sock"),
+            queue_path: data_dir.join("queue/events.jsonl"),
+            data_dir,
+            codex_home,
+            executable,
+        })
+    }
+
+    pub fn setup_paths(&self) -> SetupPaths {
+        SetupPaths {
+            codex_home: self.codex_home.clone(),
+            data_dir: self.data_dir.clone(),
+            executable: self.executable.clone(),
+        }
+    }
+
+    pub fn hook_config(&self) -> HookIngressConfig {
+        HookIngressConfig {
+            socket_path: self.socket_path.clone(),
+            queue_path: self.queue_path.clone(),
+            registered_repository: setup::read_manifest(&self.setup_paths().manifest_path())
+                .ok()
+                .map(|manifest| manifest.repository),
+        }
+    }
+
+    pub fn repository_id(&self) -> Result<String> {
+        let repository = setup::read_manifest(&self.setup_paths().manifest_path())?.repository;
+        Ok(crate::git::repository_identity(repository)?.id)
+    }
+}
+
+pub async fn run(cli: Cli) -> Result<ExitCode> {
+    let config = AppConfig::resolve(cli.data_dir)?;
+    match cli.command {
+        Commands::Setup {
+            target: SetupTarget::Codex { repo },
+        } => {
+            let manifest = setup::install_codex(&config.setup_paths(), &repo)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Commands::Status => {
+            let store = Store::open(&config.database_path)?;
+            let manifest = setup::read_manifest(&config.setup_paths().manifest_path()).ok();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "dataDir": config.data_dir,
+                    "database": store.health()?,
+                    "repository": manifest.map(|manifest| manifest.repository),
+                    "queuedEvents": queue_line_count(&config.queue_path)?
+                }))?
+            );
+        }
+        Commands::Doctor => {
+            let report = doctor(&config).await;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.healthy {
+                bail!("one or more doctor checks failed");
+            }
+        }
+        Commands::Ui { bind, no_open } => {
+            crate::server::serve_ui(config.data_dir, bind, !no_open).await?;
+        }
+        Commands::Export { format } => match format {
+            ExportFormat::Json => {
+                let store = Store::open(&config.database_path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.export_json(None)?)?
+                );
+            }
+        },
+        Commands::Purge { repo } => {
+            let repository = crate::git::repository_identity(&repo)?;
+            let repository_id = repository.id;
+            let _ = crate::hook::stop_daemon(&config.socket_path);
+            let store = Store::open(&config.database_path)?;
+            store.purge_repository_with(&repository_id, || {
+                for queue in [
+                    config.queue_path.clone(),
+                    config.queue_path.with_extension("replay.jsonl"),
+                    config.queue_path.with_extension("corrupt.jsonl"),
+                ] {
+                    purge_queue(&queue, &repository_id)?;
+                }
+                Ok(())
+            })?;
+            println!("purged {}", repository.root.display());
+        }
+        Commands::Uninstall {
+            target: UninstallTarget::Codex,
+        } => {
+            let _ = crate::hook::stop_daemon(&config.socket_path);
+            let result = setup::uninstall_codex_detailed(&config.setup_paths())?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::Import {
+            target: ImportTarget::Codex { repo },
+        } => import_codex_threads(&config, &repo).await?,
+        Commands::Run {
+            target: RunTarget::Codex { repo, codex_args },
+        } => return run_codex(&config, &repo, &codex_args).await,
+        Commands::Reconcile => {
+            let store = Store::open(&config.database_path)?;
+            store.rebuild_projections()?;
+            println!("projections rebuilt");
+        }
+        Commands::Hook { event } => {
+            let event = event.parse::<HookEvent>()?;
+            crate::hook::run_hook(
+                event,
+                &config.hook_config(),
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+            )?;
+        }
+        Commands::Daemon => crate::hook::run_daemon(config.data_dir).await?,
+        Commands::Mcp => {
+            let repository_id = config.repository_id()?;
+            let backend = crate::mcp::StoreMcpBackend::open(&config.database_path, repository_id)?;
+            crate::mcp::run_stdio(&backend, tokio::io::stdin(), tokio::io::stdout()).await?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_codex(config: &AppConfig, repo: &Path, codex_args: &[OsString]) -> Result<ExitCode> {
+    let repository = crate::git::repository_identity(repo)?;
+    let status = tokio::process::Command::new("codex")
+        .args(codex_args)
+        .current_dir(&repository.root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .context("start Codex through `previously run codex`")?;
+
+    let replay_result = Store::open(&config.database_path)
+        .and_then(|store| crate::hook::replay_fallback(&store, &config.queue_path));
+    if let Err(error) = replay_result {
+        eprintln!(
+            "PreviouslyOn warning: Codex exited, but replaying the redacted fallback queue failed: {error:#}"
+        );
+    }
+    if let Err(error) = import_codex_threads(config, &repository.root).await {
+        eprintln!(
+            "PreviouslyOn warning: Codex exited, but the best-effort App Server import failed: {error:#}"
+        );
+    }
+
+    Ok(status
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .map(ExitCode::from)
+        .unwrap_or(ExitCode::FAILURE))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorReport {
+    healthy: bool,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    name: &'static str,
+    ok: bool,
+    detail: String,
+}
+
+async fn doctor(config: &AppConfig) -> DoctorReport {
+    let mut checks = Vec::new();
+    let git = StdCommand::new("git").arg("--version").output();
+    checks.push(command_check("git", git));
+
+    match codex_version().await {
+        Ok(version) => checks.push(DoctorCheck {
+            name: "codex",
+            ok: true,
+            detail: if SUPPORTED_CODEX_VERSIONS.contains(&version.as_str()) {
+                version
+            } else {
+                format!(
+                    "{version}; degraded compatibility until probed (supported: {})",
+                    SUPPORTED_CODEX_VERSIONS.join(", ")
+                )
+            },
+        }),
+        Err(error) => checks.push(DoctorCheck {
+            name: "codex",
+            ok: false,
+            detail: error.to_string(),
+        }),
+    }
+
+    let setup = setup::read_manifest(&config.setup_paths().manifest_path());
+    checks.push(match setup {
+        Ok(manifest) => DoctorCheck {
+            name: "repository registration",
+            ok: manifest.repository.exists(),
+            detail: manifest.repository.display().to_string(),
+        },
+        Err(error) => DoctorCheck {
+            name: "repository registration",
+            ok: false,
+            detail: error.to_string(),
+        },
+    });
+
+    let hooks = fs::read_to_string(config.setup_paths().hooks_path());
+    checks.push(content_check("Codex hooks", hooks, MANAGED_ID));
+    let codex_config = fs::read_to_string(config.setup_paths().config_path());
+    checks.push(content_check("Codex MCP", codex_config, MANAGED_ID));
+    checks.push(permission_check(
+        "data permissions",
+        &config.data_dir,
+        0o700,
+    ));
+    checks.push(
+        match Store::open(&config.database_path).and_then(|store| store.health()) {
+            Ok(health) => DoctorCheck {
+                name: "database",
+                ok: health.integrity_check == "ok",
+                detail: serde_json::to_string(&health).unwrap_or_else(|_| "healthy".to_string()),
+            },
+            Err(error) => DoctorCheck {
+                name: "database",
+                ok: false,
+                detail: error.to_string(),
+            },
+        },
+    );
+    checks.push(permission_check(
+        "database permissions",
+        &config.database_path,
+        0o600,
+    ));
+    checks.push(permission_check(
+        "setup manifest permissions",
+        &config.setup_paths().manifest_path(),
+        0o600,
+    ));
+    if config.queue_path.exists() {
+        checks.push(permission_check(
+            "queue permissions",
+            &config.queue_path,
+            0o600,
+        ));
+    }
+    if let Some(base) = BaseDirs::new() {
+        let legacy = base.home_dir().join(".lineage");
+        if legacy.exists() {
+            checks.push(DoctorCheck {
+                name: "legacy data directory",
+                ok: true,
+                detail: format!(
+                    "{} exists but is intentionally ignored; PreviouslyOn does not migrate or delete unreleased Context Lineage data",
+                    legacy.display()
+                ),
+            });
+        }
+    }
+    DoctorReport {
+        healthy: checks.iter().all(|check| check.ok),
+        checks,
+    }
+}
+
+async fn import_codex_threads(config: &AppConfig, repo: &Path) -> Result<()> {
+    let repository = crate::git::repository_identity(repo)?;
+    let repository_id = repository.id;
+    let store = Store::open(&config.database_path)?;
+    let mut client = AppServerClient::connect().await?;
+    let capability = client.capability_report().await;
+    if capability.status == crate::app_server::AppServerCapabilityStatus::Unsupported {
+        bail!(
+            "Codex App Server integration is unsupported: {:?}",
+            capability.warnings
+        );
+    }
+    let import_report = client.import_threads_report(&repository.root).await?;
+    let count = import_report.threads.len();
+    let mut semantic_events = 0usize;
+    let mut duplicate_events = 0usize;
+    let mut semantic_coverages = Vec::new();
+    for thread in import_report.threads {
+        let projection =
+            crate::app_server::project_thread_events(&thread, &repository_id, &repository.root);
+        semantic_coverages.push(projection.coverage.clone());
+        for event in projection.events {
+            let ack = crate::hook::ingest_hook_event(&store, event)?;
+            semantic_events += 1;
+            if ack.status == crate::hook::HookDeliveryStatus::Duplicate {
+                duplicate_events += 1;
+            }
+        }
+        let turns = thread
+            .thread
+            .get("turns")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let payload = json!({
+            "id": thread.id,
+            "sessionId": thread.session_id,
+            "cwd": thread.cwd,
+            "cliVersion": thread.cli_version,
+            "createdAt": thread.created_at,
+            "updatedAt": thread.updated_at,
+            "turnCount": turns,
+            "rawTranscriptStored": false
+        });
+        let occurred_at = Utc
+            .timestamp_opt(thread.updated_at, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+        let mut event = EventEnvelopeV1::new(
+            format!("codex-app-server:thread:read:{}", thread.id),
+            &repository_id,
+            thread.session_id,
+            EventKind::Unknown,
+            occurred_at,
+            payload,
+        );
+        event.coverage = thread.coverage;
+        event.coverage.status = event.coverage.status.worst(CoverageStatus::Degraded);
+        event.coverage.captured.extend([
+            "thread/list".to_string(),
+            "thread/read".to_string(),
+            "allowlisted semantic item projection".to_string(),
+        ]);
+        store.insert_event(&event)?;
+    }
+    client.shutdown().await?;
+    let semantic_coverage = CoverageV1::merge(semantic_coverages.iter());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "importedThreads": count,
+            "semanticEvents": semantic_events,
+            "duplicateEvents": duplicate_events,
+            "capability": capability,
+            "coverage": import_report.coverage,
+            "semanticCoverage": semantic_coverage,
+            "notices": import_report.notices
+        }))?
+    );
+    Ok(())
+}
+
+fn queue_line_count(path: &Path) -> Result<usize> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn purge_queue(path: &Path, repository_id: &str) -> Result<()> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("corrupt"))
+    {
+        match fs::remove_file(path) {
+            Ok(()) => {
+                if let Some(parent) = path.parent() {
+                    fs::File::open(parent)?.sync_all()?;
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut kept_lines = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: EventEnvelopeV1 = serde_json::from_str(line).with_context(|| {
+            format!(
+                "cannot prove repository deletion because {} contains malformed record {}",
+                path.display(),
+                index + 1
+            )
+        })?;
+        if event.repository_id != repository_id {
+            kept_lines.push(line);
+        }
+    }
+    let kept = kept_lines.join("\n");
+    let replacement = if kept.is_empty() {
+        kept
+    } else {
+        format!("{kept}\n")
+    };
+    let temporary = path.with_extension(format!("purge-{}.tmp", uuid::Uuid::now_v7()));
+    fs::write(&temporary, replacement)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    }
+    fs::File::open(&temporary)?.sync_all()?;
+    fs::rename(&temporary, path)?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn command_check(name: &'static str, result: std::io::Result<std::process::Output>) -> DoctorCheck {
+    match result {
+        Ok(output) => DoctorCheck {
+            name,
+            ok: output.status.success(),
+            detail: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        },
+        Err(error) => DoctorCheck {
+            name,
+            ok: false,
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn content_check(name: &'static str, result: std::io::Result<String>, needle: &str) -> DoctorCheck {
+    match result {
+        Ok(content) => DoctorCheck {
+            name,
+            ok: content.contains(needle),
+            detail: if content.contains(needle) {
+                "managed entry present".to_string()
+            } else {
+                "managed entry missing".to_string()
+            },
+        },
+        Err(error) => DoctorCheck {
+            name,
+            ok: false,
+            detail: error.to_string(),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn permission_check(name: &'static str, path: &Path, expected: u32) -> DoctorCheck {
+    use std::os::unix::fs::PermissionsExt;
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            let mode = metadata.permissions().mode() & 0o777;
+            DoctorCheck {
+                name,
+                ok: mode == expected,
+                detail: format!("{:o}", mode),
+            }
+        }
+        Err(error) => DoctorCheck {
+            name,
+            ok: false,
+            detail: error.to_string(),
+        },
+    }
+}
+
+#[cfg(not(unix))]
+fn permission_check(name: &'static str, _path: &Path, _expected: u32) -> DoctorCheck {
+    DoctorCheck {
+        name,
+        ok: false,
+        detail: "unsupported platform".to_string(),
+    }
+}

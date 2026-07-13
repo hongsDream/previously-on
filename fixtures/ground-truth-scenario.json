@@ -1,0 +1,22 @@
+{
+  "scenario_id": "auth-boundary-001",
+  "expected": {
+    "sessions": 1,
+    "turns": 1,
+    "user_prompts": 1,
+    "assistant_finals": 1,
+    "file_changing_tools": 1,
+    "test_commands": 1,
+    "redacted_values": [
+      "super-secret",
+      "sk-proj-never-store-this"
+    ]
+  },
+  "expected_task": {
+    "title_contains": "authentication boundary",
+    "coverage": "complete",
+    "tests_passed": 18,
+    "tests_failed": 0
+  }
+}
+

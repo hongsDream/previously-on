@@ -1,0 +1,1224 @@
+use std::collections::HashSet;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+
+use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use uuid::Uuid;
+
+use crate::domain::{
+    ChangeAttribution, ChangeStatus, CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind,
+    FileChangeV1, SCHEMA_VERSION_V1,
+};
+use crate::APP_VERSION;
+
+pub const TESTED_CODEX_VERSION: &str = "0.144.2";
+pub const SUPPORTED_CODEX_VERSIONS: [&str; 2] = ["0.144.2", "0.144.1"];
+const MAX_PAGES: usize = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppServerCapabilityStatus {
+    Complete,
+    Degraded,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerCapabilityReport {
+    pub schema_version: u16,
+    pub status: AppServerCapabilityStatus,
+    pub tested_codex_version: String,
+    pub detected_codex_version: Option<String>,
+    pub app_server_user_agent: Option<String>,
+    pub supported_methods: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl AppServerCapabilityReport {
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            schema_version: 1,
+            status: AppServerCapabilityStatus::Unsupported,
+            tested_codex_version: TESTED_CODEX_VERSION.to_string(),
+            detected_codex_version: None,
+            app_server_user_agent: None,
+            supported_methods: Vec::new(),
+            warnings: vec![reason.into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerThreadSummary {
+    pub id: String,
+    pub session_id: String,
+    pub cwd: PathBuf,
+    pub cli_version: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub preview: String,
+    pub coverage: CoverageV1,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedThreadV1 {
+    pub schema_version: u16,
+    pub id: String,
+    pub session_id: String,
+    pub cwd: PathBuf,
+    pub cli_version: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub coverage: CoverageV1,
+    /// The documented `thread/read` response. Only documented, allowlisted item variants are
+    /// projected, and the raw transcript is never written to the canonical store.
+    pub thread: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticThreadProjectionV1 {
+    pub schema_version: u16,
+    pub events: Vec<EventEnvelopeV1>,
+    pub coverage: CoverageV1,
+}
+
+/// Project the documented, stable `thread/read` item variants into bounded canonical events.
+///
+/// This deliberately ignores reasoning, plan, image, and tool-detail payloads. Text, command
+/// output, and file metadata are redacted and capped before they cross the storage boundary; the
+/// raw App Server response must never be passed to the canonical store.
+pub fn project_thread_events(
+    thread: &ImportedThreadV1,
+    repository_id: &str,
+    repository_root: &Path,
+) -> SemanticThreadProjectionV1 {
+    let mut coverage = thread.coverage.clone();
+    let mut events = Vec::new();
+    let created_at = timestamp_seconds(thread.created_at);
+    let updated_at = timestamp_seconds(thread.updated_at);
+    let repository_path = repository_root.to_string_lossy().to_string();
+
+    events.push(semantic_event(
+        format!("codex-app-server:thread:{}:start", thread.id),
+        repository_id,
+        &thread.session_id,
+        EventKind::SessionStarted,
+        created_at,
+        0,
+        json!({
+            "thread_id": thread.id,
+            "session_id": thread.session_id,
+            "repository_path": repository_path,
+            "app_server_source": "thread/read",
+            "untrusted_data": true,
+            "raw_transcript_stored": false
+        }),
+        &coverage,
+    ));
+
+    let mut saw_prompt = false;
+    let mut saw_final = false;
+    let mut latest_final = None;
+    let Some(turns) = thread.thread.get("turns").and_then(Value::as_array) else {
+        degrade(
+            &mut coverage,
+            "thread turns",
+            "thread/read omitted a turns array; only thread lifecycle metadata was projected",
+        );
+        return finish_semantic_projection(
+            thread,
+            repository_id,
+            repository_root,
+            updated_at,
+            events,
+            coverage,
+            None,
+        );
+    };
+
+    for (turn_index, turn) in turns.iter().enumerate() {
+        let Some(turn_object) = turn.as_object() else {
+            continue;
+        };
+        let turn_id = turn_object
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown-turn");
+        let Some(items) = turn_object.get("items").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut turn_final: Option<(String, String, i64, DateTime<Utc>, bool)> = None;
+        for (item_index, item) in items.iter().enumerate() {
+            let Some(item_object) = item.as_object() else {
+                continue;
+            };
+            let Some(item_id) = item_object.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(item_type) = item_object.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            let sequence = 1 + (turn_index as i64 * 10_000) + item_index as i64;
+            let occurred_at = item_timestamp(item)
+                .unwrap_or_else(|| created_at + Duration::microseconds(sequence));
+            match item_type {
+                "userMessage" => {
+                    if let Some(prompt) = bounded_message_content(item_object.get("content")) {
+                        saw_prompt = true;
+                        events.push(semantic_event(
+                            format!(
+                                "codex-app-server:thread:{}:item:{}:user-message",
+                                thread.id, item_id
+                            ),
+                            repository_id,
+                            &thread.session_id,
+                            EventKind::UserPrompt,
+                            occurred_at,
+                            sequence,
+                            json!({
+                                "thread_id": thread.id,
+                                "turn_id": turn_id,
+                                "item_id": item_id,
+                                "session_id": thread.session_id,
+                                "repository_path": repository_path,
+                                "prompt": prompt,
+                                "app_server_item_type": item_type,
+                                "untrusted_data": true,
+                                "raw_transcript_stored": false
+                            }),
+                            &coverage,
+                        ));
+                    } else {
+                        degrade(
+                            &mut coverage,
+                            "text user prompt",
+                            format!("userMessage item `{item_id}` contained no text to project"),
+                        );
+                    }
+                }
+                "agentMessage" => {
+                    if let Some(text) = item_object
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(crate::redaction::redact_excerpt)
+                        .filter(|text| !text.trim().is_empty())
+                    {
+                        let explicit_final = item_object.get("phase").and_then(Value::as_str)
+                            == Some("final_answer");
+                        if explicit_final
+                            || turn_final.as_ref().is_none_or(|candidate| !candidate.4)
+                        {
+                            turn_final = Some((
+                                item_id.to_string(),
+                                text,
+                                sequence,
+                                occurred_at,
+                                explicit_final,
+                            ));
+                        }
+                    }
+                }
+                "commandExecution" => {
+                    let Some(command) = item_object
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .map(crate::redaction::redact_excerpt)
+                        .filter(|command| !command.trim().is_empty())
+                    else {
+                        degrade(
+                            &mut coverage,
+                            "command execution command",
+                            format!("commandExecution item `{item_id}` omitted command text"),
+                        );
+                        continue;
+                    };
+                    let output = item_object
+                        .get("aggregatedOutput")
+                        .and_then(Value::as_str)
+                        .map(crate::redaction::redact_excerpt);
+                    events.push(semantic_event(
+                        format!(
+                            "codex-app-server:thread:{}:item:{}:command-execution",
+                            thread.id, item_id
+                        ),
+                        repository_id,
+                        &thread.session_id,
+                        EventKind::ToolFinished,
+                        occurred_at,
+                        sequence,
+                        json!({
+                            "thread_id": thread.id,
+                            "turn_id": turn_id,
+                            "item_id": item_id,
+                            "session_id": thread.session_id,
+                            "repository_path": repository_path,
+                            "tool_name": "Bash",
+                            "tool_use_id": item_id,
+                            "tool_input": {"command": command},
+                            "tool_response": {
+                                "status": item_object.get("status").cloned(),
+                                "exit_code": item_object.get("exitCode").cloned(),
+                                "output": output
+                            },
+                            "app_server_item_type": item_type,
+                            "untrusted_data": true,
+                            "raw_transcript_stored": false
+                        }),
+                        &coverage,
+                    ));
+                }
+                "fileChange" => {
+                    let changes = project_file_changes(
+                        item_object.get("changes"),
+                        repository_id,
+                        &thread.session_id,
+                    );
+                    if changes.is_empty() {
+                        degrade(
+                            &mut coverage,
+                            "file change metadata",
+                            format!("fileChange item `{item_id}` contained no usable paths"),
+                        );
+                        continue;
+                    }
+                    events.push(semantic_event(
+                        format!(
+                            "codex-app-server:thread:{}:item:{}:file-change",
+                            thread.id, item_id
+                        ),
+                        repository_id,
+                        &thread.session_id,
+                        EventKind::ToolFinished,
+                        occurred_at,
+                        sequence,
+                        json!({
+                            "thread_id": thread.id,
+                            "turn_id": turn_id,
+                            "item_id": item_id,
+                            "session_id": thread.session_id,
+                            "repository_path": repository_path,
+                            "tool_name": "CodexAppServerFileChange",
+                            "tool_use_id": item_id,
+                            "tool_input": {
+                                "path": changes.first().map(|change| change.path.clone()),
+                                "change_count": changes.len()
+                            },
+                            "tool_response": {"status": item_object.get("status").cloned()},
+                            "file_changes": changes,
+                            "attribution_policy": "observed_changed_in",
+                            "app_server_item_type": item_type,
+                            "untrusted_data": true,
+                            "raw_transcript_stored": false
+                        }),
+                        &coverage,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if let Some((item_id, text, sequence, occurred_at, explicit_final)) = turn_final {
+            if !explicit_final {
+                degrade(
+                    &mut coverage,
+                    "assistant final phase",
+                    format!(
+                        "agentMessage item `{item_id}` omitted `phase: final_answer`; the last agent message in its turn was used"
+                    ),
+                );
+            }
+            saw_final = true;
+            latest_final = Some(text.clone());
+            events.push(semantic_event(
+                format!(
+                    "codex-app-server:thread:{}:item:{}:assistant-final",
+                    thread.id, item_id
+                ),
+                repository_id,
+                &thread.session_id,
+                EventKind::AssistantFinal,
+                occurred_at,
+                sequence,
+                json!({
+                    "thread_id": thread.id,
+                    "turn_id": turn_id,
+                    "item_id": item_id,
+                    "session_id": thread.session_id,
+                    "repository_path": repository_path,
+                    "last_assistant_message": text,
+                    "app_server_item_type": "agentMessage",
+                    "untrusted_data": true,
+                    "raw_transcript_stored": false
+                }),
+                &coverage,
+            ));
+        }
+    }
+
+    if !saw_prompt {
+        degrade(
+            &mut coverage,
+            "user prompt",
+            "no text userMessage item was available for semantic reconstruction",
+        );
+    }
+    if !saw_final {
+        degrade(
+            &mut coverage,
+            "assistant final",
+            "no agentMessage item was available for semantic reconstruction",
+        );
+    }
+    finish_semantic_projection(
+        thread,
+        repository_id,
+        repository_root,
+        updated_at,
+        events,
+        coverage,
+        latest_final,
+    )
+}
+
+fn finish_semantic_projection(
+    thread: &ImportedThreadV1,
+    repository_id: &str,
+    repository_root: &Path,
+    updated_at: DateTime<Utc>,
+    mut events: Vec<EventEnvelopeV1>,
+    coverage: CoverageV1,
+    latest_final: Option<String>,
+) -> SemanticThreadProjectionV1 {
+    let sequence = i64::MAX - 1;
+    events.push(semantic_event(
+        format!("codex-app-server:thread:{}:stop", thread.id),
+        repository_id,
+        &thread.session_id,
+        EventKind::SessionStopped,
+        updated_at,
+        sequence,
+        json!({
+            "thread_id": thread.id,
+            "session_id": thread.session_id,
+            "repository_path": repository_root.to_string_lossy(),
+            "last_assistant_message": latest_final,
+            "app_server_source": "thread/read",
+            "untrusted_data": true,
+            "raw_transcript_stored": false
+        }),
+        &coverage,
+    ));
+    for event in &mut events {
+        event.coverage = CoverageV1::merge([&event.coverage, &coverage]);
+        event.coverage.captured.extend([
+            "thread/read semantic projection".to_string(),
+            "stable source id".to_string(),
+        ]);
+        event.coverage.captured.sort();
+        event.coverage.captured.dedup();
+    }
+    SemanticThreadProjectionV1 {
+        schema_version: SCHEMA_VERSION_V1,
+        events,
+        coverage,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn semantic_event(
+    source_id: String,
+    repository_id: &str,
+    session_id: &str,
+    kind: EventKind,
+    occurred_at: DateTime<Utc>,
+    sequence: i64,
+    payload: Value,
+    coverage: &CoverageV1,
+) -> EventEnvelopeV1 {
+    let mut event = EventEnvelopeV1::new(
+        &source_id,
+        repository_id,
+        session_id,
+        kind,
+        occurred_at,
+        payload,
+    );
+    event.dedupe_key = source_id.clone();
+    event.event_id = format!(
+        "evt-{}",
+        &hex::encode(Sha256::digest(source_id.as_bytes()))[..24]
+    );
+    event.sequence = Some(sequence);
+    event.coverage = coverage.clone();
+    event
+}
+
+fn timestamp_seconds(seconds: i64) -> DateTime<Utc> {
+    Utc.timestamp_opt(seconds, 0)
+        .single()
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+}
+
+fn item_timestamp(item: &Value) -> Option<DateTime<Utc>> {
+    for key in ["createdAt", "updatedAt", "timestamp"] {
+        if let Some(seconds) = item.get(key).and_then(Value::as_i64) {
+            return Utc.timestamp_opt(seconds, 0).single();
+        }
+        if let Some(timestamp) = item.get(key).and_then(Value::as_str) {
+            if let Ok(timestamp) = DateTime::parse_from_rfc3339(timestamp) {
+                return Some(timestamp.with_timezone(&Utc));
+            }
+        }
+    }
+    None
+}
+
+fn bounded_message_content(content: Option<&Value>) -> Option<String> {
+    let content = content?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                let object = part.as_object()?;
+                (object.get("type").and_then(Value::as_str) == Some("text"))
+                    .then(|| object.get("text").and_then(Value::as_str))
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then(|| crate::redaction::redact_excerpt(&text))
+}
+
+fn project_file_changes(
+    changes: Option<&Value>,
+    repository_id: &str,
+    session_id: &str,
+) -> Vec<FileChangeV1> {
+    changes
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|change| {
+            let path = change.get("path")?.as_str()?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            let status = match change
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "add" | "added" | "create" | "created" => ChangeStatus::Added,
+                "delete" | "deleted" | "remove" | "removed" => ChangeStatus::Deleted,
+                "rename" | "renamed" | "move" | "moved" => ChangeStatus::Renamed,
+                "update" | "updated" | "modify" | "modified" => ChangeStatus::Modified,
+                _ => ChangeStatus::Unknown,
+            };
+            Some(FileChangeV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                repository_id: repository_id.to_string(),
+                session_id: session_id.to_string(),
+                task_id: None,
+                path: crate::redaction::redact_excerpt(path),
+                previous_path: change
+                    .get("previousPath")
+                    .and_then(Value::as_str)
+                    .map(crate::redaction::redact_excerpt),
+                status,
+                additions: None,
+                deletions: None,
+                attribution: ChangeAttribution::ObservedChangedIn,
+                before_head: None,
+                after_head: None,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerRpcError {
+    pub method: String,
+    pub code: Option<i64>,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+impl fmt::Display for AppServerRpcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.code {
+            Some(code) => write!(
+                formatter,
+                "Codex app-server {} error {code}: {}",
+                self.method, self.message
+            ),
+            None => write!(
+                formatter,
+                "Codex app-server {} error: {}",
+                self.method, self.message
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AppServerRpcError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadImportDisposition {
+    Imported,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadImportNoticeV1 {
+    pub thread_id: Option<String>,
+    pub disposition: ThreadImportDisposition,
+    pub coverage: CoverageV1,
+    pub message: String,
+    pub rpc_error: Option<AppServerRpcError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadListReportV1 {
+    pub schema_version: u16,
+    pub threads: Vec<AppServerThreadSummary>,
+    pub coverage: CoverageV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadImportReportV1 {
+    pub schema_version: u16,
+    pub threads: Vec<ImportedThreadV1>,
+    pub notices: Vec<ThreadImportNoticeV1>,
+    pub coverage: CoverageV1,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadPage {
+    data: Vec<Value>,
+    next_cursor: Option<String>,
+}
+
+pub struct AppServerClient {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+    initialize_result: Value,
+}
+
+impl AppServerClient {
+    pub async fn connect() -> Result<Self> {
+        Self::connect_with_program("codex").await
+    }
+
+    pub async fn connect_with_program(program: impl AsRef<Path>) -> Result<Self> {
+        let mut child = Command::new(program.as_ref())
+            .arg("app-server")
+            .arg("--stdio")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("start {} app-server", program.as_ref().display()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("Codex app-server stdin unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("Codex app-server stdout unavailable")?;
+        let mut client = Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+            initialize_result: Value::Null,
+        };
+        let initialized = client
+            .request_timed(
+                "initialize",
+                json!({
+                    "clientInfo": {
+                        "name": "previously-on",
+                        "title": "PreviouslyOn",
+                        "version": APP_VERSION
+                    },
+                    "capabilities": {
+                        "experimentalApi": false,
+                        "requestAttestation": false
+                    }
+                }),
+            )
+            .await
+            .context("initialize Codex app-server")?;
+        client.initialize_result = initialized;
+        client.notify("initialized", json!({})).await?;
+        Ok(client)
+    }
+
+    pub fn initialize_result(&self) -> &Value {
+        &self.initialize_result
+    }
+
+    pub async fn capability_report(&mut self) -> AppServerCapabilityReport {
+        let detected_codex_version = codex_version().await.ok();
+        let app_server_user_agent = self
+            .initialize_result
+            .get("userAgent")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut warnings = Vec::new();
+        let status = match detected_codex_version.as_deref() {
+            Some(version) if SUPPORTED_CODEX_VERSIONS.contains(&version) => {
+                AppServerCapabilityStatus::Complete
+            }
+            Some(version) => {
+                warnings.push(format!(
+                    "Codex {version} differs from supported schemas {}",
+                    SUPPORTED_CODEX_VERSIONS.join(", ")
+                ));
+                AppServerCapabilityStatus::Degraded
+            }
+            None => {
+                warnings.push("unable to determine Codex version".to_string());
+                AppServerCapabilityStatus::Degraded
+            }
+        };
+        AppServerCapabilityReport {
+            schema_version: 1,
+            status,
+            tested_codex_version: TESTED_CODEX_VERSION.to_string(),
+            detected_codex_version,
+            app_server_user_agent,
+            supported_methods: vec![
+                "initialize".to_string(),
+                "initialized".to_string(),
+                "thread/list".to_string(),
+                "thread/read".to_string(),
+            ],
+            warnings,
+        }
+    }
+
+    pub async fn list_threads(
+        &mut self,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<AppServerThreadSummary>> {
+        Ok(self.list_threads_report(cwd).await?.threads)
+    }
+
+    /// Lists all readable summaries while isolating schema and pagination faults.
+    ///
+    /// A malformed later page or repeated cursor stops pagination and marks coverage degraded;
+    /// summaries already validated remain usable. This prevents one bad page from contaminating
+    /// or discarding the rest of an import.
+    pub async fn list_threads_report(&mut self, cwd: Option<&Path>) -> Result<ThreadListReportV1> {
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        let mut threads = Vec::new();
+        let mut coverage = complete_coverage(["thread/list"]);
+        for _ in 0..MAX_PAGES {
+            let mut params = json!({
+                "limit": 100,
+                "sortKey": "created_at",
+                "sortDirection": "desc",
+                "useStateDbOnly": false
+            });
+            if let Some(cursor) = &cursor {
+                params["cursor"] = json!(cursor);
+            }
+            if let Some(cwd) = cwd {
+                params["cwd"] = json!(cwd.to_string_lossy());
+            }
+            let response = match self.request_timed("thread/list", params).await {
+                Ok(response) => response,
+                Err(error) => {
+                    degrade(
+                        &mut coverage,
+                        "thread/list page",
+                        format!("Codex thread/list stopped safely: {error}"),
+                    );
+                    break;
+                }
+            };
+            let page: ThreadPage = match serde_json::from_value(response) {
+                Ok(page) => page,
+                Err(error) => {
+                    degrade(
+                        &mut coverage,
+                        "thread/list page",
+                        format!("invalid Codex thread/list response; pagination stopped: {error}"),
+                    );
+                    break;
+                }
+            };
+            for thread in page.data {
+                match parse_thread_summary(thread) {
+                    Ok(thread) => threads.push(thread),
+                    Err(error) => degrade(
+                        &mut coverage,
+                        "thread/list item",
+                        format!("malformed thread summary skipped: {error}"),
+                    ),
+                }
+            }
+            match page.next_cursor {
+                None => {
+                    return Ok(ThreadListReportV1 {
+                        schema_version: 1,
+                        threads,
+                        coverage,
+                    })
+                }
+                Some(next) if !seen_cursors.insert(next.clone()) => {
+                    degrade(
+                        &mut coverage,
+                        "thread/list pagination",
+                        format!("Codex thread/list repeated cursor `{next}`; pagination stopped"),
+                    );
+                    break;
+                }
+                Some(next) => cursor = Some(next),
+            }
+        }
+        if coverage.status == CoverageStatus::Complete {
+            degrade(
+                &mut coverage,
+                "thread/list pagination",
+                format!("Codex thread/list exceeded {MAX_PAGES} pages"),
+            );
+        }
+        Ok(ThreadListReportV1 {
+            schema_version: 1,
+            threads,
+            coverage,
+        })
+    }
+
+    pub async fn read_thread(&mut self, thread_id: &str) -> Result<Value> {
+        let result = self
+            .request_timed(
+                "thread/read",
+                json!({ "threadId": thread_id, "includeTurns": true }),
+            )
+            .await
+            .with_context(|| format!("Codex thread/read failed for {thread_id}"))?;
+        result
+            .get("thread")
+            .cloned()
+            .context("Codex thread/read response omitted `thread`")
+    }
+
+    pub async fn import_threads(&mut self, cwd: &Path) -> Result<Vec<ImportedThreadV1>> {
+        Ok(self.import_threads_report(cwd).await?.threads)
+    }
+
+    pub async fn import_threads_report(&mut self, cwd: &Path) -> Result<ThreadImportReportV1> {
+        let listed = self.list_threads_report(Some(cwd)).await?;
+        let mut imported = Vec::with_capacity(listed.threads.len());
+        let mut notices = Vec::new();
+        let mut coverages = vec![listed.coverage.clone()];
+        for summary in listed.threads {
+            let thread = match self.read_thread(&summary.id).await {
+                Ok(thread) => thread,
+                Err(error) => {
+                    let rpc_error = error.downcast_ref::<AppServerRpcError>().cloned();
+                    let deleted = rpc_error.as_ref().is_some_and(is_deleted_thread_error);
+                    let mut coverage = complete_coverage(std::iter::empty::<&str>());
+                    degrade(
+                        &mut coverage,
+                        "thread/read",
+                        if deleted {
+                            "thread was deleted before import and was skipped".to_string()
+                        } else {
+                            format!("thread/read failed; thread skipped: {error}")
+                        },
+                    );
+                    coverages.push(coverage.clone());
+                    notices.push(ThreadImportNoticeV1 {
+                        thread_id: Some(summary.id),
+                        disposition: ThreadImportDisposition::Skipped,
+                        message: coverage.warnings.join("; "),
+                        coverage,
+                        rpc_error,
+                    });
+                    continue;
+                }
+            };
+            let (thread, thread_coverage) =
+                normalize_and_assess_thread(thread, &summary.cli_version);
+            let coverage = CoverageV1::merge([&summary.coverage, &thread_coverage]);
+            if coverage.status != CoverageStatus::Complete {
+                notices.push(ThreadImportNoticeV1 {
+                    thread_id: Some(summary.id.clone()),
+                    disposition: ThreadImportDisposition::Imported,
+                    message: coverage.warnings.join("; "),
+                    coverage: coverage.clone(),
+                    rpc_error: None,
+                });
+            }
+            coverages.push(coverage.clone());
+            imported.push(ImportedThreadV1 {
+                schema_version: 1,
+                id: summary.id,
+                session_id: summary.session_id,
+                cwd: summary.cwd,
+                cli_version: summary.cli_version,
+                created_at: summary.created_at,
+                updated_at: summary.updated_at,
+                coverage,
+                thread,
+            });
+        }
+        let coverage = CoverageV1::merge(coverages.iter());
+        Ok(ThreadImportReportV1 {
+            schema_version: 1,
+            threads: imported,
+            notices,
+            coverage,
+        })
+    }
+
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.stdin.shutdown().await.ok();
+        match tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await {
+            Ok(result) => {
+                result?;
+            }
+            Err(_) => {
+                self.child.kill().await.ok();
+            }
+        }
+        Ok(())
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .await?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = self.stdout.read_line(&mut line).await?;
+            if read == 0 {
+                bail!("Codex app-server closed stdout while waiting for {method}");
+            }
+            let message: Value = serde_json::from_str(line.trim_end())
+                .context("invalid JSON from Codex app-server")?;
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                // Server notifications are intentionally ignored by the importer. They are not
+                // transcript evidence and do not change the requested response.
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                let rpc_error = AppServerRpcError {
+                    method: method.to_string(),
+                    code: error.get("code").and_then(Value::as_i64),
+                    message: error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unspecified JSON-RPC error")
+                        .to_string(),
+                    data: error.get("data").cloned(),
+                };
+                return Err(anyhow::Error::new(rpc_error));
+            }
+            return message
+                .get("result")
+                .cloned()
+                .with_context(|| format!("Codex app-server {method} response omitted result"));
+        }
+    }
+
+    async fn request_timed(&mut self, method: &str, params: Value) -> Result<Value> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.request(method, params),
+        )
+        .await
+        .with_context(|| format!("Codex app-server {method} timed out"))?
+    }
+
+    async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }))
+        .await
+    }
+
+    async fn write_message(&mut self, message: &Value) -> Result<()> {
+        let bytes = serde_json::to_vec(message)?;
+        self.stdin.write_all(&bytes).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await?;
+        Ok(())
+    }
+}
+
+pub async fn inspect_capabilities() -> AppServerCapabilityReport {
+    match AppServerClient::connect().await {
+        Ok(mut client) => {
+            let report = client.capability_report().await;
+            client.shutdown().await.ok();
+            report
+        }
+        Err(error) => AppServerCapabilityReport::unsupported(error.to_string()),
+    }
+}
+
+fn parse_thread_summary(raw: Value) -> Result<AppServerThreadSummary> {
+    let required_string = |key: &str| -> Result<String> {
+        raw.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .with_context(|| format!("Codex thread/list item omitted non-empty `{key}`"))
+    };
+    let required_i64 = |key: &str| -> Result<i64> {
+        raw.get(key)
+            .and_then(Value::as_i64)
+            .with_context(|| format!("Codex thread/list item omitted `{key}`"))
+    };
+    let mut coverage = complete_coverage(["thread summary"]);
+    let session_id = match raw.get("sessionId").and_then(Value::as_str) {
+        Some(session_id) if !session_id.is_empty() => session_id.to_string(),
+        _ => {
+            let generated = format!("app-import-{}", Uuid::now_v7());
+            degrade(
+                &mut coverage,
+                "stable session source ID",
+                format!(
+                    "thread summary omitted stable sessionId; assigned UUID `{generated}` without payload-hash deduplication"
+                ),
+            );
+            generated
+        }
+    };
+    Ok(AppServerThreadSummary {
+        id: required_string("id")?,
+        session_id,
+        cwd: PathBuf::from(required_string("cwd")?),
+        cli_version: required_string("cliVersion")?,
+        created_at: required_i64("createdAt")?,
+        updated_at: required_i64("updatedAt")?,
+        preview: required_string("preview")?,
+        coverage,
+        raw,
+    })
+}
+
+fn complete_coverage(items: impl IntoIterator<Item = impl Into<String>>) -> CoverageV1 {
+    CoverageV1 {
+        captured: items.into_iter().map(Into::into).collect(),
+        ..CoverageV1::default()
+    }
+}
+
+fn degrade(coverage: &mut CoverageV1, missing: impl Into<String>, warning: impl Into<String>) {
+    coverage.status = CoverageStatus::Degraded;
+    let missing = missing.into();
+    if !coverage.missing.contains(&missing) {
+        coverage.missing.push(missing);
+    }
+    let warning = warning.into();
+    if !coverage.warnings.contains(&warning) {
+        coverage.warnings.push(warning);
+    }
+}
+
+fn is_deleted_thread_error(error: &AppServerRpcError) -> bool {
+    let mut evidence = error.message.to_ascii_lowercase();
+    if let Some(data) = &error.data {
+        evidence.push(' ');
+        evidence.push_str(&data.to_string().to_ascii_lowercase());
+    }
+    matches!(error.code, Some(-32001) | Some(-32004))
+        || evidence.contains("not found")
+        || evidence.contains("deleted")
+        || evidence.contains("thread_not_found")
+}
+
+fn normalize_and_assess_thread(mut thread: Value, cli_version: &str) -> (Value, CoverageV1) {
+    let mut coverage = complete_coverage(["thread/read"]);
+    if !SUPPORTED_CODEX_VERSIONS.contains(&cli_version) {
+        degrade(
+            &mut coverage,
+            "tested App Server version",
+            format!(
+                "thread was recorded by Codex {cli_version}; supported versions are {}",
+                SUPPORTED_CODEX_VERSIONS.join(", ")
+            ),
+        );
+    }
+
+    if thread.get("compacted").and_then(Value::as_bool) == Some(true)
+        || value_contains_marker(thread.get("status"), &["compact", "incomplete"])
+    {
+        degrade(
+            &mut coverage,
+            "complete thread history",
+            "thread is compacted or incomplete; available turns were imported as untrusted data",
+        );
+    }
+
+    let Some(turns) = thread.get_mut("turns").and_then(Value::as_array_mut) else {
+        degrade(
+            &mut coverage,
+            "thread turns",
+            "thread/read omitted a turns array",
+        );
+        return (thread, coverage);
+    };
+
+    for (turn_index, turn) in turns.iter_mut().enumerate() {
+        let Some(turn_object) = turn.as_object_mut() else {
+            degrade(
+                &mut coverage,
+                "well-formed turn",
+                format!("turn {turn_index} was not an object and remains opaque"),
+            );
+            continue;
+        };
+        ensure_uuid_source_id(turn_object, "turn", turn_index, &mut coverage);
+        if value_contains_marker(
+            turn_object.get("status"),
+            &["failed", "interrupt", "incomplete"],
+        ) {
+            degrade(
+                &mut coverage,
+                "completed turn",
+                format!("turn {turn_index} is incomplete or interrupted"),
+            );
+        }
+        let Some(items) = turn_object.get_mut("items").and_then(Value::as_array_mut) else {
+            degrade(
+                &mut coverage,
+                "turn items",
+                format!("turn {turn_index} omitted an items array"),
+            );
+            continue;
+        };
+        for (item_index, item) in items.iter_mut().enumerate() {
+            let Some(item_object) = item.as_object_mut() else {
+                degrade(
+                    &mut coverage,
+                    "well-formed thread item",
+                    format!("turn {turn_index} item {item_index} was not an object"),
+                );
+                continue;
+            };
+            ensure_uuid_source_id(item_object, "item", item_index, &mut coverage);
+            let item_type = item_object.get("type").and_then(Value::as_str);
+            if !item_type.is_some_and(is_known_thread_item_type) {
+                degrade(
+                    &mut coverage,
+                    "known thread item schema",
+                    format!(
+                        "turn {turn_index} item {item_index} has unknown type `{}` and remains opaque",
+                        item_type.unwrap_or("<missing>")
+                    ),
+                );
+            }
+        }
+    }
+    (thread, coverage)
+}
+
+fn ensure_uuid_source_id(
+    object: &mut serde_json::Map<String, Value>,
+    kind: &str,
+    index: usize,
+    coverage: &mut CoverageV1,
+) {
+    let has_stable_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty());
+    if has_stable_id {
+        return;
+    }
+    let source_id = format!("app-import-{}", Uuid::now_v7());
+    object.insert("id".to_string(), Value::String(source_id.clone()));
+    degrade(
+        coverage,
+        format!("stable {kind} source ID"),
+        format!(
+            "{kind} {index} omitted a stable ID; assigned UUID `{source_id}` without payload-hash deduplication"
+        ),
+    );
+}
+
+fn value_contains_marker(value: Option<&Value>, markers: &[&str]) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let rendered = value.to_string().to_ascii_lowercase();
+    markers.iter().any(|marker| rendered.contains(marker))
+}
+
+fn is_known_thread_item_type(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "userMessage"
+            | "agentMessage"
+            | "plan"
+            | "reasoning"
+            | "commandExecution"
+            | "fileChange"
+            | "mcpToolCall"
+            | "webSearch"
+            | "imageView"
+            | "enteredReviewMode"
+            | "exitedReviewMode"
+            | "contextCompaction"
+    )
+}
+
+pub async fn codex_version() -> Result<String> {
+    let output = Command::new("codex")
+        .arg("--version")
+        .output()
+        .await
+        .context("run codex --version")?;
+    if !output.status.success() {
+        bail!("codex --version exited with {}", output.status);
+    }
+    let stdout = String::from_utf8(output.stdout).context("codex --version was not UTF-8")?;
+    stdout
+        .split_whitespace()
+        .last()
+        .map(str::to_string)
+        .context("codex --version returned no version")
+}

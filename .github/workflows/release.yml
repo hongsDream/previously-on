@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility-evidence:
+    name: separately supplied live compatibility evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: release-compatibility
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Download pinned live compatibility evidence bundle
+        env:
+          BUNDLE_URL: ${{ vars.LIVE_COMPATIBILITY_BUNDLE_URL }}
+          BUNDLE_SHA256: ${{ vars.LIVE_COMPATIBILITY_BUNDLE_SHA256 }}
+        run: |
+          test -n "$BUNDLE_URL"
+          test "${BUNDLE_URL#https://}" != "$BUNDLE_URL"
+          printf '%s' "$BUNDLE_SHA256" | grep -E '^[0-9a-fA-F]{64}$'
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --output "${RUNNER_TEMP}/live-compatibility.tar.gz" "$BUNDLE_URL"
+          printf '%s  %s\n' "$BUNDLE_SHA256" "${RUNNER_TEMP}/live-compatibility.tar.gz" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/live-compatibility"
+          tar -tzf "${RUNNER_TEMP}/live-compatibility.tar.gz" > "${RUNNER_TEMP}/live-compatibility.entries"
+          node -e '
+            const fs = require("node:fs");
+            const entries = fs.readFileSync(process.argv[1], "utf8").split(/\r?\n/).filter(Boolean);
+            if (!entries.includes("live-compatibility.json")) throw new Error("bundle omitted live-compatibility.json");
+            for (const entry of entries) {
+              const normalized = entry.replaceAll("\\", "/");
+              if (normalized.startsWith("/") || normalized.split("/").includes("..")) {
+                throw new Error(`unsafe archive entry: ${entry}`);
+              }
+            }
+          ' "${RUNNER_TEMP}/live-compatibility.entries"
+          tar -tvzf "${RUNNER_TEMP}/live-compatibility.tar.gz" \
+            | awk 'substr($1,1,1) !~ /^[-d]$/ { exit 1 }'
+          tar -xzf "${RUNNER_TEMP}/live-compatibility.tar.gz" \
+            -C "${RUNNER_TEMP}/live-compatibility" --no-same-owner --no-same-permissions
+      - name: Validate live evidence against the tag and current Codex versions
+        run: |
+          VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
+          node scripts/validate-live-compatibility.mjs \
+            "${RUNNER_TEMP}/live-compatibility/live-compatibility.json" \
+            --commit "$GITHUB_SHA" \
+            --product-version "$VERSION" \
+            --resolve-current-codex
+      - name: Carry eligible evidence into this workflow only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: eligible-live-compatibility-${{ github.sha }}
+          path: ${{ runner.temp }}/live-compatibility/
+          if-no-files-found: error
+          retention-days: 30
+
+  release-build:
+    name: clean tagged release build
+    needs: compatibility-evidence
+    # Standard public macos-14 is arm64 per GitHub's hosted-runner contract.
+    runs-on: macos-14
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Verify clean annotated version
+        run: |
+          VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+      - name: Install Rust 1.90
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt,clippy && rustup default 1.90.0
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Download the eligible live compatibility evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: eligible-live-compatibility-${{ github.sha }}
+          path: ${{ runner.temp }}/live-compatibility
+      - name: Revalidate evidence in the release job
+        run: |
+          VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
+          node scripts/validate-live-compatibility.mjs \
+            "${RUNNER_TEMP}/live-compatibility/live-compatibility.json" \
+            --commit "$GITHUB_SHA" \
+            --product-version "$VERSION"
+      - name: Run release gate in clean checkout
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/release
+        run: ./scripts/build-release.sh
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: ${{ runner.temp }}/release/*
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          "${{ runner.temp }}/release/"*
+          --draft
+          --verify-tag
+          --title "PreviouslyOn $GITHUB_REF_NAME"
+          --notes-file CHANGELOG.md
+      - name: Upload release bundle for audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: previously-on-${{ github.ref_name }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-crate:
+    name: protected crates.io publish and exact-version smoke
+    needs: release-build
+    runs-on: macos-14
+    timeout-minutes: 30
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/previously-on
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.90
+        run: rustup toolchain install 1.90.0 --profile minimal && rustup default 1.90.0
+      - name: Publish immutable crate after environment approval
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"
+      - name: Verify exact published version installs
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for attempt in {1..12}; do
+            if cargo install previously-on --version "$VERSION" --locked --root "${RUNNER_TEMP}/published"; then
+              "${RUNNER_TEMP}/published/bin/previously" --version | grep -F "previously $VERSION"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "exact-version crates.io install did not become available" >&2
+          exit 1
+      - name: Publish the verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest=false

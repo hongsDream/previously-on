@@ -1,0 +1,347 @@
+import { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { AppHeader } from './components/AppHeader';
+import { BottomNavigation } from './components/BottomNavigation';
+import { EvidenceInspector } from './components/EvidenceInspector';
+import { Sidebar } from './components/Sidebar';
+import { TaskWorkspace } from './components/TaskWorkspace';
+import { fallbackData } from './data/fallback';
+import {
+  exportRepository,
+  fetchBootstrap,
+  ApiUnavailableError,
+  purgeRepository,
+  revalidateFact,
+  updateFactStatus,
+  updateTaskStatus,
+} from './lib/api';
+import type { BootstrapData, Checkpoint, FactStatus, TaskStatus } from './types';
+
+export function App() {
+  const [data, setData] = useState<BootstrapData | null>(null);
+  const [offlineFallback, setOfflineFallback] = useState(false);
+  const [fatalError, setFatalError] = useState('');
+  const [selectedTaskId, setSelectedTaskId] = useState('');
+  const [selectedCheckpointId, setSelectedCheckpointId] = useState('');
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState('');
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState<TaskStatus | 'all'>('all');
+  const [contextPackExpanded, setContextPackExpanded] = useState(() => (
+    typeof window.matchMedia !== 'function' || !window.matchMedia('(max-width: 900px)').matches
+  ));
+  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(true);
+  const [mutationPending, setMutationPending] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const deferredQuery = useDeferredValue(query);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchBootstrap(controller.signal)
+      .then((bootstrap) => {
+        setData(bootstrap);
+        const task = bootstrap.tasks[0];
+        const checkpointId = task?.checkpointIds[1] ?? task?.checkpointIds[0] ?? '';
+        setSelectedTaskId(task?.id ?? '');
+        setSelectedCheckpointId(checkpointId);
+        setSelectedEvidenceId(bootstrap.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? bootstrap.evidence[0]?.id ?? '');
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        if (!(error instanceof ApiUnavailableError)) {
+          setFatalError(error instanceof Error ? error.message : 'The local API returned an invalid response.');
+          return;
+        }
+        const task = fallbackData.tasks[0];
+        const checkpointId = task.checkpointIds[1];
+        setOfflineFallback(true);
+        setData(fallbackData);
+        setSelectedTaskId(task.id);
+        setSelectedCheckpointId(checkpointId);
+        setSelectedEvidenceId(fallbackData.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? fallbackData.evidence[0].id);
+      });
+    return () => controller.abort();
+  }, []);
+
+  const filteredTasks = useMemo(() => {
+    if (!data) return [];
+    const normalized = deferredQuery.trim().toLowerCase();
+    return data.tasks.filter((task) => {
+      const matchesStatus = status === 'all' || task.status === status;
+      const matchesQuery = normalized.length === 0 || task.title.toLowerCase().includes(normalized) || task.goal.toLowerCase().includes(normalized);
+      return matchesStatus && matchesQuery;
+    });
+  }, [data, deferredQuery, status]);
+
+  if (fatalError) return <ErrorScreen message={fatalError} />;
+  if (!data) return <LoadingScreen />;
+  const currentData = data;
+
+  const performMutation = async <T,>(mutation: () => Promise<T>): Promise<T | null> => {
+    if (offlineFallback || mutationPending) return null;
+    setMutationPending(true);
+    setActionError('');
+    try {
+      return await mutation();
+    } catch (error) {
+      console.error('PreviouslyOn mutation failed', error);
+      setActionError(error instanceof Error ? error.message : 'The local change could not be saved.');
+      return null;
+    } finally {
+      setMutationPending(false);
+    }
+  };
+
+  async function handleExport() {
+    if (offlineFallback || mutationPending) return;
+    setActionError('');
+    try {
+      const exported = await exportRepository();
+      const blob = new Blob([`${JSON.stringify(exported, null, 2)}\n`], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const safeName = currentData.repository.name.replace(/[^a-zA-Z0-9._-]+/g, '-');
+      link.href = url;
+      link.download = `${safeName || 'previously-on'}-export.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'The export could not be created.');
+    }
+  }
+
+  async function handlePurge() {
+    if (offlineFallback || mutationPending) return;
+    const confirmed = window.confirm(`Permanently delete all PreviouslyOn data for ${currentData.repository.path}? This cannot be undone.`);
+    if (!confirmed) return;
+    const purged = await performMutation(purgeRepository);
+    if (purged !== null) {
+      setData((current) => current ? {
+        ...current,
+        tasks: [],
+        checkpoints: [],
+        facts: [],
+        evidence: [],
+        resumeCandidate: undefined,
+        contextPacks: {},
+      } : current);
+      setSelectedTaskId('');
+      setSelectedCheckpointId('');
+      setSelectedEvidenceId('');
+    }
+  }
+
+  if (data.tasks.length === 0) {
+    return (
+      <div className="app-shell">
+        <AppHeader
+          repository={data.repository}
+          onPreview={() => undefined}
+          onExport={() => void handleExport()}
+          onPurge={() => void handlePurge()}
+          actionsDisabled={offlineFallback || mutationPending}
+        />
+        {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
+        <div className="app-body empty-app-body">
+          <Sidebar
+            query={query}
+            status={status}
+            tasks={[]}
+            selectedTaskId=""
+            onQueryChange={setQuery}
+            onStatusChange={setStatus}
+            onTaskSelect={() => undefined}
+            onEvidenceOpen={() => setMobileInspectorOpen(true)}
+          />
+          <EmptyWorkspace repositoryName={data.repository.name} />
+        </div>
+        <BottomNavigation onEvidenceOpen={() => setMobileInspectorOpen(true)} />
+      </div>
+    );
+  }
+
+  const selectedTask = data.tasks.find((task) => task.id === selectedTaskId) ?? filteredTasks[0] ?? data.tasks[0];
+  const taskCheckpoints = selectedTask.checkpointIds
+    .map((id) => data.checkpoints.find((checkpoint) => checkpoint.id === id))
+    .filter((checkpoint): checkpoint is Checkpoint => Boolean(checkpoint));
+  const selectedCheckpoint = taskCheckpoints.find((checkpoint) => checkpoint.id === selectedCheckpointId) ?? taskCheckpoints[0];
+  const explicitlySelectedEvidence = data.evidence.find((evidence) => evidence.id === selectedEvidenceId);
+  const selectedEvidence = selectedCheckpoint
+    ? (explicitlySelectedEvidence?.checkpointId === selectedCheckpoint.id
+        ? explicitlySelectedEvidence
+        : data.evidence.find((evidence) => evidence.checkpointId === selectedCheckpoint.id))
+    : undefined;
+  const selectedFact = data.facts.find((fact) => fact.id === selectedEvidence?.factId) ?? data.facts[0];
+  const resumeCandidate = data.resumeCandidate?.taskId === selectedTask.id ? data.resumeCandidate : undefined;
+
+  const selectTask = (taskId: string) => {
+    const task = data.tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    const checkpointId = task.checkpointIds[0] ?? '';
+    setSelectedTaskId(taskId);
+    setSelectedCheckpointId(checkpointId);
+    setSelectedEvidenceId(data.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? data.evidence[0]?.id ?? '');
+  };
+
+  const selectCheckpoint = (checkpoint: Checkpoint) => {
+    setSelectedCheckpointId(checkpoint.id);
+    const matchingEvidence = data.evidence.find((evidence) => evidence.checkpointId === checkpoint.id);
+    if (matchingEvidence) setSelectedEvidenceId(matchingEvidence.id);
+    setMobileInspectorOpen(true);
+  };
+
+  const selectEvidence = (evidenceId: string) => {
+    const evidence = data.evidence.find((item) => item.id === evidenceId);
+    if (!evidence) return;
+    setSelectedEvidenceId(evidence.id);
+    if (evidence.checkpointId) setSelectedCheckpointId(evidence.checkpointId);
+    setMobileInspectorOpen(true);
+  };
+
+  const handleFactStatus = async (nextStatus: FactStatus, supersedesFactId?: string) => {
+    if (offlineFallback || mutationPending) return;
+    const previousStatus = selectedFact.status;
+    setData((current) => current ? {
+      ...current,
+      facts: current.facts.map((fact) => fact.id === selectedFact.id ? { ...fact, status: nextStatus } : fact),
+    } : current);
+    const saved = await performMutation(() => updateFactStatus(selectedFact.id, nextStatus, supersedesFactId));
+    if (saved === null) {
+      setData((current) => current ? {
+        ...current,
+        facts: current.facts.map((fact) => fact.id === selectedFact.id ? { ...fact, status: previousStatus } : fact),
+      } : current);
+    }
+  };
+
+  const dismissCandidate = () => {
+    if (!resumeCandidate || offlineFallback) return;
+    setData((current) => current ? { ...current, resumeCandidate: undefined } : current);
+  };
+
+  const reviewCandidate = () => {
+    if (!resumeCandidate) return;
+    const recommended = taskCheckpoints.find((checkpoint) => checkpoint.sequence === 2) ?? taskCheckpoints[0];
+    if (recommended) selectCheckpoint(recommended);
+    setContextPackExpanded(true);
+  };
+
+  const handleRevalidate = async () => {
+    if (offlineFallback || mutationPending) return;
+    const result = await performMutation(() => revalidateFact(selectedFact.id));
+    if (!result) return;
+    setData((current) => current ? {
+      ...current,
+      evidence: current.evidence.map((evidence) => selectedFact.evidenceIds.includes(evidence.id)
+        ? { ...evidence, freshness: result.freshness }
+        : evidence),
+      facts: current.facts.map((fact) => fact.id === selectedFact.id
+        ? { ...fact, updatedAt: result.validatedAt }
+        : fact),
+    } : current);
+  };
+
+  const handleTaskStatus = async (nextStatus: TaskStatus) => {
+    if (offlineFallback || mutationPending) return;
+    const previousStatus = selectedTask.status;
+    setData((current) => current ? {
+      ...current,
+      tasks: current.tasks.map((task) => task.id === selectedTask.id ? { ...task, status: nextStatus } : task),
+    } : current);
+    const saved = await performMutation(() => updateTaskStatus(selectedTask.id, nextStatus));
+    if (saved === null) {
+      setData((current) => current ? {
+        ...current,
+        tasks: current.tasks.map((task) => task.id === selectedTask.id ? { ...task, status: previousStatus } : task),
+      } : current);
+    }
+  };
+
+  return (
+    <div className="app-shell">
+      <AppHeader
+        repository={data.repository}
+        onPreview={() => setContextPackExpanded(true)}
+        onExport={() => void handleExport()}
+        onPurge={() => void handlePurge()}
+        actionsDisabled={offlineFallback || mutationPending}
+      />
+      {offlineFallback ? <div className="sample-banner" role="status">Local API unavailable · read-only sample workspace · changes are disabled</div> : null}
+      {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
+      <div className="app-body">
+        <Sidebar
+          query={query}
+          status={status}
+          tasks={filteredTasks}
+          selectedTaskId={selectedTask.id}
+          onQueryChange={setQuery}
+          onStatusChange={setStatus}
+          onTaskSelect={selectTask}
+          onEvidenceOpen={() => setMobileInspectorOpen(true)}
+        />
+        <TaskWorkspace
+          task={selectedTask}
+          checkpoints={taskCheckpoints}
+          selectedCheckpoint={selectedCheckpoint}
+          resumeCandidate={resumeCandidate}
+          contextPack={data.contextPacks[selectedTask.id]}
+          contextPackExpanded={contextPackExpanded}
+          onCheckpointSelect={selectCheckpoint}
+          onReviewResume={reviewCandidate}
+          onDismissResume={dismissCandidate}
+          onToggleContextPack={() => setContextPackExpanded((expanded) => !expanded)}
+          onTaskStatusChange={(nextStatus) => void handleTaskStatus(nextStatus)}
+          mutationPending={mutationPending}
+          onBack={() => document.getElementById('task-search')?.focus()}
+        />
+        {selectedEvidence && selectedFact ? (
+          <EvidenceInspector
+            evidence={selectedEvidence}
+            availableEvidence={data.evidence.filter((evidence) => selectedTask.checkpointIds.includes(evidence.checkpointId))}
+            fact={selectedFact}
+            replacementFacts={data.facts.filter((fact) => fact.id !== selectedFact.id && !['invalid', 'superseded'].includes(fact.status))}
+            mutationPending={mutationPending}
+            mobileOpen={mobileInspectorOpen}
+            onClose={() => setMobileInspectorOpen(false)}
+            onEvidenceSelect={selectEvidence}
+            onStatusChange={(nextStatus, supersedesFactId) => void handleFactStatus(nextStatus, supersedesFactId)}
+            onRevalidate={() => void handleRevalidate()}
+          />
+        ) : null}
+      </div>
+      <BottomNavigation onEvidenceOpen={() => setMobileInspectorOpen(true)} />
+    </div>
+  );
+}
+
+function ErrorScreen({ message }: { message: string }) {
+  return (
+    <main className="loading-screen" role="alert">
+      <span className="loading-mark error-mark" />
+      <h1>PreviouslyOn could not load</h1>
+      <p>{message}</p>
+    </main>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <main className="loading-screen" aria-busy="true">
+      <span className="loading-mark" />
+      <p>Loading PreviouslyOn…</p>
+    </main>
+  );
+}
+
+function EmptyWorkspace({ repositoryName }: { repositoryName: string }) {
+  return (
+    <main className="repository-empty-state">
+      <span className="empty-lineage-mark" aria-hidden="true" />
+      <h1>{repositoryName} is connected</h1>
+      <p>PreviouslyOn is ready to capture the next Codex session. Start a task in this repository, then return here to review its first verified checkpoint.</p>
+      <ol>
+        <li><strong>Start Codex</strong><span>Work normally in the connected repository.</span></li>
+        <li><strong>Finish the session</strong><span>A local checkpoint is created from captured events and Git state.</span></li>
+        <li><strong>Review evidence</strong><span>Confirm facts before they can enter a context pack.</span></li>
+      </ol>
+    </main>
+  );
+}

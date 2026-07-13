@@ -1,0 +1,18 @@
+{
+  "session_id": "thr_fixture_auth",
+  "turn_id": "turn_001",
+  "transcript_path": null,
+  "cwd": "/tmp/context-lineage-fixture",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.5",
+  "permission_mode": "default",
+  "tool_name": "apply_patch",
+  "tool_use_id": "call_patch_001",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch"
+  },
+  "tool_response": {
+    "content": "Done! Authorization: Bearer sk-proj-never-store-this"
+  }
+}
+

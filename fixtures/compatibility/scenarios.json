@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "requiredPerCategory": 6,
+  "scenarios": [
+    {"id":"lifecycle-restart","category":"lifecycle","testTarget":"core_store","testFilter":"deduplicates_and_replays_reordered_events_deterministically","expectation":"restart preserves canonical events"},
+    {"id":"lifecycle-compaction","category":"lifecycle","testTarget":"integration_app_server","testFilter":"isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields","expectation":"compacted threads import degraded"},
+    {"id":"lifecycle-parallel-sessions","category":"lifecycle","testTarget":"core_store","testFilter":"deduplicates_and_replays_reordered_events_deterministically","expectation":"parallel sessions remain isolated"},
+    {"id":"lifecycle-first-prompt","category":"lifecycle","testTarget":"integration_ingestion","testFilter":"resume_candidate_is_evaluated_only_on_the_first_prompt","expectation":"resume suggestion is evaluated once"},
+    {"id":"lifecycle-explicit-resume","category":"lifecycle","testTarget":"integration_ingestion","testFilter":"observed_resume_task_call_links_the_new_session_to_the_existing_task","expectation":"explicit resume links sessions"},
+    {"id":"lifecycle-truncated-queue","category":"lifecycle","testTarget":"integration_hook","testFilter":"replay_quarantines_a_truncated_tail_without_losing_valid_events","expectation":"valid queued events survive a truncated tail"},
+
+    {"id":"reconstruction-prompt","category":"event_reconstruction","testTarget":"integration_ingestion","testFilter":"codex_hook_flow_creates_task_git_checkpoint_and_test_evidence","expectation":"user prompt is reconstructed"},
+    {"id":"reconstruction-assistant-final","category":"event_reconstruction","testTarget":"integration_ingestion","testFilter":"codex_hook_flow_creates_task_git_checkpoint_and_test_evidence","expectation":"assistant final is reconstructed"},
+    {"id":"reconstruction-file-tool","category":"event_reconstruction","testTarget":"integration_ingestion","testFilter":"codex_hook_flow_creates_task_git_checkpoint_and_test_evidence","expectation":"file tool is reconstructed"},
+    {"id":"reconstruction-test-command","category":"event_reconstruction","testTarget":"integration_ingestion","testFilter":"codex_hook_flow_creates_task_git_checkpoint_and_test_evidence","expectation":"test command is reconstructed"},
+    {"id":"reconstruction-stable-source-id","category":"event_reconstruction","testTarget":"integration_hook","testFilter":"stable_turn_ids_make_hook_retries_idempotent_without_hashing_payloads","expectation":"stable source IDs deduplicate retries"},
+    {"id":"reconstruction-missing-source-id","category":"event_reconstruction","testTarget":"integration_hook","testFilter":"missing_stable_hook_ids_use_unique_sources_and_degraded_coverage","expectation":"missing source IDs use UUIDs and degraded coverage"},
+
+    {"id":"git-dirty-worktree","category":"concurrency_git","testTarget":"core_git","testFilter":"captures_repo_and_only_claims_causality_for_tool_observed_paths","expectation":"dirty state is observed without overclaiming"},
+    {"id":"git-linked-worktree","category":"concurrency_git","testTarget":"core_git","testFilter":"linked_worktrees_share_a_logical_repository_but_keep_distinct_snapshot_roots","expectation":"linked worktrees share common-dir identity"},
+    {"id":"git-rename","category":"concurrency_git","testTarget":"core_git","testFilter":"preserves_rename_and_binary_metadata_without_overclaiming_external_changes","expectation":"rename metadata is preserved"},
+    {"id":"git-binary","category":"concurrency_git","testTarget":"core_git","testFilter":"preserves_rename_and_binary_metadata_without_overclaiming_external_changes","expectation":"binary changes remain conservative"},
+    {"id":"git-rebase","category":"concurrency_git","testTarget":"core_git","testFilter":"rebased_history_never_implies_tool_causality","expectation":"rewritten ancestry does not imply tool causality"},
+    {"id":"git-detached-head","category":"concurrency_git","testTarget":"core_git","testFilter":"detached_head_snapshots_remain_valid_and_conservative","expectation":"detached HEAD snapshots remain valid"},
+
+    {"id":"app-server-normal","category":"app_server","testTarget":"integration_app_server","testFilter":"uses_only_documented_app_server_initialize_list_and_read_shapes","expectation":"documented list and read shapes import"},
+    {"id":"app-server-deleted-thread","category":"app_server","testTarget":"integration_app_server","testFilter":"isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields","expectation":"deleted thread is skipped"},
+    {"id":"app-server-compacted-thread","category":"app_server","testTarget":"integration_app_server","testFilter":"isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields","expectation":"compacted thread is degraded"},
+    {"id":"app-server-repeated-cursor","category":"app_server","testTarget":"integration_app_server","testFilter":"repeated_cursor_keeps_validated_pages_and_stops_degraded","expectation":"repeated cursor stops safely"},
+    {"id":"app-server-malformed-page","category":"app_server","testTarget":"integration_app_server","testFilter":"malformed_page_is_contained_without_accepting_partial_items","expectation":"malformed page is contained"},
+    {"id":"app-server-unknown-item-version","category":"app_server","testTarget":"integration_app_server","testFilter":"isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields","expectation":"unknown items and version mismatch are degraded"},
+
+    {"id":"setup-idempotent","category":"setup_privacy_recovery","testTarget":"integration_setup","testFilter":"setup_is_idempotent_and_preserves_existing_entries","expectation":"repeated setup is idempotent"},
+    {"id":"setup-external-edit","category":"setup_privacy_recovery","testTarget":"integration_setup","testFilter":"uninstall_preserves_external_changes_and_reports_degraded_result","expectation":"external edits survive uninstall"},
+    {"id":"privacy-secret-corpus","category":"setup_privacy_recovery","testTarget":"core_redaction","testFilter":"redacts_prefixed_environment_keys_cli_flags_and_private_material","expectation":"secret corpus is removed"},
+    {"id":"recovery-interrupted-setup","category":"setup_privacy_recovery","testTarget":"integration_setup","testFilter":"setup_finishes_an_interrupted_durable_journal_before_reinstalling","expectation":"setup journal resumes idempotently"},
+    {"id":"recovery-interrupted-purge","category":"setup_privacy_recovery","testTarget":"core_store","testFilter":"open_completes_a_purge_interrupted_after_related_data_cleanup","expectation":"purge journal resumes before ingestion"},
+    {"id":"recovery-malformed-queue","category":"setup_privacy_recovery","testTarget":"core_store","testFilter":"open_completes_tombstoned_purge_and_discards_malformed_single_repo_queue","expectation":"single-repo purge discards malformed queue"}
+  ]
+}

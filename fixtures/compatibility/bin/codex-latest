@@ -1,0 +1,13 @@
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'codex-cli 99.2.0'
+  exit 0
+fi
+if [ "${1:-}" != "app-server" ] || [ "${2:-}" != "--stdio" ]; then
+  exit 2
+fi
+IFS= read -r initialize || exit 3
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/99.2.0"}}'
+IFS= read -r initialized || exit 4
+IFS= read -r list || exit 5
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[],"nextCursor":null}}'

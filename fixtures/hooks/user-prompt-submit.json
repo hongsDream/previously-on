@@ -1,0 +1,11 @@
+{
+  "session_id": "thr_fixture_auth",
+  "turn_id": "turn_001",
+  "transcript_path": null,
+  "cwd": "/tmp/context-lineage-fixture",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5.5",
+  "permission_mode": "default",
+  "prompt": "Refactor the authentication boundary without changing public behavior. password=super-secret"
+}
+

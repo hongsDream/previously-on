@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality:
+    name: quality
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.90
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt,clippy && rustup default 1.90.0
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install locked UI dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Rust formatting
+        run: cargo fmt --check
+      - name: Rust lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Rust tests
+        run: cargo test --locked --all
+      - name: UI typecheck
+        run: npm run typecheck
+        working-directory: ui
+      - name: UI lint
+        run: npm run lint
+        working-directory: ui
+      - name: UI tests
+        run: npm test -- --run
+        working-directory: ui
+      - name: UI production build
+        run: npm run build
+        working-directory: ui
+      - name: UI dependency audit
+        run: npm audit --audit-level=high
+        working-directory: ui
+
+  reliability-adversarial:
+    name: reliability-adversarial
+    runs-on: macos-14
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.90
+        run: rustup toolchain install 1.90.0 --profile minimal && rustup default 1.90.0
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install locked UI dependencies and build embedded assets
+        run: npm ci && npm run build
+        working-directory: ui
+      - name: Fault, replay, concurrency, Git, App Server, and secret corpus tests
+        run: cargo test --locked --all
+        env:
+          PREVIOUSLY_ON_ADVERSARIAL_TESTS: "1"
+      - name: Projection rebuild stability
+        run: cargo test --locked --test integration_ingestion
+      - name: Secret corpus regression
+        run: cargo test --locked --test core_redaction
+      - name: Latest and previous Codex schema probes and mapped regressions
+        run: ./scripts/run-compatibility.sh --output "${RUNNER_TEMP}/mapped-compatibility-results.json"
+      - name: Enforce truthful fallback support mode
+        run: >-
+          node -e 'const fs=require("node:fs");
+          const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+          if(r.supportMode!=="explicit_run_and_import" ||
+          r.transparentCaptureReleaseGate?.eligible!==false ||
+          r.liveCodexWorkflowMatrix?.status!=="not_run") process.exit(1);'
+          "${RUNNER_TEMP}/mapped-compatibility-results.json"
+      - name: OS-level outbound-denied release smoke
+        run: cargo build --locked && ./scripts/offline-smoke.sh target/debug/previously
+      - name: Upload ineligible mapped compatibility diagnostics
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mapped-compatibility-${{ github.sha }}
+          path: ${{ runner.temp }}/mapped-compatibility-results.json
+          if-no-files-found: error
+          retention-days: 30
+
+  package-release:
+    name: package-release
+    needs: [quality, reliability-adversarial]
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.90
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt,clippy && rustup default 1.90.0
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build and verify release artifacts
+        run: ./scripts/build-release.sh
+      - name: Upload verified release rehearsal
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: previously-on-${{ github.sha }}
+          path: outputs/
+          if-no-files-found: error
+          retention-days: 14

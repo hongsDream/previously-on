@@ -1,0 +1,124 @@
+use chrono::{TimeZone, Utc};
+use previously_on::context_pack::{count_pack_tokens, ContextPackBuilder, MAX_TOKEN_BUDGET};
+use previously_on::domain::{
+    CoverageV1, EvidenceIntegrity, EvidenceV1, FactKind, FactLifecycle, FactV1, Freshness,
+    SCHEMA_VERSION_V1,
+};
+
+fn at(second: i64) -> chrono::DateTime<Utc> {
+    Utc.timestamp_opt(1_700_000_000 + second, 0)
+        .single()
+        .unwrap()
+}
+
+fn evidence(id: &str, second: i64) -> EvidenceV1 {
+    let mut evidence = EvidenceV1::new(
+        id,
+        "repo-1",
+        "task-1",
+        "session-1",
+        format!("source-{id}"),
+        format!("verified source for {id}"),
+        at(second),
+    );
+    evidence.fact_id = Some(id.replace("evidence", "fact"));
+    evidence.integrity = EvidenceIntegrity::Verified;
+    evidence
+}
+
+fn fact(id: &str, lifecycle: FactLifecycle, freshness: Freshness, second: i64) -> FactV1 {
+    FactV1 {
+        schema_version: SCHEMA_VERSION_V1,
+        id: id.into(),
+        repository_id: "repo-1".into(),
+        task_id: "task-1".into(),
+        kind: FactKind::Decision,
+        lifecycle,
+        freshness,
+        content: format!("Decision {id}: {}", "details ".repeat(80)),
+        evidence_ids: vec![id.replace("fact", "evidence")],
+        superseded_by: None,
+        created_at: at(second),
+        updated_at: at(second),
+    }
+}
+
+#[test]
+fn build_is_deterministic_and_excludes_untrusted_or_stale_facts() {
+    let facts = vec![
+        fact("fact-1", FactLifecycle::Confirmed, Freshness::Fresh, 1),
+        fact("fact-stale", FactLifecycle::Pinned, Freshness::Stale, 2),
+        fact(
+            "fact-candidate",
+            FactLifecycle::Candidate,
+            Freshness::Fresh,
+            3,
+        ),
+    ];
+    let evidence = vec![
+        evidence("evidence-1", 1),
+        evidence("evidence-stale", 2),
+        evidence("evidence-candidate", 3),
+    ];
+    let first = ContextPackBuilder::new("repo-1", "task-1")
+        .generated_at(at(10))
+        .build(
+            Some("Continue auth work".into()),
+            facts.clone(),
+            evidence.clone(),
+            vec![],
+            vec![],
+            CoverageV1::default(),
+        )
+        .unwrap();
+    let second = ContextPackBuilder::new("repo-1", "task-1")
+        .generated_at(at(10))
+        .build(
+            Some("Continue auth work".into()),
+            facts.into_iter().rev().collect(),
+            evidence.into_iter().rev().collect(),
+            vec![],
+            vec![],
+            CoverageV1::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&second).unwrap()
+    );
+    assert_eq!(
+        first
+            .facts
+            .iter()
+            .map(|fact| fact.id.as_str())
+            .collect::<Vec<_>>(),
+        ["fact-1"]
+    );
+    assert_eq!(first.token_count, count_pack_tokens(&first).unwrap());
+}
+
+#[test]
+fn drops_whole_low_ranked_items_to_respect_hard_envelope_cap() {
+    let facts = (0..12)
+        .map(|index| {
+            fact(
+                &format!("fact-{index}"),
+                FactLifecycle::Confirmed,
+                Freshness::Fresh,
+                index,
+            )
+        })
+        .collect::<Vec<_>>();
+    let evidence = (0..12)
+        .map(|index| evidence(&format!("evidence-{index}"), index))
+        .collect::<Vec<_>>();
+    let pack = ContextPackBuilder::new("repo-1", "task-1")
+        .token_budget(550)
+        .generated_at(at(20))
+        .build(None, facts, evidence, vec![], vec![], CoverageV1::default())
+        .unwrap();
+    assert!(pack.token_count <= 550);
+    assert!(pack.token_count <= MAX_TOKEN_BUDGET);
+    assert!(pack.facts.len() < 5);
+    assert_eq!(pack.token_count, count_pack_tokens(&pack).unwrap());
+}

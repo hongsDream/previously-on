@@ -1,0 +1,11 @@
+/target/
+/dist/
+/ui/node_modules/
+/ui/dist/
+/outputs/
+/.omx/
+/.cache/
+/.previously-on-test/
+/.DS_Store
+*.tsbuildinfo
+*.log

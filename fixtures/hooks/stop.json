@@ -1,0 +1,12 @@
+{
+  "session_id": "thr_fixture_auth",
+  "turn_id": "turn_001",
+  "transcript_path": null,
+  "cwd": "/tmp/context-lineage-fixture",
+  "hook_event_name": "Stop",
+  "model": "gpt-5.5",
+  "permission_mode": "default",
+  "stop_hook_active": false,
+  "last_assistant_message": "Moved authentication enforcement into middleware and kept handler behavior stable. The focused auth tests pass."
+}
+

@@ -1,0 +1,19 @@
+{
+  "session_id": "thr_fixture_auth",
+  "turn_id": "turn_001",
+  "transcript_path": null,
+  "cwd": "/tmp/context-lineage-fixture",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.5",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_use_id": "call_test_001",
+  "tool_input": {
+    "command": "npm test -- auth"
+  },
+  "tool_response": {
+    "exit_code": 0,
+    "output": "18 passed, 0 failed"
+  }
+}
+

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "workflowCountPerVersion": 30,
+  "turnsPerWorkflow": 2,
+  "confirmationPhrase": "RUN_60_AUTHENTICATED_CODEX_WORKFLOWS",
+  "fixture": {
+    "stateFile": "state.txt",
+    "verifyScript": "verify.sh",
+    "initialValueTemplate": "compat-initial-{{SCENARIO_ID}}",
+    "resumeValueTemplate": "compat-resume-{{SCENARIO_ID}}",
+    "initialFinalTemplate": "COMPAT_INITIAL_DONE {{SCENARIO_ID}}",
+    "resumeFinalTemplate": "COMPAT_RESUME_DONE {{SCENARIO_ID}}"
+  },
+  "prompts": {
+    "initial": "Compatibility workflow {{SCENARIO_ID}}. Use the apply_patch tool to change only state.txt so its exact content is `{{INITIAL_VALUE}}` followed by one newline. Then run exactly `./verify.sh {{INITIAL_VALUE}}`. Do not change any other file. End the final response with exactly `{{INITIAL_FINAL}}`.",
+    "resume": "Resume compatibility workflow {{SCENARIO_ID}}. Use the apply_patch tool to change only state.txt so its exact content is `{{RESUME_VALUE}}` followed by one newline. Then run exactly `./verify.sh {{RESUME_VALUE}}`. Do not change any other file. End the final response with exactly `{{RESUME_FINAL}}`."
+  },
+  "requiredReconstruction": [
+    "userPrompt",
+    "assistantFinal",
+    "fileChangeTool",
+    "testCommand",
+    "stableSourceIds"
+  ],
+  "auth": {
+    "sourceFile": "auth.json",
+    "sourceHomeIsNeverModified": true,
+    "temporaryHomeMode": "0700",
+    "temporaryAuthMode": "0600"
+  }
+}
