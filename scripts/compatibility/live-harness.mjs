@@ -91,6 +91,7 @@ export function buildWorkflowFixture(scenario, contract) {
   };
   return {
     id: scenario.id,
+    runtimeSlug: workflowMarker,
     category: scenario.category,
     testTarget: scenario.testTarget,
     testFilter: scenario.testFilter,
@@ -394,7 +395,7 @@ async function main() {
 }
 
 async function executeWorkflow({ args, binary, role, version, fixture, tempRoot, authSeed, evidenceRoot, mappedArtifactSha256 }) {
-  const work = join(tempRoot, `${role}-${fixture.id}`);
+  const work = join(tempRoot, `${role}-${fixture.runtimeSlug}`);
   const repo = join(work, "repo");
   const dataDir = join(work, "data");
   const codexHome = join(work, "codex-home");

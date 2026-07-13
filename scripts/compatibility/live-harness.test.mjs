@@ -37,6 +37,8 @@ test("live workflow markers never collide with the secret redaction corpus", () 
   const scenario = matrix.scenarios.find(({ id }) => id === "privacy-secret-corpus");
   const fixture = buildWorkflowFixture(scenario, contract);
   assert.equal(fixture.id, "privacy-secret-corpus");
+  assert.equal(fixture.runtimeSlug, "privacy-redacted-corpus");
+  assert.doesNotMatch(fixture.runtimeSlug, /secret/i);
   assert.doesNotMatch(fixture.initialPrompt, /secret/i);
   assert.match(fixture.initialPrompt, /privacy-redacted-corpus/);
 });
