@@ -1,0 +1,184 @@
+name: Recover v0.1.0-alpha.1 publication
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: v0.1.0-alpha.1
+  RELEASE_VERSION: 0.1.0-alpha.1
+  RELEASE_COMMIT: c78a6e55894873d1a1ca8d7f3444433039b9cf27
+
+jobs:
+  revalidate-compatibility:
+    name: revalidate immutable compatibility evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: release-compatibility
+    steps:
+      - name: Check out the immutable release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag, commit, and product version
+        run: |
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
+          test "$VERSION" = "$RELEASE_VERSION"
+          test "$RELEASE_TAG" = "v$VERSION"
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Download and safely extract the pinned evidence
+        env:
+          BUNDLE_URL: ${{ vars.LIVE_COMPATIBILITY_BUNDLE_URL }}
+          BUNDLE_SHA256: ${{ vars.LIVE_COMPATIBILITY_BUNDLE_SHA256 }}
+        run: |
+          test -n "$BUNDLE_URL"
+          test "${BUNDLE_URL#https://}" != "$BUNDLE_URL"
+          printf '%s' "$BUNDLE_SHA256" | grep -E '^[0-9a-fA-F]{64}$'
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --output "${RUNNER_TEMP}/live-compatibility.tar.gz" "$BUNDLE_URL"
+          printf '%s  %s\n' "$BUNDLE_SHA256" "${RUNNER_TEMP}/live-compatibility.tar.gz" \
+            | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/live-compatibility"
+          tar -tzf "${RUNNER_TEMP}/live-compatibility.tar.gz" \
+            > "${RUNNER_TEMP}/live-compatibility.entries"
+          node -e '
+            const fs = require("node:fs");
+            const entries = fs.readFileSync(process.argv[1], "utf8").split(/\r?\n/).filter(Boolean);
+            if (!entries.includes("live-compatibility.json")) throw new Error("bundle omitted live-compatibility.json");
+            for (const entry of entries) {
+              const normalized = entry.replaceAll("\\", "/");
+              if (normalized.startsWith("/") || normalized.split("/").includes("..")) {
+                throw new Error(`unsafe archive entry: ${entry}`);
+              }
+            }
+          ' "${RUNNER_TEMP}/live-compatibility.entries"
+          tar -tvzf "${RUNNER_TEMP}/live-compatibility.tar.gz" \
+            | awk 'substr($1,1,1) !~ /^[-d]$/ { exit 1 }'
+          tar -xzf "${RUNNER_TEMP}/live-compatibility.tar.gz" \
+            -C "${RUNNER_TEMP}/live-compatibility" --no-same-owner --no-same-permissions
+      - name: Revalidate evidence against the immutable release
+        run: >-
+          node scripts/validate-live-compatibility.mjs
+          "${RUNNER_TEMP}/live-compatibility/live-compatibility.json"
+          --commit "$RELEASE_COMMIT"
+          --product-version "$RELEASE_VERSION"
+
+  publish-recovered-crate:
+    name: publish recovered crate and release
+    needs: revalidate-compatibility
+    runs-on: macos-14
+    timeout-minutes: 30
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/previously-on
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/publish-target
+    steps:
+      - name: Check out the immutable release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify immutable source and draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
+          test "$VERSION" = "$RELEASE_VERSION"
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+      - name: Install Rust 1.90
+        run: rustup toolchain install 1.90.0 --profile minimal && rustup default 1.90.0
+      - name: Download and verify the tested release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/release"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "${RUNNER_TEMP}/release" \
+            --pattern SHA256SUMS \
+            --pattern "previously-on-v$RELEASE_VERSION-source.tar.gz"
+          cd "${RUNNER_TEMP}/release"
+          grep " previously-on-v$RELEASE_VERSION-source.tar.gz$" SHA256SUMS \
+            | shasum -a 256 -c -
+          gh attestation verify \
+            "previously-on-v$RELEASE_VERSION-source.tar.gz" \
+            --repo "$GITHUB_REPOSITORY"
+      - name: Extract and verify the publishable source
+        run: |
+          SOURCE_ARCHIVE="${RUNNER_TEMP}/release/previously-on-v$RELEASE_VERSION-source.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/publish-source"
+          tar -tzf "$SOURCE_ARCHIVE" | awk '
+            /^\// { exit 1 }
+            /(^|\/)\.\.($|\/)/ { exit 1 }
+          '
+          tar -tvzf "$SOURCE_ARCHIVE" \
+            | awk 'substr($1,1,1) !~ /^[-d]$/ { exit 1 }'
+          tar -xzf "$SOURCE_ARCHIVE" -C "${RUNNER_TEMP}/publish-source"
+          SOURCE_DIR="${RUNNER_TEMP}/publish-source/previously-on-$RELEASE_VERSION"
+          test -f "$SOURCE_DIR/Cargo.toml"
+          test -f "$SOURCE_DIR/ui/dist/index.html"
+          find "$SOURCE_DIR/ui/dist/assets" -type f -name '*.js' -print -quit | grep .
+          find "$SOURCE_DIR/ui/dist/assets" -type f -name '*.css' -print -quit | grep .
+          echo "SOURCE_MANIFEST=$SOURCE_DIR/Cargo.toml" >> "$GITHUB_ENV"
+      - name: Repackage and verify the exact source to publish
+        run: |
+          cargo package --manifest-path "$SOURCE_MANIFEST" --locked
+          CRATE="$CARGO_TARGET_DIR/package/previously-on-$RELEASE_VERSION.crate"
+          test -f "$CRATE"
+          tar -tzf "$CRATE" | grep -E '/ui/dist/index\.html$'
+          tar -tzf "$CRATE" | grep -E '/ui/dist/assets/.+\.js$'
+          tar -tzf "$CRATE" | grep -E '/ui/dist/assets/.+\.css$'
+      - name: Publish the immutable crate if it is not already present
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          CRATE="$CARGO_TARGET_DIR/package/previously-on-$RELEASE_VERSION.crate"
+          REMOTE="${RUNNER_TEMP}/remote-version.json"
+          HTTP_STATUS="$(curl --silent --show-error \
+            "https://crates.io/api/v1/crates/previously-on/$RELEASE_VERSION" \
+            --output "$REMOTE" --write-out '%{http_code}')"
+          if test "$HTTP_STATUS" = 200; then
+            LOCAL_SHA="$(shasum -a 256 "$CRATE" | awk '{print $1}')"
+            REMOTE_SHA="$(jq -r '.version.checksum' "$REMOTE")"
+            test "$LOCAL_SHA" = "$REMOTE_SHA"
+          elif test "$HTTP_STATUS" = 404; then
+            cargo publish --manifest-path "$SOURCE_MANIFEST" \
+              --locked --token "$CARGO_REGISTRY_TOKEN"
+          else
+            echo "unexpected crates.io version probe status: $HTTP_STATUS" >&2
+            exit 1
+          fi
+      - name: Verify exact published version installs
+        run: |
+          for attempt in {1..12}; do
+            if cargo install previously-on --version "$RELEASE_VERSION" --locked \
+              --root "${RUNNER_TEMP}/published"; then
+              "${RUNNER_TEMP}/published/bin/previously" --version \
+                | grep -F "previously $RELEASE_VERSION"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "exact-version crates.io install did not become available" >&2
+          exit 1
+      - name: Publish the previously verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest=false
