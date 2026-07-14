@@ -33,6 +33,7 @@ const REQUIRED_RECONSTRUCTION = [
   "assistantFinal",
   "fileChangeTool",
   "testCommand",
+  "modelIdentity",
   "stableSourceIds",
 ];
 const MAX_CAPTURE_BYTES = 32 * 1024 * 1024;
@@ -71,6 +72,17 @@ export function validateFixtureContract(matrix, contract) {
   }
   if (contract.confirmationPhrase !== "RUN_60_AUTHENTICATED_CODEX_WORKFLOWS") {
     throw new Error("live contract confirmation phrase changed unexpectedly");
+  }
+  if (
+    typeof contract.execution?.model !== "string" ||
+    !/^gpt-[a-z0-9.-]+$/.test(contract.execution.model) ||
+    !["low", "medium", "high", "xhigh"].includes(contract.execution?.reasoningEffort) ||
+    contract.execution?.sandbox !== "workspace-write" ||
+    contract.execution?.strictConfig !== true ||
+    !Number.isInteger(contract.execution?.timeoutSeconds) ||
+    contract.execution.timeoutSeconds < 30
+  ) {
+    throw new Error("live contract must bind a valid Codex model and reasoning effort");
   }
   for (const field of REQUIRED_RECONSTRUCTION) {
     if (!contract.requiredReconstruction?.includes(field)) {
@@ -120,6 +132,7 @@ export function buildDryRunPlan(matrix, contract) {
     requiredRuns: 60,
     workflowCountPerVersion: workflows.length,
     categories,
+    codexExecution: contract.execution,
     versionRoles: ["latest", "previous"],
     commandsPerWorkflow: ["previously setup codex", "previously run codex -- exec", "previously run codex -- exec resume", "previously import codex", "previously export", "previously uninstall codex"],
     requiredReconstruction: REQUIRED_RECONSTRUCTION,
@@ -146,6 +159,7 @@ export function verifyScenarioEvidence(input) {
     initialContent,
     resumeContent,
     gitStatus,
+    codexExecution,
   } = input;
   const events = Array.isArray(exportData?.canonical_events) ? exportData.canonical_events : [];
   const promptInitial = findEvent(events, "user_prompt", fixture.INITIAL_VALUE, sessionId);
@@ -185,6 +199,9 @@ export function verifyScenarioEvidence(input) {
     ),
     fileChangeTool: Boolean(fileInitial && fileResume),
     testCommand: Boolean(testInitial && testResume),
+    modelIdentity:
+      promptInitial?.payload?.model === codexExecution.model &&
+      promptResume?.payload?.model === codexExecution.model,
     stableSourceIds: stable && uniqueSources,
   };
   return {
@@ -203,6 +220,16 @@ export function verifyScenarioEvidence(input) {
 
 export function computeEligibility(artifact, expectedScenarioIds) {
   if (!hasCompleteWorkflowMatrix(artifact, expectedScenarioIds)) return false;
+  if (
+    typeof artifact.codexExecution?.model !== "string" ||
+    !["low", "medium", "high", "xhigh"].includes(artifact.codexExecution?.reasoningEffort) ||
+    artifact.codexExecution?.sandbox !== "workspace-write" ||
+    artifact.codexExecution?.strictConfig !== true ||
+    !Number.isInteger(artifact.codexExecution?.timeoutSeconds) ||
+    artifact.codexExecution.timeoutSeconds < 30
+  ) {
+    return false;
+  }
   const currentApp = artifact.codexApp?.current;
   const previousApp = artifact.codexApp?.previous;
   if (
@@ -241,6 +268,7 @@ export function hasCompleteWorkflowMatrix(artifact, expectedScenarioIds) {
     if (ids.size !== 30 || expectedScenarioIds.some((id) => !ids.has(id))) return false;
     for (const scenario of scenarios) {
       if (scenario.status !== "passed") return false;
+      if (stableStringify(scenario.codexExecution) !== stableStringify(artifact.codexExecution)) return false;
       if (!REQUIRED_RECONSTRUCTION.every((field) => scenario.reconstruction?.[field] === true)) {
         return false;
       }
@@ -268,6 +296,7 @@ export function prepareResumeArtifact(artifact, expected, outputPath, evidenceRo
     artifact?.productVersion === expected.productVersion &&
     artifact?.gitCommit === expected.gitCommit &&
     stableStringify(artifact?.runner) === stableStringify(expected.runner) &&
+    stableStringify(artifact?.codexExecution) === stableStringify(expected.codexExecution) &&
     stableStringify(artifact?.categories) === stableStringify(expected.categories) &&
     artifact?.fixtureContractSha256 === expected.fixtureContractSha256 &&
     artifact?.scenarioMatrixSha256 === expected.scenarioMatrixSha256 &&
@@ -333,6 +362,7 @@ export function prepareResumeArtifact(artifact, expected, outputPath, evidenceRo
       const contract = scenarioContracts.get(scenario.id);
       if (
         scenario.dataLossEvents !== 0 ||
+        stableStringify(scenario.codexExecution) !== stableStringify(expected.codexExecution) ||
         !REQUIRED_RECONSTRUCTION.every((field) => scenario.reconstruction?.[field] === true) ||
         scenario.scenarioAssertion?.status !== "passed" ||
         scenario.category !== contract?.category ||
@@ -358,6 +388,7 @@ export function prepareResumeArtifact(artifact, expected, outputPath, evidenceRo
       if (
         evidence.role !== run.role ||
         evidence.codexVersion !== run.version ||
+        stableStringify(evidence.codexExecution) !== stableStringify(expected.codexExecution) ||
         evidence.scenario?.id !== scenario.id ||
         evidence.scenario?.category !== scenario.category ||
         stableStringify(evidence.scenarioAssertion) !== stableStringify(scenario.scenarioAssertion) ||
@@ -463,7 +494,7 @@ async function main() {
     return;
   }
 
-  if (args.finalizeStaleEvaluation) requireFinalizeArguments(args);
+  if (args.finalizeStaleEvaluation) requireFinalizeArguments(args, contract);
   else requireLiveArguments(args, contract);
   const latestVersion = await validateCodexBinary(args.latestBin, "latest");
   const previousVersion = await validateCodexBinary(args.previousBin, "previous");
@@ -517,6 +548,7 @@ async function main() {
       productVersion,
       gitCommit,
       runner: { os: "macOS", arch: "arm64" },
+      codexExecution: contract.execution,
       categories,
       fixtureContractSha256: sha256(readFileSync(CONTRACT_PATH)),
       scenarioMatrixSha256: sha256(readFileSync(MATRIX_PATH)),
@@ -616,6 +648,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     supportMode: "explicit_run_and_import",
     runner: { os: "macOS", arch: "arm64" },
+    codexExecution: contract.execution,
     fixtureContractSha256: sha256(readFileSync(CONTRACT_PATH)),
     scenarioMatrixSha256: sha256(readFileSync(MATRIX_PATH)),
     previouslyBinarySha256: sha256(readFileSync(args.previouslyBin)),
@@ -636,6 +669,7 @@ async function main() {
         productVersion,
         gitCommit,
         runner: { os: "macOS", arch: "arm64" },
+        codexExecution: contract.execution,
         categories,
         fixtureContractSha256: sha256(readFileSync(CONTRACT_PATH)),
         scenarioMatrixSha256: sha256(readFileSync(MATRIX_PATH)),
@@ -671,6 +705,7 @@ async function main() {
             authSeed: authSeeds[run.role],
             evidenceRoot,
             mappedArtifactSha256: mappedRegression.artifactSha256,
+            codexExecution: contract.execution,
           });
           run.scenarios.push(result);
           artifact.releaseEligibility.dataLossEvents += result.dataLossEvents;
@@ -735,7 +770,18 @@ async function main() {
   }
 }
 
-async function executeWorkflow({ args, binary, role, version, fixture, tempRoot, authSeed, evidenceRoot, mappedArtifactSha256 }) {
+async function executeWorkflow({
+  args,
+  binary,
+  role,
+  version,
+  fixture,
+  tempRoot,
+  authSeed,
+  evidenceRoot,
+  mappedArtifactSha256,
+  codexExecution,
+}) {
   const work = join(tempRoot, `${role}-${fixture.runtimeSlug}`);
   const repo = join(work, "repo");
   const dataDir = join(work, "data");
@@ -769,9 +815,12 @@ async function executeWorkflow({ args, binary, role, version, fixture, tempRoot,
       args.previouslyBin,
       [
         "--data-dir", dataDir, "run", "codex", "--repo", repo, "--",
-        "exec", "-C", repo, "--json", "--color", "never", "--sandbox", "workspace-write",
+        "exec", "-C", repo, "--json", "--color", "never", "--sandbox", codexExecution.sandbox,
         "--dangerously-bypass-hook-trust", "--output-last-message", initialFinalPath,
-        "--model", args.model, fixture.initialPrompt,
+        "--model", codexExecution.model,
+        "-c", `model_reasoning_effort="${codexExecution.reasoningEffort}"`,
+        "-c", `sandbox_mode="${codexExecution.sandbox}"`,
+        "--strict-config", fixture.initialPrompt,
       ],
       { env, cwd: repo, timeoutMs: args.timeoutMs },
     );
@@ -788,7 +837,9 @@ async function executeWorkflow({ args, binary, role, version, fixture, tempRoot,
       [
         "--data-dir", dataDir, "run", "codex", "--repo", repo, "--",
         "exec", "resume", "--json", "--dangerously-bypass-hook-trust",
-        "--output-last-message", resumeFinalPath, "--model", args.model,
+        "--output-last-message", resumeFinalPath, "--model", codexExecution.model,
+        "-c", `model_reasoning_effort="${codexExecution.reasoningEffort}"`,
+        "-c", `sandbox_mode="${codexExecution.sandbox}"`, "--strict-config",
         sessionId, fixture.resumePrompt,
       ],
       { env, cwd: repo, timeoutMs: args.timeoutMs },
@@ -821,6 +872,7 @@ async function executeWorkflow({ args, binary, role, version, fixture, tempRoot,
       initialContent,
       resumeContent,
       gitStatus,
+      codexExecution,
     });
     if (!verification.passed) throw new Error(`reconstruction failed: ${JSON.stringify(verification.reconstruction)}`);
     const dataLossEvents = countDataLoss(initial.stderr) + countDataLoss(resume.stderr);
@@ -832,6 +884,7 @@ async function executeWorkflow({ args, binary, role, version, fixture, tempRoot,
       schemaVersion: 1,
       role,
       codexVersion: version,
+      codexExecution,
       scenario: { id: fixture.id, category: fixture.category },
       scenarioAssertion: {
         status: "passed",
@@ -872,6 +925,7 @@ async function executeWorkflow({ args, binary, role, version, fixture, tempRoot,
       id: fixture.id,
       category: fixture.category,
       status: "passed",
+      codexExecution,
       reconstruction: verification.reconstruction,
       scenarioAssertion: evidence.scenarioAssertion,
       dataLossEvents,
@@ -1035,6 +1089,7 @@ export function requireLiveArguments(args, contract) {
     "mappedArtifact",
     "codexHome",
     "model",
+    "reasoningEffort",
     "output",
     "codexAppCurrentBuild",
     "codexAppCurrentEvidence",
@@ -1042,6 +1097,7 @@ export function requireLiveArguments(args, contract) {
   ]) {
     if (!args[key]) throw new Error(`live execution omitted --${camelToKebab(key)}`);
   }
+  requireBoundCodexExecution(args, contract);
   if (!isAbsolute(args.codexHome) || !isAbsolute(args.output)) {
     throw new Error("--codex-home and --output must be absolute paths");
   }
@@ -1086,7 +1142,7 @@ export function requireLiveArguments(args, contract) {
   }
 }
 
-function requireFinalizeArguments(args) {
+function requireFinalizeArguments(args, contract) {
   if (args.resume) {
     throw new Error("--finalize-stale-evaluation is a distinct one-way mode and cannot be combined with --resume");
   }
@@ -1095,6 +1151,8 @@ function requireFinalizeArguments(args) {
     "previousBin",
     "previouslyBin",
     "mappedArtifact",
+    "model",
+    "reasoningEffort",
     "output",
     "codexAppCurrentBuild",
     "codexAppCurrentEvidence",
@@ -1104,6 +1162,7 @@ function requireFinalizeArguments(args) {
   ]) {
     if (!args[key]) throw new Error(`stale-evaluation finalize omitted --${camelToKebab(key)}`);
   }
+  requireBoundCodexExecution(args, contract);
   if (!isAbsolute(args.output) || basename(args.output) !== "live-compatibility.json") {
     throw new Error("--output must be an absolute path ending in live-compatibility.json");
   }
@@ -1407,6 +1466,7 @@ function parseArgs(raw) {
     "--mapped-artifact": "mappedArtifact",
     "--codex-home": "codexHome",
     "--model": "model",
+    "--reasoning-effort": "reasoningEffort",
     "--output": "output",
     "--bundle": "bundle",
     "--evidence-dir": "evidenceDir",
@@ -1438,6 +1498,18 @@ function parseArgs(raw) {
     args.timeoutMs = seconds * 1_000;
   }
   return args;
+}
+
+function requireBoundCodexExecution(args, contract) {
+  if (
+    args.model !== contract.execution.model ||
+    args.reasoningEffort !== contract.execution.reasoningEffort ||
+    args.timeoutMs !== contract.execution.timeoutSeconds * 1_000
+  ) {
+    throw new Error(
+      `live execution must use contract-bound ${contract.execution.model}, ${contract.execution.reasoningEffort} reasoning, and ${contract.execution.timeoutSeconds}s timeout`,
+    );
+  }
 }
 
 function retainJsonEvidence({

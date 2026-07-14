@@ -17,6 +17,13 @@ Required top-level fields:
   "supportMode": "explicit_run_and_import",
   "generatedAt": "ISO-8601 timestamp",
   "runner": { "os": "macOS", "arch": "arm64" },
+  "codexExecution": {
+    "model": "gpt-5.6-sol",
+    "reasoningEffort": "medium",
+    "sandbox": "workspace-write",
+    "strictConfig": true,
+    "timeoutSeconds": 600
+  },
   "releaseEligibility": {
     "eligible": true,
     "dataLossEvents": 0,
@@ -56,6 +63,7 @@ contains exactly the 30 IDs and categories in `fixtures/compatibility/scenarios.
         "assistantFinal": true,
         "fileChangeTool": true,
         "testCommand": true,
+        "modelIdentity": true,
         "stableSourceIds": true
       },
       "evidenceSha256": "64-character-sanitized-evidence-digest"
@@ -69,6 +77,12 @@ Silicon checkout, absolute paths to both Codex binaries and the PreviouslyOn bin
 confirmed authenticated `CODEX_HOME`, and the confirmation phrase documented in
 `fixtures/compatibility/live-workflow-contract.json`. It copies only `auth.json` to isolated
 temporary homes and never modifies the supplied source home.
+
+The same contract fixes every paid turn and resume to `gpt-5.6-sol` with medium reasoning,
+`workspace-write`, strict config validation, and a 600-second timeout. The hook-observed prompt
+events must identify that model on both turns. The top-level artifact, each scenario, and every
+retained evidence file repeat the full execution policy so a changed model, effort, sandbox,
+strictness, or timeout cannot reuse a checkpoint.
 
 It also requires `--mapped-artifact` from `scripts/run-compatibility.sh`, produced at the same
 clean commit for the same two CLI versions. The mapped artifact remains a distinct evidence class:
@@ -101,8 +115,9 @@ workflows are available for review.
 
 Resume is permitted only for the same evidence identity. The clean Git commit, product version,
 PreviouslyOn binary digest, both Codex binary digests and versions, fixture-contract digest,
-scenario-matrix digest, mapped-artifact digest, runner identity, and supplied Codex App evidence
-must remain bound to the original artifact. A missing or modified evidence file, changed binding,
+scenario-matrix digest, mapped-artifact digest, runner identity, supplied Codex App evidence, and
+the full Codex execution policy must remain bound to the original artifact. A missing or modified
+evidence file, changed binding,
 or incompatible artifact fails closed. Start a new output/evidence path and generate a new
 artifact instead of reusing checkpoints across that boundary.
 
@@ -110,9 +125,10 @@ artifact instead of reusing checkpoints across that boundary.
 
 The serious-stale evaluator is created after the 60 retained workflows have been reviewed. Attach
 it with `--finalize-stale-evaluation` and the same binary, mapped-artifact, and Codex App evidence
-arguments used for the original run. This mode does not require `CODEX_HOME`, a model, or the paid
-execution confirmation because it never starts an authenticated workflow subprocess. Version and
-command-shape probes still run against the supplied binaries. Finalize revalidates all 60
+arguments used for the original run. This mode does not require `CODEX_HOME` or the paid execution
+confirmation because it never starts an authenticated workflow subprocess. It does require the
+same `--model` and `--reasoning-effort` values to rebind the retained execution identity. Version
+and command-shape probes still run against the supplied binaries. Finalize revalidates all 60
 scenario evidence files and digests plus the commit, product, binaries, resolved CLI versions,
 fixtures, mapped artifact, runner, and App evidence before retaining the evaluator.
 

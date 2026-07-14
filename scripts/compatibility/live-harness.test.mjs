@@ -49,6 +49,7 @@ function createFinalizeFixture() {
         schemaVersion: 1,
         role: run.role,
         codexVersion: run.version,
+        codexExecution: contract.execution,
         scenario: { id: scenario.id, category: scenario.category },
         scenarioAssertion,
         verification: { passed: true, reconstruction },
@@ -61,6 +62,7 @@ function createFinalizeFixture() {
         id: scenario.id,
         category: scenario.category,
         status: "passed",
+        codexExecution: contract.execution,
         reconstruction,
         scenarioAssertion,
         dataLossEvents: 0,
@@ -100,6 +102,7 @@ function createFinalizeFixture() {
     productVersion: "0.1.0-alpha.1",
     gitCommit: "d".repeat(40),
     runner: { os: "macOS", arch: "arm64" },
+    codexExecution: contract.execution,
     categories,
     fixtureContractSha256: "1".repeat(64),
     scenarioMatrixSha256: "2".repeat(64),
@@ -119,6 +122,7 @@ function createFinalizeFixture() {
     generatedAt: "2026-07-13T00:00:00Z",
     supportMode: "explicit_run_and_import",
     runner: expected.runner,
+    codexExecution: expected.codexExecution,
     categories,
     fixtureContractSha256: expected.fixtureContractSha256,
     scenarioMatrixSha256: expected.scenarioMatrixSha256,
@@ -167,10 +171,17 @@ test("live fixture contract expands to 60 two-turn workflow slots without execut
   const plan = buildDryRunPlan(matrix, contract);
   assert.equal(plan.requiredRuns, 60);
   assert.equal(plan.paidSessionsExecuted, 0);
+  assert.deepEqual(plan.codexExecution, contract.execution);
   assert.equal(plan.transparentCaptureReleaseGate.eligible, false);
   assert.equal(plan.workflows.length, 30);
   assert.match(plan.workflows[0].initialPrompt, /apply_patch/);
   assert.match(plan.workflows[0].resumePrompt, /verify\.sh/);
+  const invalidExecution = structuredClone(contract);
+  invalidExecution.execution.sandbox = "danger-full-access";
+  assert.throws(
+    () => validateFixtureContract(matrix, invalidExecution),
+    /bind a valid Codex model and reasoning effort/,
+  );
 });
 
 test("normal live and resume modes reject pre-attached stale evaluation evidence", () => {
@@ -216,7 +227,7 @@ test("evidence verifier requires prompt final paired file tools tests and stable
     event("tool_finished", { tool_use_id: toolUseId, tool_name: "apply_patch", tool_input: { command: `*** Update File: state.txt\n+${value}` }, tool_response: { content: "Done" } }),
   ];
   const events = [
-    event("user_prompt", { prompt: fixture.initialPrompt }),
+    event("user_prompt", { prompt: fixture.initialPrompt, model: contract.execution.model }),
     ...filePair(fixture.INITIAL_VALUE, "tool-initial"),
     event("tool_finished", { tool_use_id: "test-initial", tool_input: { command: fixture.initialTestCommand }, tool_response: { exit_code: 0 } }),
     event(
@@ -225,7 +236,7 @@ test("evidence verifier requires prompt final paired file tools tests and stable
       `codex-app-server:thread:${sessionId}:item:final-initial:assistant-final`,
     ),
     event("session_stopped", { last_assistant_message: fixture.INITIAL_FINAL }),
-    event("user_prompt", { prompt: fixture.resumePrompt }),
+    event("user_prompt", { prompt: fixture.resumePrompt, model: contract.execution.model }),
     ...filePair(fixture.RESUME_VALUE, "tool-resume"),
     event("tool_finished", { tool_use_id: "test-resume", tool_input: { command: fixture.resumeTestCommand }, tool_response: { exit_code: 0 } }),
     event(
@@ -253,6 +264,7 @@ test("evidence verifier requires prompt final paired file tools tests and stable
     initialContent: `${fixture.INITIAL_VALUE}\n`,
     resumeContent: `${fixture.RESUME_VALUE}\n`,
     gitStatus: " M state.txt\n",
+    codexExecution: contract.execution,
   });
   assert.equal(verified.passed, true);
   assert.deepEqual(verified.reconstruction, {
@@ -260,6 +272,7 @@ test("evidence verifier requires prompt final paired file tools tests and stable
     assistantFinal: true,
     fileChangeTool: true,
     testCommand: true,
+    modelIdentity: true,
     stableSourceIds: true,
   });
   events[0].coverage.missing.push("stable_source_id");
@@ -273,7 +286,24 @@ test("evidence verifier requires prompt final paired file tools tests and stable
       initialContent: `${fixture.INITIAL_VALUE}\n`,
       resumeContent: `${fixture.RESUME_VALUE}\n`,
       gitStatus: " M state.txt\n",
+      codexExecution: contract.execution,
     }).reconstruction.stableSourceIds,
+    false,
+  );
+  events[0].coverage.missing.length = 0;
+  events[0].payload.model = "gpt-5.6-terra";
+  assert.equal(
+    verifyScenarioEvidence({
+      fixture,
+      exportData: { canonical_events: events },
+      sessionId,
+      initialFinalText: fixture.INITIAL_FINAL,
+      resumeFinalText: fixture.RESUME_FINAL,
+      initialContent: `${fixture.INITIAL_VALUE}\n`,
+      resumeContent: `${fixture.RESUME_VALUE}\n`,
+      gitStatus: " M state.txt\n",
+      codexExecution: contract.execution,
+    }).reconstruction.modelIdentity,
     false,
   );
 });
@@ -283,6 +313,7 @@ test("release eligibility is true only for two complete distinct 30-scenario run
   const scenarioResults = matrix.scenarios.map((scenario) => ({
     id: scenario.id,
     status: "passed",
+    codexExecution: contract.execution,
     reconstruction: Object.fromEntries(contract.requiredReconstruction.map((field) => [field, true])),
     scenarioAssertion: {
       status: "passed",
@@ -294,6 +325,7 @@ test("release eligibility is true only for two complete distinct 30-scenario run
     evidenceSha256: "a".repeat(64),
   }));
   const artifact = {
+    codexExecution: contract.execution,
     codexCli: {
       runs: [
         { role: "latest", version: "2.0.0", scenarios: structuredClone(scenarioResults) },
@@ -354,6 +386,7 @@ test("resume validates immutable bindings and skips only intact passed checkpoin
       schemaVersion: 1,
       role: "latest",
       codexVersion: "2.0.0",
+      codexExecution: contract.execution,
       scenario: { id: scenario.id, category: scenario.category },
       scenarioAssertion: assertion,
       verification: { passed: true, reconstruction },
@@ -392,6 +425,7 @@ test("resume validates immutable bindings and skips only intact passed checkpoin
       productVersion: "0.1.0-alpha.1",
       gitCommit: "d".repeat(40),
       runner: { os: "macOS", arch: "arm64" },
+      codexExecution: contract.execution,
       categories: Object.fromEntries(
         Object.entries(matrix.scenarios.reduce((counts, scenario) => {
           counts[scenario.category] = (counts[scenario.category] ?? 0) + 1;
@@ -412,6 +446,7 @@ test("resume validates immutable bindings and skips only intact passed checkpoin
       id: scenario.id,
       category: scenario.category,
       status: "passed",
+      codexExecution: contract.execution,
       reconstruction,
       scenarioAssertion: assertion,
       dataLossEvents: 0,
@@ -425,6 +460,7 @@ test("resume validates immutable bindings and skips only intact passed checkpoin
       productVersion: expected.productVersion,
       gitCommit: expected.gitCommit,
       runner: expected.runner,
+      codexExecution: expected.codexExecution,
       categories: expected.categories,
       supportMode: "explicit_run_and_import",
       fixtureContractSha256: expected.fixtureContractSha256,
@@ -452,6 +488,12 @@ test("resume validates immutable bindings and skips only intact passed checkpoin
     changedBinary.previouslyBinarySha256 = "9".repeat(64);
     assert.throws(
       () => prepareResumeArtifact(structuredClone(artifact), changedBinary, output, evidenceRoot),
+      /does not match the current commit, product binary, or fixture bytes/,
+    );
+    const changedExecution = structuredClone(expected);
+    changedExecution.codexExecution = { ...contract.execution, model: "gpt-5.6-terra" };
+    assert.throws(
+      () => prepareResumeArtifact(structuredClone(artifact), changedExecution, output, evidenceRoot),
       /does not match the current commit, product binary, or fixture bytes/,
     );
     writeFileSync(appEvidencePath, "tampered\n");
@@ -682,6 +724,7 @@ test("release validator accepts only a complete bound 60-run artifact", () => {
       id: scenario.id,
       category: scenario.category,
       status: "passed",
+      codexExecution: contract.execution,
       reconstruction: Object.fromEntries(contract.requiredReconstruction.map((field) => [field, true])),
       scenarioAssertion: {
         status: "passed",
@@ -701,6 +744,7 @@ test("release validator accepts only a complete bound 60-run artifact", () => {
       generatedAt: "2026-07-13T00:00:00Z",
       supportMode: "explicit_run_and_import",
       runner: { os: "macOS", arch: "arm64" },
+      codexExecution: contract.execution,
       fixtureContractSha256: createHash("sha256")
         .update(readFileSync(new URL("../../fixtures/compatibility/live-workflow-contract.json", import.meta.url)))
         .digest("hex"),
@@ -778,6 +822,7 @@ test("release validator accepts only a complete bound 60-run artifact", () => {
           schemaVersion: 1,
           role: run.role,
           codexVersion: run.version,
+          codexExecution: contract.execution,
           scenario: { id: scenario.id, category: scenario.category },
           scenarioAssertion: scenario.scenarioAssertion,
           verification: {
@@ -801,6 +846,27 @@ test("release validator accepts only a complete bound 60-run artifact", () => {
       encoding: "utf8",
     });
     assert.equal(accepted.status, 0, accepted.stderr);
+    artifact.codexExecution = { ...contract.execution, model: "gpt-5.6-terra" };
+    writeFileSync(path, `${JSON.stringify(artifact)}\n`);
+    const wrongModel = spawnSync(process.execPath, [validator, path, "--commit", commit, "--product-version", "0.1.0-alpha.1"], {
+      encoding: "utf8",
+    });
+    assert.notEqual(wrongModel.status, 0);
+    assert.match(wrongModel.stderr, /codexExecution\.model/);
+    artifact.codexExecution = contract.execution;
+    artifact.codexCli.runs[0].scenarios[0].codexExecution = {
+      ...contract.execution,
+      timeoutSeconds: contract.execution.timeoutSeconds + 1,
+    };
+    writeFileSync(path, `${JSON.stringify(artifact)}\n`);
+    const wrongScenarioExecution = spawnSync(
+      process.execPath,
+      [validator, path, "--commit", commit, "--product-version", "0.1.0-alpha.1"],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(wrongScenarioExecution.status, 0);
+    assert.match(wrongScenarioExecution.stderr, /codexExecution\.timeoutSeconds/);
+    artifact.codexCli.runs[0].scenarios[0].codexExecution = contract.execution;
     const measured = artifact.releaseEligibility.seriousStaleApplications;
     artifact.releaseEligibility.seriousStaleApplications = 0;
     writeFileSync(path, `${JSON.stringify(artifact)}\n`);

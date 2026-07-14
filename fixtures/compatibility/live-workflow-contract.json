@@ -3,6 +3,13 @@
   "workflowCountPerVersion": 30,
   "turnsPerWorkflow": 2,
   "confirmationPhrase": "RUN_60_AUTHENTICATED_CODEX_WORKFLOWS",
+  "execution": {
+    "model": "gpt-5.6-sol",
+    "reasoningEffort": "medium",
+    "sandbox": "workspace-write",
+    "strictConfig": true,
+    "timeoutSeconds": 600
+  },
   "fixture": {
     "stateFile": "state.txt",
     "verifyScript": "verify.sh",
@@ -20,6 +27,7 @@
     "assistantFinal",
     "fileChangeTool",
     "testCommand",
+    "modelIdentity",
     "stableSourceIds"
   ],
   "auth": {

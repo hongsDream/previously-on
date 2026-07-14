@@ -21,14 +21,17 @@ cannot be overwritten.
       binaries, fixtures, mapped artifact, App evidence, retained file, and evidence digest; no
       checkpoint crossed an evidence-binding change.
 - [ ] Every live workflow records ground-truth filesystem/Git/JSONL hashes and reconstructs prompt,
-      assistant final, paired file-change tool, test command, and stable linked source IDs.
+      assistant final, paired file-change tool, test command, observed `gpt-5.6-sol` identity, and
+      stable linked source IDs.
 - [ ] The retained evidence bundle contains structured verdicts, stable identifiers, hashes, and
       counts only; raw Codex JSONL, prompts, tool output, source code, credentials, and absolute
       repository paths were not persisted.
 - [ ] Every scenario `evidencePath` and the retained mapped artifact are present in the tarball,
       independently hashed, and accepted by the validator after safe extraction.
-- [ ] The approved model and cost window are recorded; `CODEX_HOME` and auth are used only in the
-      manual producer environment and never added to normal CI or release environment variables.
+- [ ] The fixture, artifact, scenario evidence, resume, finalizer, and validator all bind
+      `gpt-5.6-sol`, medium reasoning, `workspace-write`, strict config, and the 600-second timeout;
+      `CODEX_HOME` and auth are used only in the manual producer environment and never added to
+      normal CI or release environment variables.
 - [ ] Current Codex App stable and the previous obtainable build are recorded accurately in
       retained sanitized evidence files. A degraded signature result remains release-blocking.
 - [ ] Serious stale applications are measured by a retained evaluator artifact bound to this

@@ -111,7 +111,8 @@ node scripts/compatibility/live-harness.mjs \
   --previously-bin /absolute/path/to/previously \
   --mapped-artifact /absolute/path/to/mapped-compatibility-results.json \
   --codex-home /absolute/path/to/authenticated/CODEX_HOME \
-  --model <release-test-model> \
+  --model gpt-5.6-sol \
+  --reasoning-effort medium \
   --codex-app-current-build <build> \
   --codex-app-current-evidence /absolute/path/to/current-app-evidence.json \
   --codex-app-current-evidence-sha256 <sha256> \
@@ -128,6 +129,9 @@ evidence, and skips only checkpoints that are still valid. Resume fails closed i
 PreviouslyOn or Codex binary digest, resolved Codex version, fixture contract, scenario matrix,
 mapped artifact, or App evidence binding differs. Normal live and `--resume` modes reject
 `--stale-evaluation-*` arguments and remain `unmeasured`; only finalize may attach the evaluator.
+The fixture contract also binds `gpt-5.6-sol`, medium reasoning, `workspace-write`, strict config,
+and a 600-second per-turn timeout. Both the initial and resumed turns receive the same explicit
+settings, and resume rejects checkpoints produced under any different execution policy.
 In case any other immutable binding differs, choose a new output path and
 produce a new artifact; do not copy completed rows into a differently bound matrix.
 
@@ -144,6 +148,8 @@ node scripts/compatibility/live-harness.mjs \
   --previous-bin /absolute/path/to/previous/codex \
   --previously-bin /absolute/path/to/previously \
   --mapped-artifact /absolute/path/to/mapped-compatibility-results.json \
+  --model gpt-5.6-sol \
+  --reasoning-effort medium \
   --codex-app-current-build <build> \
   --codex-app-current-evidence /absolute/path/to/current-app-evidence.json \
   --codex-app-current-evidence-sha256 <sha256> \
@@ -181,6 +187,7 @@ The harness records ground-truth filesystem and Git hashes, Codex JSONL observat
 message hashes, and hashes of App Server import coverage and the PreviouslyOn export. It does not
 write the raw Codex JSONL stream to the retained evidence directory. Eligibility remains false
 unless all 60 workflows reconstruct both user prompts, both assistant finals, paired file-change
-tools, both test commands, and unique stable source IDs linked to the resumed session. Missing auth,
+tools, both test commands, the observed model identity, and unique stable source IDs linked to the
+resumed session. Missing auth,
 dirty source, incomplete evidence, or any failed workflow exits non-zero. The long confirmation
 phrase prevents accidental paid execution.

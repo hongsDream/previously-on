@@ -27,6 +27,9 @@ const expectedProductVersion = requiredArg('--product-version');
 if (!/^[0-9a-f]{40}$/i.test(expectedCommit)) fail('--commit must be a full 40-character Git SHA');
 
 const artifact = JSON.parse(readFileSync(artifactAbsolutePath, 'utf8'));
+const liveContract = JSON.parse(readFileSync(`${root}/fixtures/compatibility/live-workflow-contract.json`, 'utf8'));
+const executionFields = ['model', 'reasoningEffort', 'sandbox', 'strictConfig', 'timeoutSeconds'];
+const reconstructionFields = ['userPrompt', 'assistantFinal', 'fileChangeTool', 'testCommand', 'modelIdentity', 'stableSourceIds'];
 assertEqual(artifact.schemaVersion, 1, 'schemaVersion');
 assertEqual(artifact.evidenceClass, 'live_codex_workflow_matrix', 'evidenceClass');
 assertEqual(artifact.product, 'PreviouslyOn', 'product');
@@ -35,6 +38,9 @@ assertEqual(artifact.gitCommit, expectedCommit, 'gitCommit');
 assertEqual(artifact.supportMode, 'explicit_run_and_import', 'supportMode');
 assertEqual(artifact.runner?.os, 'macOS', 'runner.os');
 assertEqual(artifact.runner?.arch, 'arm64', 'runner.arch');
+for (const field of executionFields) {
+  assertEqual(artifact.codexExecution?.[field], liveContract.execution?.[field], `codexExecution.${field}`);
+}
 if (!Number.isFinite(Date.parse(artifact.generatedAt))) fail('generatedAt must be an ISO-8601 timestamp');
 
 assertEqual(artifact.releaseEligibility?.eligible, true, 'releaseEligibility.eligible');
@@ -127,7 +133,14 @@ function validateCliRun(run, role) {
     if (!seen.add(scenario.id)) fail(`${role} contains duplicate scenario ${scenario.id}`);
     assertEqual(scenario.category, expectedScenarios.get(scenario.id).category, `${role}/${scenario.id} category`);
     assertEqual(scenario.status, 'passed', `${role}/${scenario.id} status`);
-    for (const field of ['userPrompt', 'assistantFinal', 'fileChangeTool', 'testCommand', 'stableSourceIds']) {
+    for (const field of executionFields) {
+      assertEqual(
+        scenario.codexExecution?.[field],
+        artifact.codexExecution[field],
+        `${role}/${scenario.id} codexExecution.${field}`,
+      );
+    }
+    for (const field of reconstructionFields) {
       assertEqual(scenario.reconstruction?.[field], true, `${role}/${scenario.id} reconstruction.${field}`);
     }
     const mapped = scenario.scenarioAssertion;
@@ -150,6 +163,13 @@ function validateCliRun(run, role) {
     assertEqual(evidence.schemaVersion, 1, `${role}/${scenario.id} evidence schemaVersion`);
     assertEqual(evidence.role, role, `${role}/${scenario.id} evidence role`);
     assertEqual(evidence.codexVersion, run.version, `${role}/${scenario.id} evidence codexVersion`);
+    for (const field of executionFields) {
+      assertEqual(
+        evidence.codexExecution?.[field],
+        artifact.codexExecution[field],
+        `${role}/${scenario.id} evidence codexExecution.${field}`,
+      );
+    }
     assertEqual(evidence.scenario?.id, scenario.id, `${role}/${scenario.id} evidence scenario.id`);
     assertEqual(
       evidence.scenario?.category,
@@ -158,7 +178,7 @@ function validateCliRun(run, role) {
     );
     assertEqual(evidence.scenarioAssertion?.status, 'passed', `${role}/${scenario.id} evidence scenarioAssertion.status`);
     assertEqual(evidence.verification?.passed, true, `${role}/${scenario.id} evidence verification.passed`);
-    for (const field of ['userPrompt', 'assistantFinal', 'fileChangeTool', 'testCommand', 'stableSourceIds']) {
+    for (const field of reconstructionFields) {
       assertEqual(
         evidence.verification?.reconstruction?.[field],
         true,
