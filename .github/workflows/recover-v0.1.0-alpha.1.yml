@@ -84,8 +84,6 @@ jobs:
     permissions:
       contents: write
       attestations: read
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/publish-target
     steps:
       - name: Check out the immutable release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -93,6 +91,8 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Configure isolated Cargo target
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/publish-target" >> "$GITHUB_ENV"
       - name: Verify immutable source and draft release
         env:
           GH_TOKEN: ${{ github.token }}
