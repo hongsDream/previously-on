@@ -66,6 +66,7 @@ jobs:
           name: eligible-live-compatibility-${{ github.sha }}
           path: ${{ runner.temp }}/live-compatibility/
           if-no-files-found: error
+          overwrite: true
           retention-days: 30
 
   release-build:
@@ -82,11 +83,15 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify clean annotated version
         run: |
           VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
           test "$GITHUB_REF_NAME" = "v$VERSION"
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=normal)"
       - name: Install Rust 1.90
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt,clippy && rustup default 1.90.0
@@ -116,22 +121,60 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: ${{ runner.temp }}/release/*
-      - name: Create draft GitHub release
+      - name: Create or refresh the draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          "${{ runner.temp }}/release/"*
-          --draft
-          --verify-tag
-          --title "PreviouslyOn $GITHUB_REF_NAME"
-          --notes-file CHANGELOG.md
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PRERELEASE=false
+          case "$VERSION" in
+            *-*) PRERELEASE=true ;;
+          esac
+          EXPECTED="${RUNNER_TEMP}/expected-assets.txt"
+          cat > "$EXPECTED" <<EOF
+          NOTICE
+          SHA256SUMS
+          THIRD_PARTY_LICENSES.md
+          previously-on-v$VERSION-macos-arm64.tar.gz
+          previously-on-v$VERSION-source.tar.gz
+          previously-on-v$VERSION.cdx.json
+          previously-v$VERSION-macos-arm64
+          EOF
+          LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
+          find "${RUNNER_TEMP}/release" -maxdepth 1 -type f -exec basename {} \; \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/local-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/local-assets.txt"
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+            gh release upload "$GITHUB_REF_NAME" \
+              "${RUNNER_TEMP}/release/"* --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --prerelease="$PRERELEASE" --latest=false \
+              --title "PreviouslyOn $GITHUB_REF_NAME" \
+              --notes-file CHANGELOG.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "${RUNNER_TEMP}/release/"* \
+              --draft \
+              --prerelease="$PRERELEASE" \
+              --latest=false \
+              --verify-tag \
+              --title "PreviouslyOn $GITHUB_REF_NAME" \
+              --notes-file CHANGELOG.md
+          fi
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/remote-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/remote-assets.txt"
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "$PRERELEASE"
       - name: Upload release bundle for audit
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: previously-on-${{ github.ref_name }}
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
+          overwrite: true
           retention-days: 30
 
   publish-crate:
@@ -144,11 +187,20 @@ jobs:
       url: https://crates.io/crates/previously-on
     permissions:
       contents: write
+      attestations: read
     steps:
       - name: Check out tagged source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Reverify the immutable release ref
+        run: |
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" = "$GITHUB_SHA"
+      - name: Configure isolated Cargo target
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/publish-target" >> "$GITHUB_ENV"
       - name: Install Rust 1.90
         run: rustup toolchain install 1.90.0 --profile minimal && rustup default 1.90.0
       - name: Download the tested and attested release source
@@ -176,16 +228,111 @@ jobs:
           find "$SOURCE_DIR/ui/dist/assets" -type f -name '*.js' -print -quit | grep .
           find "$SOURCE_DIR/ui/dist/assets" -type f -name '*.css' -print -quit | grep .
           echo "SOURCE_MANIFEST=$SOURCE_DIR/Cargo.toml" >> "$GITHUB_ENV"
+      - name: Repackage and verify the exact source to publish
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo package --manifest-path "$SOURCE_MANIFEST" --locked
+          CRATE="$CARGO_TARGET_DIR/package/previously-on-$VERSION.crate"
+          test -f "$CRATE"
+          tar -tzf "$CRATE" | grep -E '/ui/dist/index\.html$'
+          tar -tzf "$CRATE" | grep -E '/ui/dist/assets/.+\.js$'
+          tar -tzf "$CRATE" | grep -E '/ui/dist/assets/.+\.css$'
       - name: Publish immutable crate after environment approval
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: >-
-          cargo publish --manifest-path "$SOURCE_MANIFEST"
-          --locked --token "$CARGO_REGISTRY_TOKEN"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          CRATE="$CARGO_TARGET_DIR/package/previously-on-$VERSION.crate"
+          INDEX_URL="https://index.crates.io/pr/ev/previously-on"
+          INDEX_FILE="${RUNNER_TEMP}/previously-on.index"
+          USER_AGENT="previously-on-release/$VERSION (+https://github.com/$GITHUB_REPOSITORY)"
+          LOCAL_SHA="$(shasum -a 256 "$CRATE" | awk '{print $1}')"
+
+          remote_checksum() {
+            local max_time="${1:-30}"
+            local retry_count="${2:-3}"
+            local status
+            status="$(curl --silent --show-error --compressed --location \
+              --retry "$retry_count" --retry-all-errors --retry-delay 1 \
+              --retry-max-time "$max_time" \
+              --connect-timeout 10 --max-time "$max_time" \
+              --proto '=https' --proto-redir '=https' \
+              --user-agent "$USER_AGENT" \
+              --output "$INDEX_FILE" --write-out '%{http_code}' \
+              "$INDEX_URL")"
+            case "$status" in
+              200)
+                jq -rs --arg version "$VERSION" '
+                  map(select(.vers == $version)) |
+                  if length == 0 then ""
+                  elif length == 1 then .[0].cksum
+                  else error("duplicate version entries in sparse index")
+                  end
+                ' "$INDEX_FILE"
+                ;;
+              404)
+                printf ''
+                ;;
+              *)
+                echo "unexpected sparse-index status: $status" >&2
+                return 2
+                ;;
+            esac
+          }
+
+          REMOTE_SHA="$(remote_checksum)"
+          if test -n "$REMOTE_SHA"; then
+            test "$LOCAL_SHA" = "$REMOTE_SHA"
+            echo "crates.io already contains the exact verified crate"
+            exit 0
+          fi
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+
+          set +e
+          cargo publish --manifest-path "$SOURCE_MANIFEST" --locked
+          PUBLISH_STATUS=$?
+          set -e
+          test "$(shasum -a 256 "$CRATE" | awk '{print $1}')" = "$LOCAL_SHA"
+
+          POLL_DEADLINE=$((SECONDS + 300))
+          while (( SECONDS < POLL_DEADLINE )); do
+            REMAINING=$((POLL_DEADLINE - SECONDS))
+            PROBE_TIME="$REMAINING"
+            if (( PROBE_TIME > 30 )); then
+              PROBE_TIME=30
+            fi
+            if REMOTE_SHA="$(remote_checksum "$PROBE_TIME" 0)"; then
+              if test -n "$REMOTE_SHA"; then
+                test "$LOCAL_SHA" = "$REMOTE_SHA"
+                echo "verified exact crate checksum in sparse index"
+                exit 0
+              fi
+            else
+              PROBE_STATUS=$?
+              if test "$PROBE_STATUS" -ne 2; then
+                exit "$PROBE_STATUS"
+              fi
+              echo "transient sparse-index probe failure; retrying before the deadline" >&2
+            fi
+            REMAINING=$((POLL_DEADLINE - SECONDS))
+            if (( REMAINING > 5 )); then
+              sleep 5
+            elif (( REMAINING > 0 )); then
+              sleep "$REMAINING"
+            fi
+          done
+
+          if test "$PUBLISH_STATUS" -ne 0; then
+            echo "cargo publish failed and the exact crate never appeared in the sparse index" >&2
+            exit "$PUBLISH_STATUS"
+          fi
+          echo "cargo publish returned success but the exact crate did not appear in the sparse index" >&2
+          exit 1
       - name: Verify exact published version installs
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for attempt in {1..12}; do
+          for attempt in {1..6}; do
             if cargo install previously-on --version "$VERSION" --locked --root "${RUNNER_TEMP}/published"; then
               "${RUNNER_TEMP}/published/bin/previously" --version | grep -F "previously $VERSION"
               exit 0
@@ -194,7 +341,77 @@ jobs:
           done
           echo "exact-version crates.io install did not become available" >&2
           exit 1
+      - name: Reverify the exact draft immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          EXPECTED="${RUNNER_TEMP}/final-expected-assets.txt"
+          cat > "$EXPECTED" <<EOF
+          NOTICE
+          SHA256SUMS
+          THIRD_PARTY_LICENSES.md
+          previously-on-v$VERSION-macos-arm64.tar.gz
+          previously-on-v$VERSION-source.tar.gz
+          previously-on-v$VERSION.cdx.json
+          previously-v$VERSION-macos-arm64
+          EOF
+          LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/final-remote-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/final-remote-assets.txt"
+
+          mkdir -p "${RUNNER_TEMP}/final-release"
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "${RUNNER_TEMP}/final-release"
+          find "${RUNNER_TEMP}/final-release" -maxdepth 1 -type f -exec basename {} \; \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/final-downloaded-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/final-downloaded-assets.txt"
+
+          cd "${RUNNER_TEMP}/final-release"
+          shasum -a 256 -c SHA256SUMS
+          CERT_IDENTITY="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME"
+          while IFS= read -r asset; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$CERT_IDENTITY" \
+              --deny-self-hosted-runners >/dev/null
+          done < "$EXPECTED"
+          gh attestation verify \
+            "previously-on-v$VERSION-source.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$CERT_IDENTITY" \
+            --deny-self-hosted-runners \
+            --format json > "${RUNNER_TEMP}/final-source-attestation.json"
+          while IFS= read -r asset; do
+            ASSET_SHA="$(shasum -a 256 "$asset" | awk '{print $1}')"
+            jq -e \
+              --arg asset "$asset" \
+              --arg sha "$ASSET_SHA" \
+              --arg commit "$GITHUB_SHA" \
+              --arg ref "refs/tags/$GITHUB_REF_NAME" '
+                any(.[].verificationResult;
+                  .signature.certificate.sourceRepositoryDigest == $commit and
+                  .signature.certificate.sourceRepositoryRef == $ref and
+                  .signature.certificate.runnerEnvironment == "github-hosted" and
+                  any(.statement.subject[];
+                    .name == $asset and .digest.sha256 == $sha))
+              ' "${RUNNER_TEMP}/final-source-attestation.json" >/dev/null
+          done < "$EXPECTED"
+          REMOTE_TAG_COMMIT="$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME^{}" | awk '{print $1}')"
+          test "$REMOTE_TAG_COMMIT" = "$GITHUB_SHA"
       - name: Publish the verified GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest=false
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PRERELEASE=false
+          case "$VERSION" in
+            *-*) PRERELEASE=true ;;
+          esac
+          gh release edit "$GITHUB_REF_NAME" \
+            --draft=false --prerelease="$PRERELEASE" --latest=false
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "$PRERELEASE"
