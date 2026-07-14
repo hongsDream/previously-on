@@ -93,7 +93,7 @@ jobs:
           persist-credentials: false
       - name: Configure isolated Cargo target
         run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/publish-target" >> "$GITHUB_ENV"
-      - name: Verify immutable source and draft release
+      - name: Verify immutable source and release identity
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -101,25 +101,79 @@ jobs:
           test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
           VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
           test "$VERSION" = "$RELEASE_VERSION"
-          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          gh release view "$RELEASE_TAG" \
+            --json tagName,isDraft,isPrerelease,name \
+            > "${RUNNER_TEMP}/release.json"
+          jq -e --arg tag "$RELEASE_TAG" '
+            .tagName == $tag and
+            (.isDraft | type == "boolean") and
+            (.isPrerelease | type == "boolean")
+          ' "${RUNNER_TEMP}/release.json" >/dev/null
       - name: Install Rust 1.90
         run: rustup toolchain install 1.90.0 --profile minimal && rustup default 1.90.0
-      - name: Download and verify the tested release source
+      - name: Download and verify every tested release asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          EXPECTED="${RUNNER_TEMP}/expected-assets.txt"
+          cat > "$EXPECTED" <<EOF
+          NOTICE
+          SHA256SUMS
+          THIRD_PARTY_LICENSES.md
+          previously-on-v$RELEASE_VERSION-macos-arm64.tar.gz
+          previously-on-v$RELEASE_VERSION-source.tar.gz
+          previously-on-v$RELEASE_VERSION.cdx.json
+          previously-v$RELEASE_VERSION-macos-arm64
+          EOF
+          LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/actual-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/actual-assets.txt"
+
           mkdir -p "${RUNNER_TEMP}/release"
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --dir "${RUNNER_TEMP}/release" \
-            --pattern SHA256SUMS \
-            --pattern "previously-on-v$RELEASE_VERSION-source.tar.gz"
+            --dir "${RUNNER_TEMP}/release"
+          find "${RUNNER_TEMP}/release" -maxdepth 1 -type f -exec basename {} \; \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/downloaded-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/downloaded-assets.txt"
+
           cd "${RUNNER_TEMP}/release"
-          grep " previously-on-v$RELEASE_VERSION-source.tar.gz$" SHA256SUMS \
-            | shasum -a 256 -c -
+          shasum -a 256 -c SHA256SUMS
+          CERT_IDENTITY="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$RELEASE_TAG"
+          while IFS= read -r asset; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$CERT_IDENTITY" \
+              --deny-self-hosted-runners >/dev/null
+          done < "$EXPECTED"
           gh attestation verify \
             "previously-on-v$RELEASE_VERSION-source.tar.gz" \
-            --repo "$GITHUB_REPOSITORY"
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$CERT_IDENTITY" \
+            --deny-self-hosted-runners \
+            --format json > "${RUNNER_TEMP}/source-attestation.json"
+          jq -e --arg commit "$RELEASE_COMMIT" --arg ref "refs/tags/$RELEASE_TAG" '
+            any(.[].verificationResult.signature.certificate;
+              .sourceRepositoryDigest == $commit and
+              .sourceRepositoryRef == $ref and
+              .runnerEnvironment == "github-hosted")
+          ' "${RUNNER_TEMP}/source-attestation.json" >/dev/null
+          while IFS= read -r asset; do
+            ASSET_SHA="$(shasum -a 256 "$asset" | awk '{print $1}')"
+            jq -e \
+              --arg asset "$asset" \
+              --arg sha "$ASSET_SHA" \
+              --arg commit "$RELEASE_COMMIT" \
+              --arg ref "refs/tags/$RELEASE_TAG" '
+                any(.[].verificationResult;
+                  .signature.certificate.sourceRepositoryDigest == $commit and
+                  .signature.certificate.sourceRepositoryRef == $ref and
+                  .signature.certificate.runnerEnvironment == "github-hosted" and
+                  any(.statement.subject[];
+                    .name == $asset and .digest.sha256 == $sha))
+              ' "${RUNNER_TEMP}/source-attestation.json" >/dev/null
+          done < "$EXPECTED"
       - name: Extract and verify the publishable source
         run: |
           SOURCE_ARCHIVE="${RUNNER_TEMP}/release/previously-on-v$RELEASE_VERSION-source.tar.gz"
@@ -148,26 +202,97 @@ jobs:
       - name: Publish the immutable crate if it is not already present
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           CRATE="$CARGO_TARGET_DIR/package/previously-on-$RELEASE_VERSION.crate"
-          REMOTE="${RUNNER_TEMP}/remote-version.json"
-          HTTP_STATUS="$(curl --silent --show-error \
-            "https://crates.io/api/v1/crates/previously-on/$RELEASE_VERSION" \
-            --output "$REMOTE" --write-out '%{http_code}')"
-          if test "$HTTP_STATUS" = 200; then
-            LOCAL_SHA="$(shasum -a 256 "$CRATE" | awk '{print $1}')"
-            REMOTE_SHA="$(jq -r '.version.checksum' "$REMOTE")"
+          INDEX_URL="https://index.crates.io/pr/ev/previously-on"
+          INDEX_FILE="${RUNNER_TEMP}/previously-on.index"
+          USER_AGENT="previously-on-release/$RELEASE_VERSION (+https://github.com/$GITHUB_REPOSITORY)"
+          LOCAL_SHA="$(shasum -a 256 "$CRATE" | awk '{print $1}')"
+
+          remote_checksum() {
+            local max_time="${1:-30}"
+            local retry_count="${2:-3}"
+            local status
+            status="$(curl --silent --show-error --compressed --location \
+              --retry "$retry_count" --retry-all-errors --retry-delay 1 \
+              --retry-max-time "$max_time" \
+              --connect-timeout 10 --max-time "$max_time" \
+              --proto '=https' --proto-redir '=https' \
+              --user-agent "$USER_AGENT" \
+              --output "$INDEX_FILE" --write-out '%{http_code}' \
+              "$INDEX_URL")"
+            case "$status" in
+              200)
+                jq -rs --arg version "$RELEASE_VERSION" '
+                  map(select(.vers == $version)) |
+                  if length == 0 then ""
+                  elif length == 1 then .[0].cksum
+                  else error("duplicate version entries in sparse index")
+                  end
+                ' "$INDEX_FILE"
+                ;;
+              404)
+                printf ''
+                ;;
+              *)
+                echo "unexpected sparse-index status: $status" >&2
+                return 2
+                ;;
+            esac
+          }
+
+          REMOTE_SHA="$(remote_checksum)"
+          if test -n "$REMOTE_SHA"; then
             test "$LOCAL_SHA" = "$REMOTE_SHA"
-          elif test "$HTTP_STATUS" = 404; then
-            cargo publish --manifest-path "$SOURCE_MANIFEST" \
-              --locked --token "$CARGO_REGISTRY_TOKEN"
-          else
-            echo "unexpected crates.io version probe status: $HTTP_STATUS" >&2
-            exit 1
+            echo "crates.io already contains the exact verified crate"
+            exit 0
           fi
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+
+          set +e
+          cargo publish --manifest-path "$SOURCE_MANIFEST" --locked
+          PUBLISH_STATUS=$?
+          set -e
+          test "$(shasum -a 256 "$CRATE" | awk '{print $1}')" = "$LOCAL_SHA"
+
+          POLL_DEADLINE=$((SECONDS + 300))
+          while (( SECONDS < POLL_DEADLINE )); do
+            REMAINING=$((POLL_DEADLINE - SECONDS))
+            PROBE_TIME="$REMAINING"
+            if (( PROBE_TIME > 30 )); then
+              PROBE_TIME=30
+            fi
+            if REMOTE_SHA="$(remote_checksum "$PROBE_TIME" 0)"; then
+              if test -n "$REMOTE_SHA"; then
+                test "$LOCAL_SHA" = "$REMOTE_SHA"
+                echo "verified exact crate checksum in sparse index"
+                exit 0
+              fi
+            else
+              PROBE_STATUS=$?
+              if test "$PROBE_STATUS" -ne 2; then
+                exit "$PROBE_STATUS"
+              fi
+              echo "transient sparse-index probe failure; retrying before the deadline" >&2
+            fi
+            REMAINING=$((POLL_DEADLINE - SECONDS))
+            if (( REMAINING > 5 )); then
+              sleep 5
+            elif (( REMAINING > 0 )); then
+              sleep "$REMAINING"
+            fi
+          done
+
+          if test "$PUBLISH_STATUS" -ne 0; then
+            echo "cargo publish failed and the exact crate never appeared in the sparse index" >&2
+            exit "$PUBLISH_STATUS"
+          fi
+          echo "cargo publish returned success but the exact crate did not appear in the sparse index" >&2
+          exit 1
       - name: Verify exact published version installs
         run: |
-          for attempt in {1..12}; do
+          for attempt in {1..6}; do
             if cargo install previously-on --version "$RELEASE_VERSION" --locked \
               --root "${RUNNER_TEMP}/published"; then
               "${RUNNER_TEMP}/published/bin/previously" --version \
@@ -178,7 +303,70 @@ jobs:
           done
           echo "exact-version crates.io install did not become available" >&2
           exit 1
+      - name: Reverify the exact release immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EXPECTED="${RUNNER_TEMP}/final-expected-assets.txt"
+          cat > "$EXPECTED" <<EOF
+          NOTICE
+          SHA256SUMS
+          THIRD_PARTY_LICENSES.md
+          previously-on-v$RELEASE_VERSION-macos-arm64.tar.gz
+          previously-on-v$RELEASE_VERSION-source.tar.gz
+          previously-on-v$RELEASE_VERSION.cdx.json
+          previously-v$RELEASE_VERSION-macos-arm64
+          EOF
+          LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/final-remote-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/final-remote-assets.txt"
+
+          mkdir -p "${RUNNER_TEMP}/final-release"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "${RUNNER_TEMP}/final-release"
+          find "${RUNNER_TEMP}/final-release" -maxdepth 1 -type f -exec basename {} \; \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/final-downloaded-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/final-downloaded-assets.txt"
+
+          cd "${RUNNER_TEMP}/final-release"
+          shasum -a 256 -c SHA256SUMS
+          CERT_IDENTITY="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$RELEASE_TAG"
+          while IFS= read -r asset; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$CERT_IDENTITY" \
+              --deny-self-hosted-runners >/dev/null
+          done < "$EXPECTED"
+          gh attestation verify \
+            "previously-on-v$RELEASE_VERSION-source.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$CERT_IDENTITY" \
+            --deny-self-hosted-runners \
+            --format json > "${RUNNER_TEMP}/final-source-attestation.json"
+          while IFS= read -r asset; do
+            ASSET_SHA="$(shasum -a 256 "$asset" | awk '{print $1}')"
+            jq -e \
+              --arg asset "$asset" \
+              --arg sha "$ASSET_SHA" \
+              --arg commit "$RELEASE_COMMIT" \
+              --arg ref "refs/tags/$RELEASE_TAG" '
+                any(.[].verificationResult;
+                  .signature.certificate.sourceRepositoryDigest == $commit and
+                  .signature.certificate.sourceRepositoryRef == $ref and
+                  .signature.certificate.runnerEnvironment == "github-hosted" and
+                  any(.statement.subject[];
+                    .name == $asset and .digest.sha256 == $sha))
+              ' "${RUNNER_TEMP}/final-source-attestation.json" >/dev/null
+          done < "$EXPECTED"
+          REMOTE_TAG_COMMIT="$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | awk '{print $1}')"
+          test "$REMOTE_TAG_COMMIT" = "$RELEASE_COMMIT"
       - name: Publish the previously verified GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$RELEASE_TAG" --draft=false --latest=false
+        run: |
+          gh release edit "$RELEASE_TAG" \
+            --draft=false --prerelease --latest=false
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" = true
