@@ -400,7 +400,7 @@ jobs:
                     .name == $asset and .digest.sha256 == $sha))
               ' "${RUNNER_TEMP}/final-source-attestation.json" >/dev/null
           done < "$EXPECTED"
-          REMOTE_TAG_COMMIT="$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME^{}" | awk '{print $1}')"
+          REMOTE_TAG_COMMIT="$(git -C "$GITHUB_WORKSPACE" ls-remote origin "refs/tags/$GITHUB_REF_NAME^{}" | awk '{print $1}')"
           test "$REMOTE_TAG_COMMIT" = "$GITHUB_SHA"
       - name: Publish the verified GitHub release
         env:

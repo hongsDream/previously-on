@@ -360,7 +360,7 @@ jobs:
                     .name == $asset and .digest.sha256 == $sha))
               ' "${RUNNER_TEMP}/final-source-attestation.json" >/dev/null
           done < "$EXPECTED"
-          REMOTE_TAG_COMMIT="$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | awk '{print $1}')"
+          REMOTE_TAG_COMMIT="$(git -C "$GITHUB_WORKSPACE" ls-remote origin "refs/tags/$RELEASE_TAG^{}" | awk '{print $1}')"
           test "$REMOTE_TAG_COMMIT" = "$RELEASE_COMMIT"
       - name: Publish the previously verified GitHub release
         env:
