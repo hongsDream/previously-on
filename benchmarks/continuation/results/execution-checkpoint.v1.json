@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "benchmarkId": "previously-on-continuation-v1",
+  "recordedAt": "2026-07-15T10:39:43Z",
+  "prerequisiteMergeSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+  "status": "paused_after_partial_measured_run",
+  "reason": "The harness, fixtures, fake-provider coverage, real calibration, and one complete three-repeat checkpoint pair were finished. The run was paused at a durable arm boundary for review and CI; the official usage guard was not reached.",
+  "provider": {
+    "binary": "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "version": "codex-cli 0.144.2",
+    "sha256": "4a9e84ad1c9622e8f6a50dafd75710eaee4af79dc5bcf8bafd4471763255fe18",
+    "initializeUserAgent": "Codex Desktop/0.144.2 (Mac OS 26.5.2; arm64) dumb (previously_on_continuation_benchmark; 1.0.0)",
+    "codeSignatureStatus": "valid"
+  },
+  "calibration": {
+    "completedArms": 2,
+    "measured": false,
+    "resultsSha256": "fb6adb3d5cf2125d83bb18ea0b4baae2db5431bd6e3cd78f87078aec2461dd8a",
+    "controlSha256": "1e3f82f4de20c1a94031ffbd035acdd0f02ebd3d4a016969b4568428fd5d2907",
+    "campaignLockFileSha256": "c4cb6872a459025432d9869ca12f70dd919f28696e0474c8fb2129f203175b4a",
+    "campaignLockSha256": "f47365c388c1cdf3dda3739cf2a9abd85b5d2e58ce03b960305ae21161a2e971"
+  },
+  "measured": {
+    "completedArms": 6,
+    "expectedBaseArms": 864,
+    "remainingBaseArms": 858,
+    "modelsObserved": [
+      "gpt-5.5"
+    ],
+    "completedCondition": {
+      "model": "gpt-5.5",
+      "scenario": "previouslyon-app-server-compaction",
+      "compaction": 0,
+      "repetitions": 3,
+      "strategies": [
+        "same_task",
+        "native_handoff"
+      ]
+    },
+    "resultsSha256": "a07d71de84804d0e65836d27ee3c1fe49780c1e312fc0cdcfd1c76fd15eab5e2",
+    "controlSha256": "531990bd0db31ecac83502d46aa43dba71b5c3e7198f2ffb6e3e8813dd4445ed",
+    "campaignLockFileSha256": "ae99cc5258708e77bcbd99021bc88b0ef1e2ae364b9bfbffc5bb66b13bbb4459",
+    "campaignLockSha256": "261478250e4d9786919a3d2aca801ad35d27b7431a092784f770a2df359c994d"
+  },
+  "rateLimitCheckpoint": {
+    "status": "below_pause_threshold",
+    "lastObservedUsedPercent": 36,
+    "maximumObservedUsedPercent": 36,
+    "conservativeIncrementPercent": 1,
+    "pauseThresholdPercent": 80
+  },
+  "statistics": {
+    "pairedArmsAtCheckpointZero": 3,
+    "expectedPairedArmsPerCheckpoint": 24,
+    "confidenceIntervalsAvailable": false,
+    "degradationBoundaryDetected": false,
+    "productArmExecuted": false,
+    "reason": "Checkpoint-zero coverage is 3 of 24 required pairs, so comparisons, boundary detection, and the product gate remain fail-closed."
+  },
+  "recommendation": "no_auto_rollover",
+  "resumeCommand": "node benchmarks/continuation/runner.mjs --phase measured --app-server-bin /Applications/ChatGPT.app/Contents/Resources/codex --results benchmarks/continuation/results/measured-integrity-20260715/results.v1.jsonl --control benchmarks/continuation/results/measured-integrity-20260715/control.v1.jsonl --campaign-lock benchmarks/continuation/results/measured-integrity-20260715/campaign-lock.v1.json --calibration-results benchmarks/continuation/results/calibration-integrity-20260715/results.v1.jsonl --calibration-control benchmarks/continuation/results/calibration-integrity-20260715/control.v1.jsonl --calibration-lock benchmarks/continuation/results/calibration-integrity-20260715/campaign-lock.v1.json --resume"
+}

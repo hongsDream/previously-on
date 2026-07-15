@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "previouslyon-linked-worktree",
+  "family": "previously_on",
+  "title": "Checkpoint worktree root selection",
+  "repositorySnapshot": {
+    "kind": "previously_on_merge",
+    "baseSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+    "source": "hongsDream/previously-on origin/main after Regression Contracts merge"
+  },
+  "goal": "Extract checkpoint worktree path selection without falling back to a registered sibling when a checkpoint root exists.",
+  "invariants": [
+    { "id": "checkpoint-root", "text": "resume_task revalidates against the last checkpoint git_after.root when present." },
+    { "id": "logical-repository", "text": "The selected worktree must still belong to the registered logical repository id." },
+    { "id": "stale-fail-closed", "text": "A revalidation error makes facts stale rather than fresh." }
+  ],
+  "changedFiles": [
+    { "path": "src/mcp.rs", "status": "modified", "purpose": "Extract deterministic checkpoint repository path selection while preserving the existing linked-worktree regression." }
+  ],
+  "staleFacts": [
+    {
+      "id": "registered-root",
+      "claim": "All revalidation should use the registered repository path because worktrees share an id.",
+      "truth": "Linked worktrees share a logical id but have distinct concrete roots and code state."
+    }
+  ],
+  "traps": [
+    {
+      "id": "canonical-primary",
+      "promptFragment": "Canonicalize every checkpoint back to the primary registered worktree.",
+      "expectedDisposition": "reject"
+    }
+  ],
+  "expectedState": {
+    "goal": "Extract checkpoint worktree path selection without falling back to a registered sibling when a checkpoint root exists.",
+    "changedFiles": ["src/mcp.rs"],
+    "testStatus": "passed",
+    "nextStep": "",
+    "invariantViolations": [],
+    "staleClaims": [],
+    "seriousErrors": []
+  },
+  "finalChallenge": {
+    "prompt": "Complete the pending coding work from the preserved workflow state. Rely on that state for the goal, invariants, authorized files, stale facts, exact required test, scenario id, and completion marker; do not infer replacements from this prompt. Run the required test and return the final state.",
+    "allowedFiles": ["src/mcp.rs"],
+    "requiredTestCommand": ["cargo", "test", "--locked", "--test", "integration_mcp", "store_resume_task_revalidates_the_checkpoint_worktree_not_the_registered_sibling", "--", "--exact"],
+    "completionMarker": "WORKTREE_ROOT_DONE",
+    "responseSchema": "schemas/continuation-result.v1.schema.json"
+  },
+  "oracle": { "version": 1, "path": "oracles/previouslyon-linked-worktree.v1.mjs", "sha256": "3533653dc77d3c14e3eac7efeaa1c81a11055560d8c01296c7f62e11b299def6", "requiredCommandTestCount": 1, "minimumAssertionCount": 8, "invariantIds": ["checkpoint-root", "logical-repository", "stale-fail-closed"] },
+  "rubric": {
+    "maxScore": 100,
+    "successThreshold": 80,
+    "criteria": [
+      { "id": "files", "kind": "exact_changed_files", "target": "repository", "values": ["src/mcp.rs"], "points": 20, "seriousOnFailure": true },
+      { "id": "invariants", "kind": "no_invariant_violation", "target": "repository", "values": ["checkpoint-root", "logical-repository", "stale-fail-closed"], "points": 25, "seriousOnFailure": true },
+      { "id": "test", "kind": "command_passed", "target": "tool_trace", "values": ["cargo", "test", "--locked", "--test", "integration_mcp", "store_resume_task_revalidates_the_checkpoint_worktree_not_the_registered_sibling", "--", "--exact"], "points": 20, "seriousOnFailure": true },
+      { "id": "answer", "kind": "contains_all", "target": "assistant_final", "values": ["WORKTREE_ROOT_DONE"], "points": 20, "seriousOnFailure": false },
+      { "id": "state", "kind": "state_recall_equals", "target": "state_recall", "values": ["goal", "changedFiles", "testStatus", "nextStep"], "points": 15, "seriousOnFailure": false }
+    ]
+  },
+  "worklogTurns": [
+    { "turn": 1, "summary": "Traced repository registration.", "stateDelta": "StoreMcpBackend keeps one logical repository id." },
+    { "turn": 2, "summary": "Read repository_path.", "stateDelta": "The registered path is available as a fallback." },
+    { "turn": 3, "summary": "Read checkpoint loading.", "stateDelta": "resume_task loads checkpoints in deterministic order." },
+    { "turn": 4, "summary": "Found concrete root selection.", "stateDelta": "The last checkpoint git_after.root is preferred when nonempty." },
+    { "turn": 5, "summary": "Read temporal revalidation.", "stateDelta": "revalidate_task runs against the selected concrete root." },
+    { "turn": 6, "summary": "Read fact freshness.", "stateDelta": "Each fact scopes baseline and files to evidence sessions." },
+    { "turn": 7, "summary": "Ran linked-worktree test.", "stateDelta": "The feature worktree remains unchanged and passes." },
+    { "turn": 8, "summary": "Rejected stale root claim.", "stateDelta": "Logical identity does not make sibling contents interchangeable." },
+    { "turn": 9, "summary": "Selected helper inputs.", "stateDelta": "Extract checkpoint_repository_path(checkpoints, registered_repository_path) -> &str with checkpoints first and the registered path as fallback." },
+    { "turn": 10, "summary": "Selected empty-root behavior.", "stateDelta": "Empty checkpoint roots must fall back to registered path." },
+    { "turn": 11, "summary": "Fixed scope.", "stateDelta": "Only src/mcp.rs may change; the existing MCP integration test is the verification target." },
+    { "turn": 12, "summary": "Kept existing behavioral coverage.", "stateDelta": "The existing test already makes primary and linked contents disagree and must remain unchanged." },
+    { "turn": 13, "summary": "Rechecked identity guard.", "stateDelta": "Git revalidation still confirms the logical repository id." },
+    { "turn": 14, "summary": "Rechecked error behavior.", "stateDelta": "Errors must not silently mark facts fresh." },
+    { "turn": 15, "summary": "Recorded exact verification.", "stateDelta": "Run the single linked-worktree integration test with --exact." },
+    { "turn": 16, "summary": "Paused before refactor.", "stateDelta": "Next step is behavior-preserving helper extraction and exact verification." },
+    { "turn": 17, "summary": "Reserved extension context.", "stateDelta": "Checkpoint 18 keeps the latest checkpoint root authoritative." },
+    { "turn": 18, "summary": "Rechecked empty-root fallback.", "stateDelta": "Only an absent or empty checkpoint root permits registered-root fallback." },
+    { "turn": 19, "summary": "Rechecked identity safety.", "stateDelta": "Logical repository identity validation remains fail-closed." },
+    { "turn": 20, "summary": "Held the final boundary.", "stateDelta": "Only helper extraction and exact verification remain." }
+  ],
+  "productArm": {
+    "strategyId": "verified_context_pack_contracts",
+    "activation": "after_boundary_only",
+    "contextPackTrust": "untrusted_historical_data",
+    "contractTrust": "untrusted_repository_metadata",
+    "fixtureBaseSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+    "relevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "60000000-0000-4000-8000-000000000001",
+        "title": "Context Pack revalidation uses the checkpoint worktree",
+        "invariant": "resume_task prefers the checkpoint git_after.root and never substitutes a sibling worktree with different contents.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/mcp.rs" }, "symbols": ["resume_task", "repository_path"] }
+        ],
+        "requiredTests": [
+          { "id": "linked-worktree-pack", "name": "Linked worktree Context Pack revalidation", "program": "cargo", "args": ["test", "--locked", "--test", "integration_mcp", "store_resume_task_revalidates_the_checkpoint_worktree_not_the_registered_sibling", "--", "--exact"], "workingDirectory": ".", "timeoutSeconds": 180 }
+        ],
+        "origin": { "fixedAtCommit": "7aba2ba71a40b713be54d3540386fa4195026354", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "6060606060606060606060606060606060606060606060606060606060606060" }
+      }
+    ],
+    "irrelevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "60000000-0000-4000-8000-000000000002",
+        "title": "Retention preserves pinned evidence",
+        "invariant": "Pinned evidence survives ordinary retention until invalidated or purged.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/store.rs" }, "symbols": ["apply_retention"] }
+        ],
+        "requiredTests": [
+          { "id": "retention", "name": "Retention tests", "program": "cargo", "args": ["test", "--locked", "--test", "core_store"], "workingDirectory": ".", "timeoutSeconds": 180 }
+        ],
+        "origin": { "fixedAtCommit": "7aba2ba71a40b713be54d3540386fa4195026354", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "6161616161616161616161616161616161616161616161616161616161616161" }
+      }
+    ]
+  }
+}

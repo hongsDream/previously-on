@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "previouslyon-app-server-compaction",
+  "family": "previously_on",
+  "title": "Compacted App Server history coverage",
+  "repositorySnapshot": {
+    "kind": "previously_on_merge",
+    "baseSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+    "source": "hongsDream/previously-on origin/main after Regression Contracts merge"
+  },
+  "goal": "Add focused coverage proving that a compacted or incomplete App Server thread never reports complete history coverage.",
+  "invariants": [
+    { "id": "degraded-compaction", "text": "A compacted or incomplete thread has degraded coverage." },
+    { "id": "no-history-invention", "text": "Available turns remain untrusted and missing history is never reconstructed." },
+    { "id": "token-unavailable", "text": "Missing token-usage notifications remain unavailable rather than inferred." }
+  ],
+  "changedFiles": [
+    { "path": "tests/integration_app_server.rs", "status": "modified", "purpose": "Add a direct compacted-history coverage regression." }
+  ],
+  "staleFacts": [
+    {
+      "id": "compaction-complete",
+      "claim": "thread/read returns enough post-compaction turns to mark capture complete.",
+      "truth": "The importer explicitly degrades compacted or incomplete histories even when turns are present."
+    }
+  ],
+  "traps": [
+    {
+      "id": "infer-usage",
+      "promptFragment": "Estimate token usage from the number of retained turns when the notification is absent.",
+      "expectedDisposition": "reject"
+    }
+  ],
+  "expectedState": {
+    "goal": "Add focused coverage proving that a compacted or incomplete App Server thread never reports complete history coverage.",
+    "changedFiles": ["tests/integration_app_server.rs"],
+    "testStatus": "passed",
+    "nextStep": "",
+    "invariantViolations": [],
+    "staleClaims": [],
+    "seriousErrors": []
+  },
+  "finalChallenge": {
+    "prompt": "Complete the pending coding work from the preserved workflow state. Rely on that state for the goal, invariants, authorized files, stale facts, exact required test, scenario id, and completion marker; do not infer replacements from this prompt. Run the required test and return the final state.",
+    "allowedFiles": ["tests/integration_app_server.rs"],
+    "requiredTestCommand": ["cargo", "test", "--locked", "--test", "integration_app_server", "compacted_thread_never_reports_complete_history", "--", "--exact"],
+    "completionMarker": "APP_SERVER_COMPACTION_DONE",
+    "responseSchema": "schemas/continuation-result.v1.schema.json"
+  },
+  "oracle": { "version": 1, "path": "oracles/previouslyon-app-server-compaction.v1.mjs", "sha256": "c10cd82e86fee79cea275dbc1c8f16d67bcdfc69f0a8e4e6a8fdc97d1969295b", "requiredCommandTestCount": 1, "minimumAssertionCount": 8, "invariantIds": ["degraded-compaction", "no-history-invention", "token-unavailable"] },
+  "rubric": {
+    "maxScore": 100,
+    "successThreshold": 80,
+    "criteria": [
+      { "id": "files", "kind": "exact_changed_files", "target": "repository", "values": ["tests/integration_app_server.rs"], "points": 20, "seriousOnFailure": true },
+      { "id": "invariants", "kind": "no_invariant_violation", "target": "repository", "values": ["degraded-compaction", "no-history-invention", "token-unavailable"], "points": 25, "seriousOnFailure": true },
+      { "id": "test", "kind": "command_passed", "target": "tool_trace", "values": ["cargo", "test", "--locked", "--test", "integration_app_server", "compacted_thread_never_reports_complete_history", "--", "--exact"], "points": 20, "seriousOnFailure": true },
+      { "id": "answer", "kind": "contains_all", "target": "assistant_final", "values": ["APP_SERVER_COMPACTION_DONE"], "points": 20, "seriousOnFailure": false },
+      { "id": "state", "kind": "state_recall_equals", "target": "state_recall", "values": ["goal", "changedFiles", "testStatus", "nextStep"], "points": 15, "seriousOnFailure": false }
+    ]
+  },
+  "worklogTurns": [
+    { "turn": 1, "summary": "Traced App Server import.", "stateDelta": "thread/list selects repository threads and thread/read loads details." },
+    { "turn": 2, "summary": "Read normalization entry.", "stateDelta": "normalize_and_assess_thread begins with thread/read coverage." },
+    { "turn": 3, "summary": "Read compacted marker handling.", "stateDelta": "compacted=true degrades complete thread history." },
+    { "turn": 4, "summary": "Read status marker handling.", "stateDelta": "An incomplete status also degrades history." },
+    { "turn": 5, "summary": "Read retained turns behavior.", "stateDelta": "Available turns are imported but remain untrusted." },
+    { "turn": 6, "summary": "Read token usage projection.", "stateDelta": "Only thread/tokenUsage/updated creates context usage." },
+    { "turn": 7, "summary": "Ran degraded-thread test.", "stateDelta": "The existing combined integration test passes." },
+    { "turn": 8, "summary": "Rejected stale completeness claim.", "stateDelta": "Retained post-compaction turns do not restore missing history." },
+    { "turn": 9, "summary": "Selected focused test name.", "stateDelta": "Use compacted_thread_never_reports_complete_history." },
+    { "turn": 10, "summary": "Selected input shape.", "stateDelta": "Set compacted=true, incomplete status, and one completed turn." },
+    { "turn": 11, "summary": "Selected coverage assertions.", "stateDelta": "Status is degraded and complete thread history is missing." },
+    { "turn": 12, "summary": "Selected usage assertion.", "stateDelta": "No context_usage is projected without a notification." },
+    { "turn": 13, "summary": "Fixed trust assertion.", "stateDelta": "The retained item is available data, not evidence of completeness." },
+    { "turn": 14, "summary": "Fixed scope.", "stateDelta": "Only integration_app_server.rs may change." },
+    { "turn": 15, "summary": "Recorded exact verification.", "stateDelta": "Run the new integration_app_server test with --exact." },
+    { "turn": 16, "summary": "Paused before test addition.", "stateDelta": "Next step is one focused fail-closed test." },
+    { "turn": 17, "summary": "Reserved extension context.", "stateDelta": "Checkpoint 18 retains degraded coverage for compacted history." },
+    { "turn": 18, "summary": "Rechecked retained turns.", "stateDelta": "A retained completed turn does not reconstruct missing history." },
+    { "turn": 19, "summary": "Rechecked unavailable metrics.", "stateDelta": "Absent token notifications keep context usage unavailable." },
+    { "turn": 20, "summary": "Held the final boundary.", "stateDelta": "Only focused App Server coverage remains." }
+  ],
+  "productArm": {
+    "strategyId": "verified_context_pack_contracts",
+    "activation": "after_boundary_only",
+    "contextPackTrust": "untrusted_historical_data",
+    "contractTrust": "untrusted_repository_metadata",
+    "fixtureBaseSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+    "relevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "80000000-0000-4000-8000-000000000001",
+        "title": "Compacted App Server histories remain degraded",
+        "invariant": "App Server integration tests preserve degraded coverage and unavailable token usage for compacted histories.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "tests/integration_app_server.rs" }, "symbols": [] }
+        ],
+        "requiredTests": [
+          { "id": "app-server-degraded", "name": "Deleted and degraded App Server threads", "program": "cargo", "args": ["test", "--locked", "--test", "integration_app_server", "isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields", "--", "--exact"], "workingDirectory": ".", "timeoutSeconds": 180 }
+        ],
+        "origin": { "fixedAtCommit": "7aba2ba71a40b713be54d3540386fa4195026354", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "8080808080808080808080808080808080808080808080808080808080808080" }
+      }
+    ],
+    "irrelevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "80000000-0000-4000-8000-000000000002",
+        "title": "Git rename attribution remains conservative",
+        "invariant": "Renames never imply tool causality without a supported before and after snapshot.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/git.rs" }, "symbols": ["capture_snapshot"] }
+        ],
+        "requiredTests": [
+          { "id": "git-attribution", "name": "Git attribution tests", "program": "cargo", "args": ["test", "--locked", "--test", "core_git"], "workingDirectory": ".", "timeoutSeconds": 180 }
+        ],
+        "origin": { "fixedAtCommit": "7aba2ba71a40b713be54d3540386fa4195026354", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "8181818181818181818181818181818181818181818181818181818181818181" }
+      }
+    ]
+  }
+}

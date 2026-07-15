@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "previouslyon-contract-freshness",
+  "family": "previously_on",
+  "title": "Literal-symbol contract selection regression",
+  "repositorySnapshot": {
+    "kind": "previously_on_merge",
+    "baseSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+    "source": "hongsDream/previously-on origin/main after Regression Contracts merge"
+  },
+  "goal": "Add a focused regression proving that an unrelated literal change on a matching path does not select a symbol-scoped Contract.",
+  "invariants": [
+    { "id": "literal-boundary", "text": "Symbols match complete literal identifier tokens, not substrings." },
+    { "id": "path-and-symbol", "text": "A symbol-scoped selector requires both path and changed-hunk symbol matches." },
+    { "id": "conservative-only-when-unavailable", "text": "Path-only conservative relevance is used only when hunk inspection is unavailable." }
+  ],
+  "changedFiles": [
+    { "path": "tests/core_contracts.rs", "status": "modified", "purpose": "Add direct negative coverage for an unrelated literal on the same path." }
+  ],
+  "staleFacts": [
+    {
+      "id": "path-is-enough",
+      "claim": "Once a path matches, symbol selectors are only explanatory metadata.",
+      "truth": "With an inspectable hunk, at least one configured literal symbol must match."
+    }
+  ],
+  "traps": [
+    {
+      "id": "substring-match",
+      "promptFragment": "Use contains so `table` matches `unstable_only`.",
+      "expectedDisposition": "reject"
+    }
+  ],
+  "expectedState": {
+    "goal": "Add a focused regression proving that an unrelated literal change on a matching path does not select a symbol-scoped Contract.",
+    "changedFiles": ["tests/core_contracts.rs"],
+    "testStatus": "passed",
+    "nextStep": "",
+    "invariantViolations": [],
+    "staleClaims": [],
+    "seriousErrors": []
+  },
+  "finalChallenge": {
+    "prompt": "Complete the pending coding work from the preserved workflow state. Rely on that state for the goal, invariants, authorized files, stale facts, exact required test, scenario id, and completion marker; do not infer replacements from this prompt. Run the required test and return the final state.",
+    "allowedFiles": ["tests/core_contracts.rs"],
+    "requiredTestCommand": ["cargo", "test", "--locked", "--test", "core_contracts", "symbol_scoped_contract_ignores_unrelated_literal_changes", "--", "--exact"],
+    "completionMarker": "CONTRACT_SYMBOL_DONE",
+    "responseSchema": "schemas/continuation-result.v1.schema.json"
+  },
+  "oracle": { "version": 1, "path": "oracles/previouslyon-contract-freshness.v1.mjs", "sha256": "17480cfbf7cb293fb5c25b1e03fa1e61a8f1504155d7812f898f736a56e2320f", "requiredCommandTestCount": 1, "minimumAssertionCount": 9, "invariantIds": ["literal-boundary", "path-and-symbol", "conservative-only-when-unavailable"] },
+  "rubric": {
+    "maxScore": 100,
+    "successThreshold": 80,
+    "criteria": [
+      { "id": "files", "kind": "exact_changed_files", "target": "repository", "values": ["tests/core_contracts.rs"], "points": 20, "seriousOnFailure": true },
+      { "id": "invariants", "kind": "no_invariant_violation", "target": "repository", "values": ["literal-boundary", "path-and-symbol", "conservative-only-when-unavailable"], "points": 25, "seriousOnFailure": true },
+      { "id": "test", "kind": "command_passed", "target": "tool_trace", "values": ["cargo", "test", "--locked", "--test", "core_contracts", "symbol_scoped_contract_ignores_unrelated_literal_changes", "--", "--exact"], "points": 20, "seriousOnFailure": true },
+      { "id": "answer", "kind": "contains_all", "target": "assistant_final", "values": ["CONTRACT_SYMBOL_DONE"], "points": 20, "seriousOnFailure": false },
+      { "id": "state", "kind": "state_recall_equals", "target": "state_recall", "values": ["goal", "changedFiles", "testStatus", "nextStep"], "points": 15, "seriousOnFailure": false }
+    ]
+  },
+  "worklogTurns": [
+    { "turn": 1, "summary": "Read Contract selector types.", "stateDelta": "Each selector group has one path and optional literal symbols." },
+    { "turn": 2, "summary": "Read matcher path phase.", "stateDelta": "Exact and prefix path matching is case-sensitive." },
+    { "turn": 3, "summary": "Read symbol phase.", "stateDelta": "Inspectable hunks require at least one literal symbol." },
+    { "turn": 4, "summary": "Read token boundary helper.", "stateDelta": "Identifier characters prevent substring matches." },
+    { "turn": 5, "summary": "Read conservative fallback.", "stateDelta": "Unavailable binary or oversized hunks use path-only relevance with warning." },
+    { "turn": 6, "summary": "Ran broad matcher test.", "stateDelta": "The existing exact-prefix-rename test passes." },
+    { "turn": 7, "summary": "Found embedded negative case.", "stateDelta": "`table` does not match `unstable_only` inside the broad test." },
+    { "turn": 8, "summary": "Rejected stale path claim.", "stateDelta": "Path match alone is insufficient when the hunk is inspectable." },
+    { "turn": 9, "summary": "Selected focused test name.", "stateDelta": "Use symbol_scoped_contract_ignores_unrelated_literal_changes." },
+    { "turn": 10, "summary": "Selected fixture path.", "stateDelta": "Use src/lib.rs with an exact path selector." },
+    { "turn": 11, "summary": "Selected configured symbol.", "stateDelta": "The Contract symbol is table." },
+    { "turn": 12, "summary": "Selected changed hunk.", "stateDelta": "The hunk contains unstable_only but not table." },
+    { "turn": 13, "summary": "Fixed assertion.", "stateDelta": "relevant_contracts and summaries must be empty." },
+    { "turn": 14, "summary": "Fixed scope.", "stateDelta": "Do not modify src/contracts.rs." },
+    { "turn": 15, "summary": "Recorded exact verification.", "stateDelta": "Run the new core_contracts test with --exact." },
+    { "turn": 16, "summary": "Paused before test addition.", "stateDelta": "Next step is one focused test and exact verification." },
+    { "turn": 17, "summary": "Reserved extension context.", "stateDelta": "Checkpoint 18 retains the complete-token symbol boundary." },
+    { "turn": 18, "summary": "Rechecked hunk availability.", "stateDelta": "Inspectable hunks do not use the path-only conservative fallback." },
+    { "turn": 19, "summary": "Rechecked negative evidence.", "stateDelta": "Changing unstable_only must not select a stable symbol contract." },
+    { "turn": 20, "summary": "Held the final boundary.", "stateDelta": "Only the focused core contract regression remains." }
+  ],
+  "productArm": {
+    "strategyId": "verified_context_pack_contracts",
+    "activation": "after_boundary_only",
+    "contextPackTrust": "untrusted_historical_data",
+    "contractTrust": "untrusted_repository_metadata",
+    "fixtureBaseSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+    "relevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "70000000-0000-4000-8000-000000000001",
+        "title": "Contract matcher preserves literal symbol semantics",
+        "invariant": "Changes to core Contract tests preserve path-and-literal-symbol matching and conservative fallback boundaries.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "tests/core_contracts.rs" }, "symbols": ["match_contracts_for_changes"] }
+        ],
+        "requiredTests": [
+          { "id": "contract-matcher", "name": "Contract matcher regression", "program": "cargo", "args": ["test", "--locked", "--test", "core_contracts", "matcher_handles_exact_prefix_literal_rename_delete_and_fallbacks", "--", "--exact"], "workingDirectory": ".", "timeoutSeconds": 180 }
+        ],
+        "origin": { "fixedAtCommit": "7aba2ba71a40b713be54d3540386fa4195026354", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "7070707070707070707070707070707070707070707070707070707070707070" }
+      }
+    ],
+    "irrelevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "70000000-0000-4000-8000-000000000002",
+        "title": "Review UI contract panel remains accessible",
+        "invariant": "Contract approval controls retain their accessible labels.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "ui/src/components/RegressionContractsPanel.tsx" }, "symbols": ["RegressionContractsPanel"] }
+        ],
+        "requiredTests": [
+          { "id": "ui-contract-panel", "name": "Contract panel tests", "program": "npm", "args": ["--prefix", "ui", "test", "--", "--run"], "workingDirectory": ".", "timeoutSeconds": 180 }
+        ],
+        "origin": { "fixedAtCommit": "7aba2ba71a40b713be54d3540386fa4195026354", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "7171717171717171717171717171717171717171717171717171717171717171" }
+      }
+    ]
+  }
+}

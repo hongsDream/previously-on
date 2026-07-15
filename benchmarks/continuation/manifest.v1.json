@@ -1,0 +1,165 @@
+{
+  "$schema": "schemas/manifest.v1.schema.json",
+  "schemaVersion": 1,
+  "benchmarkId": "previously-on-continuation-v1",
+  "prerequisite": {
+    "taskId": "019f63ad-a12b-78f2-8fa4-bb4c4a528078",
+    "mergeSha": "7aba2ba71a40b713be54d3540386fa4195026354",
+    "requiredOnOriginMain": true
+  },
+  "execution": {
+    "models": [
+      {
+        "id": "gpt-5.5",
+        "reasoningEffort": "high",
+        "fastMode": false,
+        "actualSnapshotRequired": true
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "reasoningEffort": "high",
+        "fastMode": false,
+        "actualSnapshotRequired": true
+      }
+    ],
+    "calibrationExcludedFromMeasuredResults": true,
+    "officialAppServer": {
+      "protocol": "v2-json-rpc",
+      "schemaDiscovery": "codex app-server generate-json-schema",
+      "requiredRequests": [
+        "initialize",
+        "model/list",
+        "thread/start",
+        "thread/resume",
+        "thread/fork",
+        "thread/list",
+        "thread/read",
+        "thread/compact/start",
+        "turn/start",
+        "account/rateLimits/read",
+        "account/usage/read"
+      ],
+      "requiredClientNotifications": ["initialized"],
+      "requiredServerNotifications": [
+        "thread/started",
+        "turn/started",
+        "item/started",
+        "item/completed",
+        "item/agentMessage/delta",
+        "turn/completed",
+        "thread/compacted",
+        "thread/tokenUsage/updated",
+        "account/rateLimits/updated"
+      ],
+      "unavailableMetricPolicy": "record_unavailable_never_fabricate",
+      "forbiddenRequests": ["account/rateLimitResetCredit/consume"]
+    }
+  },
+  "matrix": {
+    "scenarioCount": 8,
+    "initialStrategies": ["same_task", "native_handoff"],
+    "conditionalProductStrategy": {
+      "id": "verified_context_pack_contracts",
+      "activation": "after_model_specific_boundary_only",
+      "includedInBaseArmCount": false
+    },
+    "compactionCheckpoints": [0, 2, 4, 6, 8, 10, 12, 14, 16],
+    "repetitions": 3,
+    "expectedBaseMeasuredArms": 864,
+    "baseArmFormula": "2 models * 8 scenarios * 2 strategies * 9 checkpoints * 3 repetitions",
+    "extensionCheckpoints": [18, 20],
+    "extendWhen": "no_significant_degradation_through_16",
+    "boundaryRefinement": "add_adjacent_odd_checkpoints_around_first_candidate_boundary"
+  },
+  "fairness": {
+    "sourceSnapshotPolicy": "fork_source_thread_or_replay_byte_identical_fixed_snapshot_at_each_checkpoint",
+    "sameRepositoryAndCodeSnapshot": true,
+    "sameUserPrompt": true,
+    "sameFinalChallenge": true,
+    "sameFixtureSha": true,
+    "nativeHandoff": "generated_by_the_source_model_and_never_human_augmented",
+    "productArm": "native_handoff_plus_machine_generated_verified_context_pack_and_current_relevant_contract_evaluation",
+    "fixtureHashAlgorithm": "sha256",
+    "checkpointKey": ["model", "scenario", "strategy", "compaction", "repetition", "fixtureSha"]
+  },
+  "metrics": [
+    "rubric_correctness",
+    "invariant_violation",
+    "stale_claim",
+    "serious_error",
+    "state_recall_goal",
+    "state_recall_changed_files",
+    "state_recall_test_status",
+    "state_recall_next_step",
+    "ttft_ms",
+    "completion_latency_ms",
+    "end_to_end_latency_ms",
+    "tool_call_count",
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "reasoning_output_tokens",
+    "compaction_duration_ms",
+    "compaction_count"
+  ],
+  "degradationBoundary": {
+    "minimumConsecutiveCheckpoints": 2,
+    "successDropPercentagePoints": 10,
+    "seriousErrorIncreasePercentagePoints": 10,
+    "medianCompletionOrEndToEndIncreasePercent": 25,
+    "confidenceInterval": {
+      "method": "bootstrap",
+      "level": 0.95
+    },
+    "singleSpikeIsBoundary": false,
+    "modelSpecific": true
+  },
+  "productArmGate": {
+    "accuracyDifferenceLowerCiGreaterThanPercentagePoints": -5,
+    "noSeriousErrorIncrease": true,
+    "requiredBenefitAny": {
+      "accuracyGainPercentagePoints": 5,
+      "medianTimeReductionPercent": 15
+    },
+    "failureRecommendation": "no_auto_rollover",
+    "unvalidatedModels": "no_recommendation"
+  },
+  "failureTaxonomy": "failure-taxonomy.v1.json",
+  "safety": {
+    "rateLimitPauseAtUtilization": 0.8,
+    "rateLimitSources": ["account/rateLimits/read", "account/rateLimits/updated", "account/usage/read"],
+    "automaticCreditPurchase": false,
+    "automaticResetCreditConsumption": false,
+    "appendOnlyRawResults": true,
+    "resumeSkipsCompletedCheckpointKeys": true,
+    "secretRedactionRequired": true,
+    "releaseCompatibilityRerunForbidden": true,
+    "releaseCompatibilityRunCountNotToRepeat": 60,
+    "automaticTaskRolloverImplementation": false,
+    "cloudServicesAdded": false
+  },
+  "fixtureSet": {
+    "hashAlgorithm": "sha256",
+    "canonicalization": "sorted_relative_path_nul_raw_bytes_nul",
+    "expectedSha256": "4f6ae416871a9a502377cad82396053883ab0aebaa479c016baad3d3f7363b4a"
+  },
+  "fixtures": [
+    { "id": "synthetic-config-guard", "family": "synthetic", "path": "fixtures/synthetic-config-guard.json" },
+    { "id": "synthetic-tenant-cache", "family": "synthetic", "path": "fixtures/synthetic-tenant-cache.json" },
+    { "id": "synthetic-parser-rename", "family": "synthetic", "path": "fixtures/synthetic-parser-rename.json" },
+    { "id": "synthetic-retry-budget", "family": "synthetic", "path": "fixtures/synthetic-retry-budget.json" },
+    { "id": "previouslyon-mcp-trust", "family": "previously_on", "path": "fixtures/previouslyon-mcp-trust.json" },
+    { "id": "previouslyon-linked-worktree", "family": "previously_on", "path": "fixtures/previouslyon-linked-worktree.json" },
+    { "id": "previouslyon-contract-freshness", "family": "previously_on", "path": "fixtures/previouslyon-contract-freshness.json" },
+    { "id": "previouslyon-app-server-compaction", "family": "previously_on", "path": "fixtures/previouslyon-app-server-compaction.json" }
+  ],
+  "schemas": {
+    "manifest": "schemas/manifest.v1.schema.json",
+    "fixture": "schemas/fixture.v1.schema.json",
+    "regressionContract": "schemas/regression-contract.v1.schema.json",
+    "continuationResult": "schemas/continuation-result.v1.schema.json",
+    "result": "schemas/result.v1.schema.json",
+    "control": "schemas/control.v1.schema.json",
+    "summary": "schemas/summary.v1.schema.json"
+  }
+}

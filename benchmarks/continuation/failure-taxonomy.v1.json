@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "taxonomyId": "previously-on-continuation-failures-v1",
+  "categories": [
+    { "id": "core_oracle_failure", "serious": true, "description": "The required repository behavior or deterministic oracle failed." },
+    { "id": "forbidden_file_change", "serious": true, "description": "The arm changed a path outside the fixture allowlist." },
+    { "id": "missing_required_file_change", "serious": true, "description": "The arm omitted a fixture-required path change." },
+    { "id": "invariant_violation", "serious": true, "description": "A fixture invariant was violated." },
+    { "id": "stale_fact_applied", "serious": true, "description": "A known stale claim was accepted or applied." },
+    { "id": "fabricated_test_pass", "serious": true, "description": "The response claimed a pass that authoritative argv execution did not observe." },
+    { "id": "secret_exposure", "serious": true, "description": "Retained output matched the benchmark secret/redaction guard." },
+    { "id": "destructive_side_effect", "serious": true, "description": "The arm escaped its isolated workspace or performed a forbidden destructive action." },
+    { "id": "state_recall_error", "serious": false, "description": "Goal, changed files, test status, or next step was recalled incorrectly." },
+    { "id": "native_handoff_mutated", "serious": true, "description": "The native handoff bytes delivered to the fresh task differed from source-model output." },
+    { "id": "product_context_unverified", "serious": true, "description": "The product arm lacked a ready Context Pack or relevant active Regression Contract." },
+    { "id": "model_error", "serious": true, "description": "The provider returned a terminal model/turn failure; this is measured and not retried." },
+    { "id": "invalid_final_response", "serious": true, "description": "The model returned a non-object, non-schema-conforming, or otherwise unscorable final response; this is measured and not retried." },
+    { "id": "model_identity_mismatch", "serious": true, "description": "Paid stages for one arm used conflicting model snapshots or an explicit failed model verification, so the arm is fail-closed." },
+    { "id": "provider_transport", "serious": false, "description": "A retryable infrastructure transport failure prevented a measured outcome." },
+    { "id": "provider_timeout", "serious": false, "description": "A retryable infrastructure timeout prevented a measured outcome." },
+    { "id": "rate_limit_pause", "serious": false, "description": "The official usage guard paused before the next paid arm." },
+    { "id": "metric_unavailable", "serious": false, "description": "The official interface did not expose a requested metric; no value was fabricated." }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "continuation-fixture-config-guard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

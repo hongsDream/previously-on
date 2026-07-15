@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "continuation-result.v1.schema.json",
+  "title": "ContinuationResultV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "scenarioId",
+    "completionMarker",
+    "goal",
+    "changedFiles",
+    "testStatus",
+    "nextStep",
+    "invariantViolations",
+    "staleClaims",
+    "seriousErrors"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "scenarioId": { "type": "string", "minLength": 1 },
+    "completionMarker": { "type": "string", "minLength": 1 },
+    "goal": { "type": "string", "minLength": 1 },
+    "changedFiles": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "testStatus": { "type": "string", "enum": ["passed", "failed", "not_run", "unavailable"] },
+    "nextStep": { "type": "string" },
+    "invariantViolations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "staleClaims": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "seriousErrors": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

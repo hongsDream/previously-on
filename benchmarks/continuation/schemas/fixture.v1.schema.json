@@ -1,0 +1,279 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fixture.v1.schema.json",
+  "title": "PreviouslyOn continuation benchmark fixture V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "family",
+    "title",
+    "repositorySnapshot",
+    "goal",
+    "invariants",
+    "changedFiles",
+    "staleFacts",
+    "traps",
+    "expectedState",
+    "finalChallenge",
+    "oracle",
+    "rubric",
+    "worklogTurns",
+    "productArm"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "family": { "enum": ["synthetic", "previously_on"] },
+    "title": { "type": "string", "minLength": 1 },
+    "repositorySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "baseSha", "source"],
+      "properties": {
+        "kind": { "enum": ["synthetic_template", "previously_on_merge"] },
+        "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "goal": { "type": "string", "minLength": 1 },
+    "invariants": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/definitions/namedText" }
+    },
+    "changedFiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "status", "purpose"],
+        "properties": {
+          "path": { "$ref": "#/definitions/repositoryPath" },
+          "status": { "enum": ["added", "modified", "renamed", "deleted"] },
+          "previousPath": {
+            "anyOf": [
+              { "$ref": "#/definitions/repositoryPath" },
+              { "type": "null" }
+            ]
+          },
+          "purpose": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "staleFacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "claim", "truth"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "claim": { "type": "string", "minLength": 1 },
+          "truth": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "traps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "promptFragment", "expectedDisposition"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "promptFragment": { "type": "string", "minLength": 1 },
+          "expectedDisposition": { "enum": ["reject", "ignore", "correct"] }
+        }
+      }
+    },
+    "expectedState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goal",
+        "changedFiles",
+        "testStatus",
+        "nextStep",
+        "invariantViolations",
+        "staleClaims",
+        "seriousErrors"
+      ],
+      "properties": {
+        "goal": { "type": "string", "minLength": 1 },
+        "changedFiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/repositoryPath" },
+          "uniqueItems": true
+        },
+        "testStatus": { "enum": ["passed", "failed", "not_run", "unavailable"] },
+        "nextStep": { "type": "string" },
+        "invariantViolations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "staleClaims": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "seriousErrors": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "finalChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "allowedFiles", "requiredTestCommand", "completionMarker", "responseSchema"],
+      "properties": {
+        "prompt": { "type": "string", "minLength": 1 },
+        "allowedFiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/repositoryPath" },
+          "uniqueItems": true
+        },
+        "requiredTestCommand": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "completionMarker": { "type": "string", "minLength": 1 },
+        "responseSchema": { "const": "schemas/continuation-result.v1.schema.json" }
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "path", "sha256", "requiredCommandTestCount", "minimumAssertionCount", "invariantIds"],
+      "properties": {
+        "version": { "const": 1 },
+        "path": { "type": "string", "pattern": "^oracles/[a-z0-9]+(?:-[a-z0-9]+)*\\.v1\\.mjs$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "requiredCommandTestCount": { "type": "integer", "minimum": 1 },
+        "minimumAssertionCount": { "type": "integer", "minimum": 1 },
+        "invariantIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        }
+      }
+    },
+    "rubric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxScore", "successThreshold", "criteria"],
+      "properties": {
+        "maxScore": { "const": 100 },
+        "successThreshold": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "criteria": {
+          "type": "array",
+          "minItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "kind", "target", "values", "points", "seriousOnFailure"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "kind": {
+                "description": "Scoring operation: exact_changed_files compares the repository diff path set with values; contains_all and excludes_all search the selected target; command_passed requires an exact argv sequence with exit 0; no_invariant_violation requires the listed invariant ids to have no repository or ContinuationResultV1 violation; state_recall_equals compares each named ContinuationResultV1 field with expectedState.",
+                "enum": [
+                  "exact_changed_files",
+                  "contains_all",
+                  "excludes_all",
+                  "command_passed",
+                  "no_invariant_violation",
+                  "state_recall_equals"
+                ]
+              },
+              "target": {
+                "description": "Evidence source consumed by the deterministic scorer. assistant_final is the parsed strict ContinuationResultV1 JSON, and state_recall is its goal, changedFiles, testStatus, and nextStep projection.",
+                "enum": ["repository", "assistant_final", "tool_trace", "state_recall"]
+              },
+              "values": {
+                "description": "For path/argv operations these are ordered literal operands. For no_invariant_violation they are invariant ids. For state_recall_equals they are expectedState property names.",
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string" }
+              },
+              "points": { "type": "integer", "minimum": 1, "maximum": 100 },
+              "seriousOnFailure": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "worklogTurns": {
+      "type": "array",
+      "minItems": 20,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["turn", "summary", "stateDelta"],
+        "properties": {
+          "turn": { "type": "integer", "minimum": 1, "maximum": 20 },
+          "summary": { "type": "string", "minLength": 1 },
+          "stateDelta": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "productArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategyId",
+        "activation",
+        "contextPackTrust",
+        "contractTrust",
+        "fixtureBaseSha",
+        "relevantContracts",
+        "irrelevantContracts"
+      ],
+      "properties": {
+        "strategyId": { "const": "verified_context_pack_contracts" },
+        "activation": { "const": "after_boundary_only" },
+        "contextPackTrust": { "const": "untrusted_historical_data" },
+        "contractTrust": { "const": "untrusted_repository_metadata" },
+        "fixtureBaseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "relevantContracts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "regression-contract.v1.schema.json" }
+        },
+        "irrelevantContracts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "regression-contract.v1.schema.json" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    },
+    "namedText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "summary.v1.schema.json",
+  "title": "Continuation benchmark derived summary V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evidenceClass",
+    "completedArms",
+    "expectedArms",
+    "remainingArms",
+    "models",
+    "recommendation",
+    "statisticalLimitations"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "evidenceClass": { "const": "continuation_benchmark_derived_summary" },
+    "fixtureSha256": { "type": ["string", "null"] },
+    "completedArms": { "type": "integer", "minimum": 0 },
+    "expectedArms": { "type": ["integer", "null"], "minimum": 0 },
+    "remainingArms": { "type": ["integer", "null"], "minimum": 0 },
+    "models": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["strategyComparison"],
+        "properties": {
+          "strategyComparison": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/strategyComparison" }
+          }
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["action", "untestedModels"],
+      "properties": {
+        "action": { "enum": ["no_auto_rollover", "model_specific_thresholds_only"] },
+        "untestedModels": { "const": "no recommendation" }
+      }
+    },
+    "statisticalLimitations": { "type": "array", "items": { "type": "string" } }
+  },
+  "definitions": {
+    "bootstrapMetric": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["available", "estimate", "lower", "upper", "confidence", "method", "iterations", "seed", "n"],
+          "properties": {
+            "available": { "const": true },
+            "estimate": { "type": "number" },
+            "lower": { "type": "number" },
+            "upper": { "type": "number" },
+            "confidence": { "const": 0.95 },
+            "method": { "const": "seeded_scenario_cluster_paired_percentile_bootstrap" },
+            "iterations": { "type": "integer", "minimum": 100 },
+            "seed": { "type": "string", "minLength": 1 },
+            "n": { "type": "integer", "minimum": 1 },
+            "clusterCount": { "type": "integer", "minimum": 1 },
+            "repeatsPerCondition": { "const": 3 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["available", "reason"],
+          "properties": {
+            "available": { "const": false },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "expectedPairCount", "observedPairCount", "uniquePairCount", "reason"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "expectedPairCount": { "type": ["integer", "null"], "minimum": 0 },
+        "observedPairCount": { "type": "integer", "minimum": 0 },
+        "uniquePairCount": { "type": "integer", "minimum": 0 },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "stateRecallDifferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "changedFiles", "testStatus", "nextStep"],
+      "properties": {
+        "goal": { "$ref": "#/definitions/bootstrapMetric" },
+        "changedFiles": { "$ref": "#/definitions/bootstrapMetric" },
+        "testStatus": { "$ref": "#/definitions/bootstrapMetric" },
+        "nextStep": { "$ref": "#/definitions/bootstrapMetric" }
+      }
+    },
+    "strategyComparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpoint",
+        "baselineStrategy",
+        "comparisonStrategy",
+        "pairedArmCount",
+        "coverage",
+        "accuracyDifferencePp",
+        "seriousErrorDifferencePp",
+        "completionLatencyPercentChange",
+        "endToEndLatencyPercentChange",
+        "stateRecallDifferencePp"
+      ],
+      "properties": {
+        "checkpoint": { "type": "integer", "minimum": 0 },
+        "baselineStrategy": { "const": "same_task" },
+        "comparisonStrategy": { "const": "native_handoff" },
+        "pairedArmCount": { "type": "integer", "minimum": 0 },
+        "coverage": { "$ref": "#/definitions/coverage" },
+        "accuracyDifferencePp": { "$ref": "#/definitions/bootstrapMetric" },
+        "seriousErrorDifferencePp": { "$ref": "#/definitions/bootstrapMetric" },
+        "completionLatencyPercentChange": { "$ref": "#/definitions/bootstrapMetric" },
+        "endToEndLatencyPercentChange": { "$ref": "#/definitions/bootstrapMetric" },
+        "stateRecallDifferencePp": { "$ref": "#/definitions/stateRecallDifferences" }
+      }
+    }
+  }
+}

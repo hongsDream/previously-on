@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "synthetic-config-guard",
+  "runtime": "node-22",
+  "networkInstallRequired": false,
+  "baselineTestArgv": ["npm", "test", "--", "tests/config.test.ts"]
+}
