@@ -1,8 +1,9 @@
 import { ArrowLeft, MoreHorizontal } from 'lucide-react';
-import type { BootstrapData, Checkpoint, Task, TaskStatus } from '../types';
+import type { BootstrapData, Checkpoint, RegressionCandidateDraftV1, Task, TaskStatus } from '../types';
 import { CheckpointTimeline } from './CheckpointTimeline';
 import { ContextPackPreview } from './ContextPackPreview';
 import { ResumeBanner } from './ResumeBanner';
+import { RegressionContractsPanel } from './RegressionContractsPanel';
 
 interface TaskWorkspaceProps {
   task: Task;
@@ -10,12 +11,20 @@ interface TaskWorkspaceProps {
   selectedCheckpoint?: Checkpoint;
   resumeCandidate?: BootstrapData['resumeCandidate'];
   contextPack?: BootstrapData['contextPacks'][string];
+  contracts: BootstrapData['contracts'];
+  contractCandidates: BootstrapData['contractCandidates'];
+  contractEvaluation: BootstrapData['contractEvaluation'];
   contextPackExpanded: boolean;
   onCheckpointSelect: (checkpoint: Checkpoint) => void;
   onReviewResume: () => void;
   onDismissResume: () => void;
   onToggleContextPack: () => void;
   onTaskStatusChange: (status: TaskStatus) => void;
+  onCreateContractCandidate: (candidate: RegressionCandidateDraftV1) => Promise<boolean>;
+  onUpdateContractCandidate: (id: string, candidate: RegressionCandidateDraftV1) => Promise<boolean>;
+  onApproveContractCandidate: (id: string) => Promise<boolean>;
+  onSupersedeContract: (id: string, supersededBy: string) => Promise<boolean>;
+  contractMutationsDisabled: boolean;
   mutationPending: boolean;
   onBack: () => void;
 }
@@ -26,12 +35,20 @@ export function TaskWorkspace({
   selectedCheckpoint,
   resumeCandidate,
   contextPack,
+  contracts,
+  contractCandidates,
+  contractEvaluation,
   contextPackExpanded,
   onCheckpointSelect,
   onReviewResume,
   onDismissResume,
   onToggleContextPack,
   onTaskStatusChange,
+  onCreateContractCandidate,
+  onUpdateContractCandidate,
+  onApproveContractCandidate,
+  onSupersedeContract,
+  contractMutationsDisabled,
   mutationPending,
   onBack,
 }: TaskWorkspaceProps) {
@@ -56,6 +73,18 @@ export function TaskWorkspace({
       {resumeCandidate ? (
         <ResumeBanner candidate={resumeCandidate} task={task} onReview={onReviewResume} onDismiss={onDismissResume} />
       ) : null}
+
+      <RegressionContractsPanel
+        contracts={contracts}
+        candidates={contractCandidates}
+        evaluation={contractEvaluation}
+        disabled={contractMutationsDisabled}
+        mutationPending={mutationPending}
+        onCreateCandidate={onCreateContractCandidate}
+        onUpdateCandidate={onUpdateContractCandidate}
+        onApproveCandidate={onApproveContractCandidate}
+        onSupersedeContract={onSupersedeContract}
+      />
 
       {checkpoints.length > 0 && selectedCheckpoint ? (
         <>

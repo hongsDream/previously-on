@@ -2,6 +2,7 @@ pub mod app_server;
 mod bounded_io;
 pub mod config;
 pub mod context_pack;
+pub mod contracts;
 pub mod domain;
 pub mod git;
 pub mod hook;

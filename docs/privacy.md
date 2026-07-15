@@ -14,6 +14,11 @@ same redaction and size-limit pipeline before a durable write. The default filte
 - `.env` files and common credential/key basenames;
 - oversized prompts, tool input, tool output, and evidence excerpts.
 
+Regression Contract JSON has a deliberately narrow schema: redacted title and invariant, impact
+selectors, argv test metadata, the source commit and timestamp, and a SHA-256 evidence digest. It
+does not contain raw prompts, tool output, raw source code, environment values, or secrets.
+Automatic candidate evidence is reduced to normalized structural metadata before hashing.
+
 Redaction is defense in depth, not a guarantee that arbitrary secrets can never appear. Review
 the local inspector before sharing an export.
 
@@ -27,6 +32,8 @@ the local inspector before sharing an export.
 
 `previously purge --repo <path>` removes the repository from the canonical event log, projections,
 FTS indexes, fallback queues, cached packs, and database WAL through an atomic compaction.
+Git-owned `.previously-on/contracts/*.json` files are not local projection data and are never
+deleted by repository purge.
 
 The 90-day compaction runs when the daemon or review UI starts. Setup also keeps `0600` backups
 of the pre-install `hooks.json` and `config.toml` under `~/.previously-on/setup-backups` so

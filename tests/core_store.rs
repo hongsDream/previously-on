@@ -135,6 +135,194 @@ fn redacts_before_canonical_persistence_and_rebuilds_fact_projection() {
 }
 
 #[test]
+fn candidate_and_evaluation_projections_rebuild_export_retain_and_purge() {
+    let temp = TempDir::new().unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    store
+        .insert_event(&event(
+            EventKind::RegressionCandidateRecorded,
+            2,
+            json!({
+                "regressionCandidate": {
+                    "schemaVersion": 1,
+                    "id": "00000000-0000-4000-8000-000000000001",
+                    "repositoryId": "repo-1",
+                    "taskId": "task-1",
+                    "title": "Keep auth stable api_key=never-store-candidate",
+                    "invariant": "Auth behavior remains stable",
+                    "status": "pending",
+                    "impactSelectors": [{"path":{"kind":"exact","value":"src/auth.rs"},"symbols":[]}],
+                    "requiredTests": [{
+                        "id":"auth-test",
+                        "name":"auth test",
+                        "program":"cargo",
+                        "args":["test","auth"],
+                        "workingDirectory":".",
+                        "timeoutSeconds":900
+                    }],
+                    "origin":{
+                        "fixedAtCommit":"0000000000000000000000000000000000000000",
+                        "recordedAt":at(2),
+                        "evidenceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    },
+                    "createdAt":at(2),
+                    "updatedAt":at(2),
+                    "evidenceKind":"manual",
+                    "evidenceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }),
+        ))
+        .unwrap();
+    store
+        .insert_event(&event(
+            EventKind::ContractEvaluationRecorded,
+            3,
+            json!({
+                "contractEvaluation": {
+                    "schemaVersion": 1,
+                    "id": "evaluation-1",
+                    "repositoryId": "repo-1",
+                    "taskId": "task-1",
+                    "readiness": "contract_blocked",
+                    "evaluatedAt":at(3),
+                    "relevantContracts":[],
+                    "requiredTests":[],
+                    "warnings":["--token never-store-evaluation"],
+                    "contentFingerprint":"fingerprint-1",
+                    "continuationIssued":false
+                }
+            }),
+        ))
+        .unwrap();
+
+    assert_eq!(store.list_regression_candidates(None).unwrap().len(), 1);
+    assert_eq!(store.list_contract_evaluations(None).unwrap().len(), 1);
+    let export = store.export_json(Some("repo-1")).unwrap();
+    let serialized = serde_json::to_string(&export).unwrap();
+    assert_eq!(export["regressionCandidates"].as_array().unwrap().len(), 1);
+    assert_eq!(export["contractEvaluations"].as_array().unwrap().len(), 1);
+    assert!(!serialized.contains("never-store-candidate"));
+    assert!(!serialized.contains("never-store-evaluation"));
+
+    store.rebuild_projections().unwrap();
+    assert_eq!(store.list_regression_candidates(None).unwrap().len(), 1);
+    assert_eq!(store.list_contract_evaluations(None).unwrap().len(), 1);
+
+    let mut older_candidate = store
+        .get_regression_candidate("00000000-0000-4000-8000-000000000001")
+        .unwrap()
+        .unwrap();
+    older_candidate.title = "Older candidate snapshot".into();
+    older_candidate.updated_at = at(1);
+    store
+        .insert_event(&event(
+            EventKind::RegressionCandidateRecorded,
+            1,
+            json!({"regressionCandidate":older_candidate}),
+        ))
+        .unwrap();
+    let mut older_evaluation = store
+        .get_contract_evaluation("evaluation-1")
+        .unwrap()
+        .unwrap();
+    older_evaluation.id = "evaluation-old".into();
+    older_evaluation.evaluated_at = at(1);
+    store
+        .insert_event(&event(
+            EventKind::ContractEvaluationRecorded,
+            1,
+            json!({"contractEvaluation":older_evaluation}),
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .get_regression_candidate("00000000-0000-4000-8000-000000000001")
+            .unwrap()
+            .unwrap()
+            .title,
+        "Keep auth stable api_key=[REDACTED]"
+    );
+    assert_eq!(store.list_contract_evaluations(None).unwrap().len(), 2);
+
+    let report = store.apply_retention(at(120 * 24 * 60 * 60), 90).unwrap();
+    assert_eq!(report.removed_events, 2);
+    assert_eq!(store.list_regression_candidates(None).unwrap().len(), 1);
+    assert_eq!(store.list_contract_evaluations(None).unwrap().len(), 1);
+    let before_rebuild = serde_json::to_value((
+        store.list_regression_candidates(None).unwrap(),
+        store.list_contract_evaluations(None).unwrap(),
+    ))
+    .unwrap();
+    store.rebuild_projections().unwrap();
+    let after_rebuild = serde_json::to_value((
+        store.list_regression_candidates(None).unwrap(),
+        store.list_contract_evaluations(None).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(before_rebuild, after_rebuild);
+
+    store.purge_repository("repo-1").unwrap();
+    assert!(store.list_regression_candidates(None).unwrap().is_empty());
+    assert!(store.list_contract_evaluations(None).unwrap().is_empty());
+}
+
+#[test]
+fn retention_preserves_once_per_fingerprint_continuation_guard() {
+    let temp = TempDir::new().unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    let evaluation = |id: &str, continuation_issued: bool, evaluated_at| {
+        json!({
+            "contractEvaluation": {
+                "schemaVersion": 1,
+                "id": id,
+                "repositoryId": "repo-1",
+                "taskId": "task-1",
+                "readiness": "contract_blocked",
+                "evaluatedAt": evaluated_at,
+                "relevantContracts": [{
+                    "id": "00000000-0000-4000-8000-000000000001",
+                    "title": "Keep auth stable",
+                    "invariant": "Auth remains stable",
+                    "matchReasons": ["src/auth.rs matched"]
+                }],
+                "requiredTests": [],
+                "warnings": [],
+                "contentFingerprint": "same-related-fingerprint",
+                "continuationIssued": continuation_issued
+            }
+        })
+    };
+    store
+        .insert_event(&event(
+            EventKind::ContractEvaluationRecorded,
+            1,
+            evaluation("evaluation-issued", true, at(1)),
+        ))
+        .unwrap();
+    store
+        .insert_event(&event(
+            EventKind::ContractEvaluationRecorded,
+            2,
+            evaluation("evaluation-active-stop", false, at(2)),
+        ))
+        .unwrap();
+
+    let report = store.apply_retention(at(120 * 24 * 60 * 60), 90).unwrap();
+    assert_eq!(report.removed_events, 0);
+    let evaluations = store.list_contract_evaluations(None).unwrap();
+    assert_eq!(evaluations.len(), 2);
+    assert!(evaluations
+        .iter()
+        .any(|evaluation| evaluation.continuation_issued));
+    store.rebuild_projections().unwrap();
+    assert!(store
+        .list_contract_evaluations(None)
+        .unwrap()
+        .iter()
+        .any(|evaluation| evaluation.continuation_issued));
+}
+
+#[test]
 fn purge_removes_canonical_and_projected_repository_data() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("previously.sqlite3");

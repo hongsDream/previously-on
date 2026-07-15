@@ -1,8 +1,9 @@
-use std::io::Cursor;
+use std::io::{BufRead, BufReader, Cursor, Write};
 
 use previously_on::hook::{
-    append_fallback, capture, hook_response, replay_fallback, run_hook, HookEvent,
-    HookIngressConfig, ResumeCandidateMetadata, MAX_DAEMON_FRAME_BYTES, MAX_HOOK_PAYLOAD_BYTES,
+    append_fallback, capture, contract_hook_response, hook_response, replay_fallback, run_hook,
+    HookEvent, HookIngressConfig, ResumeCandidateMetadata, MAX_DAEMON_FRAME_BYTES,
+    MAX_HOOK_PAYLOAD_BYTES,
 };
 use previously_on::store::Store;
 use tempfile::TempDir;
@@ -34,6 +35,40 @@ fn capture_redacts_secrets_and_sensitive_paths_before_fallback() {
     let queued = std::fs::read_to_string(queue).unwrap();
     assert!(!queued.contains("very-secret-value"));
     assert!(!queued.contains("actual-token"));
+}
+
+#[test]
+fn contract_hook_responses_use_non_blocking_context_and_official_stop_block_shape() {
+    let pre_tool = contract_hook_response(
+        HookEvent::PreToolUse,
+        Some("Relevant contract: keep auth stable; token=never-store-context"),
+        None,
+    );
+    assert_eq!(
+        pre_tool["hookSpecificOutput"]["hookEventName"],
+        "PreToolUse"
+    );
+    assert!(pre_tool["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("keep auth stable"));
+    assert!(!pre_tool.to_string().contains("never-store-context"));
+    assert!(pre_tool.get("decision").is_none());
+
+    let stop = contract_hook_response(
+        HookEvent::Stop,
+        None,
+        Some("Run required test: cargo test --locked --all"),
+    );
+    assert_eq!(stop["decision"], "block");
+    assert_eq!(
+        stop["reason"],
+        "Run required test: cargo test --locked --all"
+    );
+    assert_eq!(
+        contract_hook_response(HookEvent::Stop, None, None),
+        serde_json::json!({})
+    );
 }
 
 #[test]
@@ -142,6 +177,76 @@ fn hook_ignores_work_outside_the_registered_repository() {
     )
     .unwrap();
     assert_eq!(String::from_utf8(output).unwrap().trim(), "{}");
+    assert!(!config.queue_path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn stop_hook_waits_for_large_slow_contract_ack_instead_of_bypassing_the_block() {
+    use std::os::unix::net::UnixListener;
+    use std::process::Command;
+    use std::time::Duration;
+
+    let temp = TempDir::new().unwrap();
+    let registered = temp.path().join("registered");
+    std::fs::create_dir_all(&registered).unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&registered)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    let socket_path = temp.path().join("previously.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut request)
+            .unwrap();
+        assert!(request.contains("session-slow-stop"));
+        std::thread::sleep(Duration::from_millis(900));
+        let exact_commands = format!(
+            "PreviouslyOn blocks completion.\n{}\n- [missing] cwd=. argv=cargo test auth",
+            "contract-context ".repeat(4_500)
+        );
+        serde_json::to_writer(
+            &mut stream,
+            &serde_json::json!({
+                "status": "persisted",
+                "stopBlockReason": exact_commands
+            }),
+        )
+        .unwrap();
+        stream.write_all(b"\n").unwrap();
+    });
+    let config = HookIngressConfig {
+        socket_path,
+        queue_path: temp.path().join("queue/events.jsonl"),
+        registered_repository: Some(registered.clone()),
+    };
+    let mut input = Cursor::new(
+        serde_json::to_vec(&serde_json::json!({
+            "session_id": "session-slow-stop",
+            "turn_id": "stop-1",
+            "cwd": registered,
+            "stop_hook_active": false
+        }))
+        .unwrap(),
+    );
+    let mut output = Vec::new();
+
+    run_hook(HookEvent::Stop, &config, &mut input, &mut output).unwrap();
+    server.join().unwrap();
+
+    let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(response["decision"], "block");
+    assert!(response["reason"]
+        .as_str()
+        .unwrap()
+        .contains("cwd=. argv=cargo test auth"));
+    assert!(output.len() > 64 * 1024);
     assert!(!config.queue_path.exists());
 }
 

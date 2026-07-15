@@ -75,6 +75,11 @@ pub enum Commands {
         #[command(subcommand)]
         target: RunTarget,
     },
+    /// Manage Git-backed Regression Contracts for this repository.
+    Contracts {
+        #[command(subcommand)]
+        target: ContractsTarget,
+    },
     /// Rebuild SQLite projections from the canonical event log.
     #[command(hide = true)]
     Reconcile,
@@ -118,6 +123,26 @@ pub enum RunTarget {
         /// Arguments passed verbatim to Codex after `--`.
         #[arg(last = true)]
         codex_args: Vec<OsString>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContractsTarget {
+    /// Create the Contract directory and optional pinned GitHub Actions gate.
+    Init {
+        #[arg(long)]
+        github_actions: bool,
+    },
+    /// Validate every Contract in the current checkout.
+    Validate,
+    /// Select relevant Contracts and optionally execute their required tests.
+    Check {
+        #[arg(long)]
+        base: String,
+        #[arg(long)]
+        execute: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -249,6 +274,26 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Run {
             target: RunTarget::Codex { repo, codex_args },
         } => return run_codex(&config, &repo, &codex_args).await,
+        Commands::Contracts { target } => {
+            let repository = std::env::current_dir().context("resolve current repository")?;
+            match target {
+                ContractsTarget::Init { github_actions } => {
+                    let report = crate::contracts::init_contracts(&repository, github_actions)?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                ContractsTarget::Validate => {
+                    let report = crate::contracts::validate_contracts(&repository)?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                ContractsTarget::Check {
+                    base,
+                    execute,
+                    json,
+                } => {
+                    return run_contract_check(&repository, &base, execute, json).await;
+                }
+            }
+        }
         Commands::Reconcile => {
             let store = Store::open(&config.database_path)?;
             store.rebuild_projections()?;
@@ -271,6 +316,60 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+async fn run_contract_check(
+    repository: &Path,
+    base: &str,
+    execute: bool,
+    json_output: bool,
+) -> Result<ExitCode> {
+    let evaluation = match crate::contracts::check_contracts(repository, base, execute).await {
+        Ok(evaluation) => evaluation,
+        Err(error) if json_output => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "schemaVersion": crate::domain::SCHEMA_VERSION_V1,
+                    "readiness": "contract_blocked",
+                    "error": crate::redaction::redact_excerpt(&format!("{error:#}"))
+                }))?
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+        Err(error) => return Err(error),
+    };
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&evaluation)?);
+    } else if evaluation.relevant_contracts.is_empty() {
+        println!("No relevant Regression Contracts.");
+    } else {
+        println!("Regression Contract readiness: {:?}", evaluation.readiness);
+        for contract in &evaluation.relevant_contracts {
+            println!("- {}: {}", contract.id, contract.invariant);
+        }
+        for test in &evaluation.required_tests {
+            let args = test
+                .args
+                .iter()
+                .map(|arg| format!(" {:?}", arg))
+                .collect::<String>();
+            println!(
+                "  {:?}: (cd {:?} && {:?}{})",
+                test.state, test.working_directory, test.program, args
+            );
+        }
+        for warning in &evaluation.warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+    Ok(
+        if evaluation.readiness == crate::contracts::ContractReadinessV1::Ready {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        },
+    )
 }
 
 async fn run_codex(config: &AppConfig, repo: &Path, codex_args: &[OsString]) -> Result<ExitCode> {

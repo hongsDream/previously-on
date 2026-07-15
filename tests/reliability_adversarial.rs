@@ -43,6 +43,68 @@ fn one_secret_corpus_is_absent_from_queue_database_export_rebuild_and_retention(
 
     let store = Store::open(&database).unwrap();
     replay_fallback(&store, &queue).unwrap();
+    let repository_id = event.repository_id.clone();
+    let session_id = event.session_id.clone();
+    store
+        .insert_event(&EventEnvelopeV1::new(
+            "privacy-candidate",
+            repository_id.clone(),
+            session_id.clone(),
+            EventKind::RegressionCandidateRecorded,
+            Utc::now(),
+            json!({
+                "regressionCandidate": {
+                    "schemaVersion": 1,
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "repositoryId": repository_id,
+                    "title": SECRETS.join(" "),
+                    "invariant": "credentials.json Authorization: Basic opaque-basic",
+                    "status": "pending",
+                    "impactSelectors": [{"path":{"kind":"exact","value":"src/auth.rs"},"symbols":[]}],
+                    "requiredTests": [{
+                        "id":"auth-test",
+                        "name":"auth test",
+                        "program":"cargo",
+                        "args":["test","auth"],
+                        "workingDirectory":".",
+                        "timeoutSeconds":900
+                    }],
+                    "origin":{
+                        "fixedAtCommit":"0000000000000000000000000000000000000000",
+                        "recordedAt":Utc::now(),
+                        "evidenceSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    },
+                    "createdAt":Utc::now(),
+                    "updatedAt":Utc::now(),
+                    "evidenceKind":"manual",
+                    "evidenceSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+            }),
+        ))
+        .unwrap();
+    store
+        .insert_event(&EventEnvelopeV1::new(
+            "privacy-evaluation",
+            repository_id.clone(),
+            session_id,
+            EventKind::ContractEvaluationRecorded,
+            Utc::now(),
+            json!({
+                "contractEvaluation": {
+                    "schemaVersion": 1,
+                    "id": "evaluation-privacy",
+                    "repositoryId": repository_id,
+                    "readiness": "contract_blocked",
+                    "evaluatedAt":Utc::now(),
+                    "relevantContracts":[],
+                    "requiredTests":[],
+                    "warnings":[SECRETS.join(" ")],
+                    "contentFingerprint":"privacy-fingerprint",
+                    "continuationIssued":false
+                }
+            }),
+        ))
+        .unwrap();
     let exported = serde_json::to_vec(&store.export_json(None).unwrap()).unwrap();
     assert_bytes_have_no_secrets(&exported);
     store.rebuild_projections().unwrap();

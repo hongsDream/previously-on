@@ -21,6 +21,11 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::context_pack::{ContextPackBuilder, DEFAULT_TOKEN_BUDGET};
+use crate::contracts::{
+    CandidateEvidenceKindV1, ContractEvaluationV1, ContractOriginV1, ContractReadinessV1,
+    ContractStatusV1, ImpactSelectorGroupV1, RegressionCandidateStatusV1, RegressionCandidateV1,
+    RegressionContractV1, RequiredTestV1,
+};
 use crate::domain::{
     ChangeStatus, ContinuationReasonV1, ContinuationStateV1, CoverageStatus, EventEnvelopeV1,
     EventKind, EvidenceIntegrity, FactKind, FactLifecycle, FactV1, Freshness, TaskLifecycle,
@@ -112,6 +117,16 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
         .route("/api/facts/{id}", patch(update_fact))
         .route("/api/facts/{id}/revalidate", post(revalidate_fact))
         .route("/api/tasks/{id}", patch(update_task))
+        .route("/api/contract-candidates", post(create_contract_candidate))
+        .route(
+            "/api/contract-candidates/{id}",
+            patch(update_contract_candidate),
+        )
+        .route(
+            "/api/contract-candidates/{id}/approve",
+            post(approve_contract_candidate),
+        )
+        .route("/api/contracts/{id}/supersede", post(supersede_contract))
         .fallback(static_asset)
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(RequestBodyLimitLayer::new(128 * 1024))
@@ -141,6 +156,24 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         .list_repositories()
         .map_err(ApiError::internal)?;
     let repository = repositories.first();
+    let contracts = repository
+        .filter(|repository| std::path::Path::new(&repository.path).exists())
+        .map(|repository| crate::contracts::load_contracts(&repository.path))
+        .transpose()
+        .map_err(ApiError::internal)?
+        .unwrap_or_default();
+    let contract_candidates = state
+        .store
+        .list_regression_candidates(repository.map(|repository| repository.id.as_str()))
+        .map_err(ApiError::internal)?;
+    let contract_evaluations = state
+        .store
+        .list_contract_evaluations(repository.map(|repository| repository.id.as_str()))
+        .map_err(ApiError::internal)?;
+    let contract_evaluation = contract_evaluations
+        .first()
+        .cloned()
+        .unwrap_or_else(|| empty_contract_evaluation(repository.map(|item| item.id.as_str())));
     let task_hits = state
         .store
         .search_tasks("", 100)
@@ -541,6 +574,10 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "checkpoints": checkpoint_values,
         "facts": fact_values,
         "evidence": evidence_values,
+        "contracts": contracts,
+        "contractCandidates": contract_candidates,
+        "contractEvaluation": contract_evaluation,
+        "contractEvaluations": contract_evaluations,
         "contextPacks": context_packs
     });
     Ok(Json(redact_value(&payload)))
@@ -701,6 +738,265 @@ async fn revalidate_fact(
         "freshness": freshness_name(fact.freshness),
         "validatedAt": iso(fact.updated_at)
     })))
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContractCandidateDraft {
+    title: String,
+    invariant: String,
+    impact_selectors: Vec<ImpactSelectorGroupV1>,
+    required_tests: Vec<RequiredTestV1>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContractSupersedeRequest {
+    superseded_by: String,
+}
+
+async fn create_contract_candidate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(draft): Json<ContractCandidateDraft>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let repository = primary_repository(&state)?;
+    let now = Utc::now();
+    let draft = redact_candidate_draft(draft)?;
+    let evidence_sha256 = candidate_evidence_sha256(&draft).map_err(ApiError::internal)?;
+    let candidate = RegressionCandidateV1 {
+        schema_version: crate::domain::SCHEMA_VERSION_V1,
+        id: uuid::Uuid::now_v7().to_string(),
+        repository_id: repository.id.clone(),
+        task_id: None,
+        title: draft.title,
+        invariant: draft.invariant,
+        status: RegressionCandidateStatusV1::Pending,
+        impact_selectors: draft.impact_selectors,
+        required_tests: draft.required_tests,
+        origin: ContractOriginV1 {
+            fixed_at_commit: repository_head(&repository.path)?,
+            recorded_at: now,
+            evidence_sha256: evidence_sha256.clone(),
+        },
+        created_at: now,
+        updated_at: now,
+        evidence_kind: CandidateEvidenceKindV1::Manual,
+        evidence_sha256,
+    };
+    crate::contracts::validate_candidate(&candidate)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    persist_contract_candidate_event(&state.store, &candidate).map_err(ApiError::internal)?;
+    Ok(Json(json!({ "ok": true, "candidate": candidate })))
+}
+
+async fn update_contract_candidate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(draft): Json<ContractCandidateDraft>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let repository = primary_repository(&state)?;
+    let stored = state
+        .store
+        .get_regression_candidate(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found(format!("Contract candidate not found: {id}")))?;
+    let mut candidate = stored;
+    if candidate.repository_id != repository.id
+        || candidate.status != RegressionCandidateStatusV1::Pending
+    {
+        return Err(ApiError::bad_request(
+            "only pending candidates from this repository can be edited",
+        ));
+    }
+    let draft = redact_candidate_draft(draft)?;
+    let evidence_sha256 = candidate_evidence_sha256(&draft).map_err(ApiError::internal)?;
+    let now = Utc::now();
+    candidate.title = draft.title;
+    candidate.invariant = draft.invariant;
+    candidate.impact_selectors = draft.impact_selectors;
+    candidate.required_tests = draft.required_tests;
+    candidate.origin = ContractOriginV1 {
+        fixed_at_commit: repository_head(&repository.path)?,
+        recorded_at: now,
+        evidence_sha256: evidence_sha256.clone(),
+    };
+    // Editing an evidence-derived candidate changes the asserted selectors/tests and therefore
+    // cannot retain the immutable fail/edit/pass provenance label. The edited draft remains
+    // useful, but from this point it is an explicitly reviewed manual candidate.
+    candidate.evidence_kind = CandidateEvidenceKindV1::Manual;
+    candidate.evidence_sha256 = evidence_sha256;
+    candidate.updated_at = now;
+    crate::contracts::validate_candidate(&candidate)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    persist_contract_candidate_event(&state.store, &candidate).map_err(ApiError::internal)?;
+    Ok(Json(json!({ "ok": true, "candidate": candidate })))
+}
+
+async fn approve_contract_candidate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let repository = primary_repository(&state)?;
+    let stored = state
+        .store
+        .get_regression_candidate(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found(format!("Contract candidate not found: {id}")))?;
+    let mut candidate = stored;
+    if candidate.repository_id != repository.id
+        || candidate.status != RegressionCandidateStatusV1::Pending
+    {
+        return Err(ApiError::bad_request(
+            "only pending candidates from this repository can be approved",
+        ));
+    }
+    let existing = crate::contracts::load_contracts(&repository.path)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if existing.iter().any(|contract| contract.id == candidate.id) {
+        return Err(ApiError::bad_request(
+            "a Git Contract with this candidate id already exists",
+        ));
+    }
+    let contract_path = crate::contracts::approve_candidate(&repository.path, &candidate)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let contract = RegressionContractV1 {
+        schema_version: candidate.schema_version,
+        id: candidate.id.clone(),
+        title: candidate.title.clone(),
+        invariant: candidate.invariant.clone(),
+        status: ContractStatusV1::Active,
+        superseded_by: None,
+        impact_selectors: candidate.impact_selectors.clone(),
+        required_tests: candidate.required_tests.clone(),
+        origin: candidate.origin.clone(),
+    };
+    candidate.status = RegressionCandidateStatusV1::Approved;
+    candidate.updated_at = Utc::now();
+    if let Err(error) = persist_contract_candidate_event(&state.store, &candidate) {
+        let rollback = std::fs::remove_file(&contract_path);
+        return Err(ApiError::internal(match rollback {
+            Ok(()) => error,
+            Err(rollback_error) => anyhow::anyhow!(
+                "persist approved candidate failed: {error}; rollback {} failed: {rollback_error}",
+                contract_path.display()
+            ),
+        }));
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "candidate": candidate,
+        "contract": contract
+    })))
+}
+
+async fn supersede_contract(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(update): Json<ContractSupersedeRequest>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let repository = primary_repository(&state)?;
+    if id == update.superseded_by {
+        return Err(ApiError::bad_request("a Contract cannot supersede itself"));
+    }
+    let contracts = crate::contracts::load_contracts(&repository.path)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let replacement = contracts
+        .iter()
+        .find(|contract| contract.id == update.superseded_by)
+        .ok_or_else(|| ApiError::bad_request("replacement Contract was not found"))?;
+    if replacement.status != ContractStatusV1::Active {
+        return Err(ApiError::bad_request("replacement Contract must be active"));
+    }
+    let mut contract = contracts
+        .into_iter()
+        .find(|contract| contract.id == id)
+        .ok_or_else(|| ApiError::not_found(format!("Contract not found: {id}")))?;
+    if contract.status != ContractStatusV1::Active {
+        return Err(ApiError::bad_request(
+            "only an active Contract can be superseded",
+        ));
+    }
+    contract.status = ContractStatusV1::Superseded;
+    contract.superseded_by = Some(update.superseded_by);
+    crate::contracts::update_contract(&repository.path, &contract)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(json!({ "ok": true, "contract": contract })))
+}
+
+fn primary_repository(state: &AppState) -> ApiResult<crate::domain::RepositoryV1> {
+    state
+        .store
+        .list_repositories()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::not_found("no registered repository data found"))
+}
+
+fn redact_candidate_draft(draft: ContractCandidateDraft) -> ApiResult<ContractCandidateDraft> {
+    let value = serde_json::to_value(draft).map_err(ApiError::internal)?;
+    serde_json::from_value(redact_value(&value))
+        .map_err(|error| ApiError::bad_request(format!("invalid redacted candidate: {error}")))
+}
+
+fn candidate_evidence_sha256(draft: &ContractCandidateDraft) -> Result<String> {
+    let bytes = serde_json::to_vec(draft)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn repository_head(repository: &str) -> ApiResult<String> {
+    crate::git::capture_snapshot(repository)
+        .map_err(ApiError::internal)?
+        .head
+        .ok_or_else(|| ApiError::bad_request("Contract candidates require a committed Git HEAD"))
+}
+
+fn persist_contract_candidate_event(
+    store: &Store,
+    candidate: &RegressionCandidateV1,
+) -> Result<()> {
+    let mut event = EventEnvelopeV1::new(
+        format!(
+            "local-ui:contract-candidate:{}:{}",
+            candidate.id,
+            candidate.updated_at.timestamp_micros()
+        ),
+        &candidate.repository_id,
+        "local-ui",
+        EventKind::RegressionCandidateRecorded,
+        candidate.updated_at,
+        json!({ "regressionCandidate": candidate }),
+    );
+    event.task_id = candidate.task_id.clone();
+    store.insert_event(&event)?;
+    Ok(())
+}
+
+fn empty_contract_evaluation(repository_id: Option<&str>) -> ContractEvaluationV1 {
+    ContractEvaluationV1 {
+        schema_version: crate::domain::SCHEMA_VERSION_V1,
+        id: "evaluation-empty".to_string(),
+        repository_id: repository_id.unwrap_or("unknown").to_string(),
+        task_id: None,
+        readiness: ContractReadinessV1::Ready,
+        evaluated_at: Utc::now(),
+        relevant_contracts: Vec::new(),
+        required_tests: Vec::new(),
+        warnings: Vec::new(),
+        content_fingerprint: hex::encode(Sha256::digest([])),
+        continuation_issued: false,
+        base: None,
+        head: None,
+        merge_base: None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1167,6 +1463,358 @@ mod tests {
             store.get_task("task-1").unwrap().unwrap().lifecycle,
             TaskLifecycle::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn candidate_approval_writes_git_contract_and_supersede_preserves_projection_history() {
+        let temp = TempDir::new().unwrap();
+        let repository = temp.path().join("repo");
+        std::fs::create_dir_all(repository.join("src")).unwrap();
+        git(&repository, &["init", "-q"]);
+        git(&repository, &["config", "user.name", "PreviouslyOn Test"]);
+        git(
+            &repository,
+            &["config", "user.email", "previously-on@example.invalid"],
+        );
+        std::fs::write(repository.join("src/lib.rs"), "pub fn stable() {}\n").unwrap();
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-qm", "initial"]);
+
+        let identity = crate::git::repository_identity(&repository).unwrap();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let now = Utc::now();
+        store
+            .upsert_repository(&RepositoryV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: identity.id.clone(),
+                path: repository.to_string_lossy().into_owned(),
+                remote_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        let state = AppState {
+            store: store.clone(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+        let draft = |title: &str| ContractCandidateDraft {
+            title: title.to_string(),
+            invariant: "OPENAI_API_KEY=sk-proj-contract-ui-secret must never be stored".to_string(),
+            impact_selectors: vec![ImpactSelectorGroupV1 {
+                path: crate::contracts::ImpactPathSelectorV1 {
+                    kind: crate::contracts::PathSelectorKindV1::Exact,
+                    value: "src/lib.rs".to_string(),
+                },
+                symbols: vec!["stable".to_string()],
+            }],
+            required_tests: vec![RequiredTestV1 {
+                id: format!("test-{}", title.replace(' ', "-")),
+                name: "Stable regression".to_string(),
+                program: "cargo".to_string(),
+                args: vec!["test".to_string()],
+                working_directory: ".".to_string(),
+                timeout_seconds: 900,
+            }],
+        };
+
+        let first = create_contract_candidate(
+            State(state.clone()),
+            authorized_headers(),
+            Json(draft("First contract")),
+        )
+        .await
+        .unwrap()
+        .0;
+        let first_id = first["candidate"]["id"].as_str().unwrap().to_string();
+        let mut evidence_candidate = store.get_regression_candidate(&first_id).unwrap().unwrap();
+        evidence_candidate.evidence_kind = CandidateEvidenceKindV1::FailureEditPass;
+        evidence_candidate.updated_at += chrono::Duration::microseconds(1);
+        persist_contract_candidate_event(&store, &evidence_candidate).unwrap();
+        let updated = update_contract_candidate(
+            State(state.clone()),
+            authorized_headers(),
+            Path(first_id.clone()),
+            Json(draft("First contract edited")),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(updated["candidate"]["evidenceKind"], "manual");
+        let _ = approve_contract_candidate(
+            State(state.clone()),
+            authorized_headers(),
+            Path(first_id.clone()),
+        )
+        .await
+        .unwrap();
+
+        let second = create_contract_candidate(
+            State(state.clone()),
+            authorized_headers(),
+            Json(draft("Replacement contract")),
+        )
+        .await
+        .unwrap()
+        .0;
+        let second_id = second["candidate"]["id"].as_str().unwrap().to_string();
+        let _ = approve_contract_candidate(
+            State(state.clone()),
+            authorized_headers(),
+            Path(second_id.clone()),
+        )
+        .await
+        .unwrap();
+        let _ = supersede_contract(
+            State(state.clone()),
+            authorized_headers(),
+            Path(first_id.clone()),
+            Json(ContractSupersedeRequest {
+                superseded_by: second_id.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let contracts = crate::contracts::load_contracts(&repository).unwrap();
+        assert_eq!(contracts.len(), 2);
+        let first_contract = contracts
+            .iter()
+            .find(|contract| contract.id == first_id)
+            .unwrap();
+        assert_eq!(first_contract.title, "First contract edited");
+        assert_eq!(first_contract.status, ContractStatusV1::Superseded);
+        assert_eq!(
+            first_contract.superseded_by.as_deref(),
+            Some(second_id.as_str())
+        );
+        let contract_bytes = std::fs::read(
+            repository
+                .join(crate::contracts::CONTRACTS_DIRECTORY)
+                .join(format!("{first_id}.json")),
+        )
+        .unwrap();
+        assert!(!String::from_utf8_lossy(&contract_bytes).contains("contract-ui-secret"));
+
+        let rollback_candidate = create_contract_candidate(
+            State(state.clone()),
+            authorized_headers(),
+            Json(draft("Rollback contract")),
+        )
+        .await
+        .unwrap()
+        .0;
+        let rollback_id = rollback_candidate["candidate"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let database = rusqlite::Connection::open(temp.path().join("previously.sqlite3")).unwrap();
+        database
+            .execute_batch(
+                "CREATE TRIGGER fail_approved_candidate
+                 BEFORE INSERT ON canonical_events
+                 WHEN json_extract(NEW.event_json, '$.payload.regressionCandidate.status') = 'approved'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected approval persistence failure');
+                 END;",
+            )
+            .unwrap();
+        let approval = approve_contract_candidate(
+            State(state),
+            authorized_headers(),
+            Path(rollback_id.clone()),
+        )
+        .await;
+        assert!(approval.is_err());
+        database
+            .execute_batch("DROP TRIGGER fail_approved_candidate;")
+            .unwrap();
+        assert!(!repository
+            .join(crate::contracts::CONTRACTS_DIRECTORY)
+            .join(format!("{rollback_id}.json"))
+            .exists());
+        assert_eq!(
+            store
+                .get_regression_candidate(&rollback_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            RegressionCandidateStatusV1::Pending
+        );
+
+        store.rebuild_projections().unwrap();
+        assert_eq!(
+            store
+                .list_regression_candidates(Some(&identity.id))
+                .unwrap()
+                .len(),
+            3
+        );
+        store.purge_repository(&identity.id).unwrap();
+        assert!(repository
+            .join(crate::contracts::CONTRACTS_DIRECTORY)
+            .join(format!("{first_id}.json"))
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn candidate_api_rejects_split_argv_secrets_before_db_export_or_git_contract() {
+        let temp = TempDir::new().unwrap();
+        let repository = temp.path().join("repo");
+        std::fs::create_dir_all(repository.join("src")).unwrap();
+        git(&repository, &["init", "-q"]);
+        git(&repository, &["config", "user.name", "PreviouslyOn Test"]);
+        git(
+            &repository,
+            &["config", "user.email", "previously-on@example.invalid"],
+        );
+        std::fs::write(repository.join("src/lib.rs"), "pub fn stable() {}\n").unwrap();
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-qm", "initial"]);
+        let identity = crate::git::repository_identity(&repository).unwrap();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let now = Utc::now();
+        store
+            .upsert_repository(&RepositoryV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: identity.id.clone(),
+                path: repository.to_string_lossy().into_owned(),
+                remote_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        let state = AppState {
+            store: store.clone(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+        let secret = "opaque-contract-argv-secret";
+        let result = create_contract_candidate(
+            State(state),
+            authorized_headers(),
+            Json(ContractCandidateDraft {
+                title: "Keep auth stable".into(),
+                invariant: "Auth behavior remains stable".into(),
+                impact_selectors: vec![ImpactSelectorGroupV1 {
+                    path: crate::contracts::ImpactPathSelectorV1 {
+                        kind: crate::contracts::PathSelectorKindV1::Exact,
+                        value: "src/lib.rs".into(),
+                    },
+                    symbols: Vec::new(),
+                }],
+                required_tests: vec![RequiredTestV1 {
+                    id: "auth-test".into(),
+                    name: "auth test".into(),
+                    program: "cargo".into(),
+                    args: vec!["test".into(), "--token".into(), secret.into()],
+                    working_directory: ".".into(),
+                    timeout_seconds: 900,
+                }],
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(store
+            .list_regression_candidates(Some(&identity.id))
+            .unwrap()
+            .is_empty());
+        assert!(
+            !serde_json::to_string(&store.export_json(Some(&identity.id)).unwrap())
+                .unwrap()
+                .contains(secret)
+        );
+        let contract_directory = repository.join(crate::contracts::CONTRACTS_DIRECTORY);
+        assert!(
+            !contract_directory.exists()
+                || std::fs::read_dir(contract_directory)
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_keeps_contract_readiness_scoped_to_each_task() {
+        let temp = TempDir::new().unwrap();
+        let repository = temp.path().join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        git(&repository, &["init", "-q"]);
+        let identity = crate::git::repository_identity(&repository).unwrap();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let now = Utc::now();
+        store
+            .upsert_repository(&RepositoryV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: identity.id.clone(),
+                path: repository.to_string_lossy().into_owned(),
+                remote_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        for task_id in ["task-blocked", "task-ready"] {
+            store
+                .upsert_task(&TaskV1 {
+                    schema_version: SCHEMA_VERSION_V1,
+                    id: task_id.into(),
+                    repository_id: identity.id.clone(),
+                    title: task_id.into(),
+                    goal: Some(task_id.into()),
+                    lifecycle: TaskLifecycle::Active,
+                    branch: Some("main".into()),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        for (index, (task_id, readiness)) in [
+            ("task-blocked", "contract_blocked"),
+            ("task-ready", "ready"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut event = EventEnvelopeV1::new(
+                format!("evaluation-{index}"),
+                &identity.id,
+                "evaluation-session",
+                EventKind::ContractEvaluationRecorded,
+                now + chrono::Duration::seconds(index as i64),
+                json!({
+                    "contractEvaluation": {
+                        "schemaVersion": 1,
+                        "id": format!("evaluation-{index}"),
+                        "repositoryId": identity.id,
+                        "taskId": task_id,
+                        "readiness": readiness,
+                        "evaluatedAt": now + chrono::Duration::seconds(index as i64),
+                        "relevantContracts": [],
+                        "requiredTests": [],
+                        "warnings": [],
+                        "contentFingerprint": format!("fingerprint-{index}"),
+                        "continuationIssued": false
+                    }
+                }),
+            );
+            event.task_id = Some(task_id.into());
+            store.insert_event(&event).unwrap();
+        }
+        let state = AppState {
+            store,
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+
+        let Json(payload) = bootstrap(State(state), authorized_headers()).await.unwrap();
+        let evaluations = payload["contractEvaluations"].as_array().unwrap();
+        assert_eq!(evaluations.len(), 2);
+        assert!(evaluations.iter().any(|evaluation| {
+            evaluation["taskId"] == "task-blocked" && evaluation["readiness"] == "contract_blocked"
+        }));
+        assert!(evaluations.iter().any(|evaluation| {
+            evaluation["taskId"] == "task-ready" && evaluation["readiness"] == "ready"
+        }));
     }
 
     #[tokio::test]
