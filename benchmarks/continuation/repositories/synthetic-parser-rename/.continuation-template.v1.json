@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "synthetic-parser-rename",
+  "runtime": "rust-1.90",
+  "networkInstallRequired": false,
+  "baselineTestArgv": ["cargo", "test", "--test", "parser"]
+}

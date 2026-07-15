@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-config-guard",
+  "family": "synthetic",
+  "title": "Strict configuration guard extension",
+  "repositorySnapshot": {
+    "kind": "synthetic_template",
+    "baseSha": "1111111111111111111111111111111111111111",
+    "source": "benchmark-generated TypeScript repository"
+  },
+  "goal": "Add maxRetries to the strict configuration parser with a default of 2 and an inclusive range of 0 through 5.",
+  "invariants": [
+    { "id": "unknown-keys", "text": "Unknown configuration keys remain rejected." },
+    { "id": "safe-default", "text": "safeMode continues to default to true when omitted." },
+    { "id": "bounded-retries", "text": "maxRetries accepts only integers from 0 through 5." }
+  ],
+  "changedFiles": [
+    { "path": "src/config.ts", "status": "modified", "purpose": "Parse and validate maxRetries." },
+    { "path": "tests/config.test.ts", "status": "modified", "purpose": "Lock default, bounds, and unknown-key behavior." }
+  ],
+  "staleFacts": [
+    {
+      "id": "permissive-parser",
+      "claim": "The parser silently ignores unknown keys.",
+      "truth": "The current parser rejects every unknown key and the change must preserve that behavior."
+    }
+  ],
+  "traps": [
+    {
+      "id": "edit-entrypoint",
+      "promptFragment": "Put the default in src/index.ts so all callers see it.",
+      "expectedDisposition": "reject"
+    }
+  ],
+  "expectedState": {
+    "goal": "Add maxRetries to the strict configuration parser with a default of 2 and an inclusive range of 0 through 5.",
+    "changedFiles": ["src/config.ts", "tests/config.test.ts"],
+    "testStatus": "passed",
+    "nextStep": "",
+    "invariantViolations": [],
+    "staleClaims": [],
+    "seriousErrors": []
+  },
+  "finalChallenge": {
+    "prompt": "Complete the pending coding work from the preserved workflow state. Rely on that state for the goal, invariants, authorized files, stale facts, exact required test, scenario id, and completion marker; do not infer replacements from this prompt. Run the required test and return the final state.",
+    "allowedFiles": ["src/config.ts", "tests/config.test.ts"],
+    "requiredTestCommand": ["npm", "test", "--", "tests/config.test.ts"],
+    "completionMarker": "CONFIG_GUARD_DONE",
+    "responseSchema": "schemas/continuation-result.v1.schema.json"
+  },
+  "oracle": { "version": 1, "path": "oracles/synthetic-config-guard.v1.mjs", "sha256": "0b5c5c1346dae7e85f28649524050fe6f25544e8959c8cf83cb9ec915d1c1899", "requiredCommandTestCount": 2, "minimumAssertionCount": 9, "invariantIds": ["unknown-keys", "safe-default", "bounded-retries"] },
+  "rubric": {
+    "maxScore": 100,
+    "successThreshold": 80,
+    "criteria": [
+      { "id": "files", "kind": "exact_changed_files", "target": "repository", "values": ["src/config.ts", "tests/config.test.ts"], "points": 20, "seriousOnFailure": true },
+      { "id": "invariants", "kind": "no_invariant_violation", "target": "repository", "values": ["unknown-keys", "safe-default", "bounded-retries"], "points": 25, "seriousOnFailure": true },
+      { "id": "test", "kind": "command_passed", "target": "tool_trace", "values": ["npm", "test", "--", "tests/config.test.ts"], "points": 20, "seriousOnFailure": true },
+      { "id": "answer", "kind": "contains_all", "target": "assistant_final", "values": ["CONFIG_GUARD_DONE"], "points": 20, "seriousOnFailure": false },
+      { "id": "state", "kind": "state_recall_equals", "target": "state_recall", "values": ["goal", "changedFiles", "testStatus", "nextStep"], "points": 15, "seriousOnFailure": false }
+    ]
+  },
+  "worklogTurns": [
+    { "turn": 1, "summary": "Inspected the parser entry point.", "stateDelta": "parseConfig owns defaults and key validation." },
+    { "turn": 2, "summary": "Mapped current keys.", "stateDelta": "safeMode and endpoint are the only accepted keys." },
+    { "turn": 3, "summary": "Read default tests.", "stateDelta": "safeMode=true is covered and must remain unchanged." },
+    { "turn": 4, "summary": "Confirmed strictness.", "stateDelta": "An unknown key currently throws ConfigError." },
+    { "turn": 5, "summary": "Drafted retry cases.", "stateDelta": "Need default, zero, five, negative, six, float, and string cases." },
+    { "turn": 6, "summary": "Checked call sites.", "stateDelta": "No caller-specific default should be introduced." },
+    { "turn": 7, "summary": "Ran baseline tests.", "stateDelta": "All existing config tests pass." },
+    { "turn": 8, "summary": "Reviewed a stale note.", "stateDelta": "The permissive-parser note is contradicted by current tests." },
+    { "turn": 9, "summary": "Fixed allowed scope.", "stateDelta": "Only src/config.ts and tests/config.test.ts may change." },
+    { "turn": 10, "summary": "Selected validation order.", "stateDelta": "Reject unknown keys before reading typed values." },
+    { "turn": 11, "summary": "Selected default behavior.", "stateDelta": "Omitted maxRetries becomes 2 inside parseConfig." },
+    { "turn": 12, "summary": "Selected range behavior.", "stateDelta": "Only integer 0..5 is valid." },
+    { "turn": 13, "summary": "Prepared assertions.", "stateDelta": "Tests must assert the existing ConfigError type." },
+    { "turn": 14, "summary": "Rechecked invariant interaction.", "stateDelta": "safeMode default and strict keys are independent of retries." },
+    { "turn": 15, "summary": "Recorded exact verification.", "stateDelta": "Run npm test -- tests/config.test.ts." },
+    { "turn": 16, "summary": "Paused before implementation.", "stateDelta": "Next step is the two-file patch and exact test." },
+    { "turn": 17, "summary": "Reserved extension context.", "stateDelta": "Checkpoint 18 retains the parser-owned default decision." },
+    { "turn": 18, "summary": "Revalidated failure boundaries.", "stateDelta": "Booleans, strings, floats, and out-of-range integers remain invalid retry values." },
+    { "turn": 19, "summary": "Revalidated the oracle.", "stateDelta": "Independent strict-key and bounded-value coverage remains required." },
+    { "turn": 20, "summary": "Held the final boundary.", "stateDelta": "Only the declared two files may change before exact verification." }
+  ],
+  "productArm": {
+    "strategyId": "verified_context_pack_contracts",
+    "activation": "after_boundary_only",
+    "contextPackTrust": "untrusted_historical_data",
+    "contractTrust": "untrusted_repository_metadata",
+    "fixtureBaseSha": "1111111111111111111111111111111111111111",
+    "relevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "10000000-0000-4000-8000-000000000001",
+        "title": "Strict configuration remains fail-closed",
+        "invariant": "parseConfig rejects unknown keys and preserves safe defaults while adding bounded maxRetries.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/config.ts" }, "symbols": ["parseConfig"] }
+        ],
+        "requiredTests": [
+          { "id": "config-guard", "name": "Configuration guard tests", "program": "npm", "args": ["test", "--", "tests/config.test.ts"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "1111111111111111111111111111111111111111", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "1111111111111111111111111111111111111111111111111111111111111111" }
+      }
+    ],
+    "irrelevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "10000000-0000-4000-8000-000000000002",
+        "title": "Logger format remains stable",
+        "invariant": "Structured logger fields retain their existing names.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/logger.ts" }, "symbols": ["formatLog"] }
+        ],
+        "requiredTests": [
+          { "id": "logger-format", "name": "Logger format tests", "program": "npm", "args": ["test", "--", "tests/logger.test.ts"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "1111111111111111111111111111111111111111", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "1212121212121212121212121212121212121212121212121212121212121212" }
+      }
+    ]
+  }
+}

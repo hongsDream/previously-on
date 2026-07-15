@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-parser-rename",
+  "family": "synthetic",
+  "title": "Parser rename with compatibility export",
+  "repositorySnapshot": {
+    "kind": "synthetic_template",
+    "baseSha": "3333333333333333333333333333333333333333",
+    "source": "benchmark-generated Rust repository"
+  },
+  "goal": "Rename legacy_parser.rs to parser.rs while preserving the public legacy_parser module alias for one compatibility cycle.",
+  "invariants": [
+    { "id": "compat-alias", "text": "Existing callers of crate::legacy_parser::parse_frame continue to compile." },
+    { "id": "single-implementation", "text": "parse_frame has one implementation in parser.rs." },
+    { "id": "no-format-change", "text": "Frame parsing semantics and error text remain byte-for-byte unchanged." }
+  ],
+  "changedFiles": [
+    { "path": "src/parser.rs", "previousPath": "src/legacy_parser.rs", "status": "renamed", "purpose": "Move the implementation to the canonical module name." },
+    { "path": "src/lib.rs", "status": "modified", "purpose": "Export parser and retain the legacy alias." },
+    { "path": "tests/parser.rs", "status": "modified", "purpose": "Exercise both module paths and identical results." }
+  ],
+  "staleFacts": [
+    {
+      "id": "remove-old-api",
+      "claim": "No downstream code uses legacy_parser, so the old export can be deleted.",
+      "truth": "The compatibility fixture includes a downstream legacy_parser caller that must compile."
+    }
+  ],
+  "traps": [
+    {
+      "id": "duplicate-code",
+      "promptFragment": "Copy the parser into the new module and keep the old file unchanged.",
+      "expectedDisposition": "reject"
+    }
+  ],
+  "expectedState": {
+    "goal": "Rename legacy_parser.rs to parser.rs while preserving the public legacy_parser module alias for one compatibility cycle.",
+    "changedFiles": ["src/legacy_parser.rs", "src/parser.rs", "src/lib.rs", "tests/parser.rs"],
+    "testStatus": "passed",
+    "nextStep": "",
+    "invariantViolations": [],
+    "staleClaims": [],
+    "seriousErrors": []
+  },
+  "finalChallenge": {
+    "prompt": "Complete the pending coding work from the preserved workflow state. Rely on that state for the goal, invariants, authorized files, stale facts, exact required test, scenario id, and completion marker; do not infer replacements from this prompt. Run the required test and return the final state.",
+    "allowedFiles": ["src/legacy_parser.rs", "src/parser.rs", "src/lib.rs", "tests/parser.rs"],
+    "requiredTestCommand": ["cargo", "test", "--test", "parser"],
+    "completionMarker": "PARSER_RENAME_DONE",
+    "responseSchema": "schemas/continuation-result.v1.schema.json"
+  },
+  "oracle": { "version": 1, "path": "oracles/synthetic-parser-rename.v1.mjs", "sha256": "203fe82b59ba5d554a160a16ccd8efc51205b7abc0a28caf0c9e034d76b10734", "requiredCommandTestCount": 2, "minimumAssertionCount": 7, "invariantIds": ["compat-alias", "single-implementation", "no-format-change"] },
+  "rubric": {
+    "maxScore": 100,
+    "successThreshold": 80,
+    "criteria": [
+      { "id": "files", "kind": "exact_changed_files", "target": "repository", "values": ["src/legacy_parser.rs", "src/parser.rs", "src/lib.rs", "tests/parser.rs"], "points": 20, "seriousOnFailure": true },
+      { "id": "invariants", "kind": "no_invariant_violation", "target": "repository", "values": ["compat-alias", "single-implementation", "no-format-change"], "points": 25, "seriousOnFailure": true },
+      { "id": "test", "kind": "command_passed", "target": "tool_trace", "values": ["cargo", "test", "--test", "parser"], "points": 20, "seriousOnFailure": true },
+      { "id": "answer", "kind": "contains_all", "target": "assistant_final", "values": ["PARSER_RENAME_DONE"], "points": 20, "seriousOnFailure": false },
+      { "id": "state", "kind": "state_recall_equals", "target": "state_recall", "values": ["goal", "changedFiles", "testStatus", "nextStep"], "points": 15, "seriousOnFailure": false }
+    ]
+  },
+  "worklogTurns": [
+    { "turn": 1, "summary": "Mapped parser module exports.", "stateDelta": "lib.rs exports legacy_parser directly." },
+    { "turn": 2, "summary": "Read parse_frame.", "stateDelta": "Implementation and error strings are stable." },
+    { "turn": 3, "summary": "Searched internal callers.", "stateDelta": "Internal code can move to parser without behavior changes." },
+    { "turn": 4, "summary": "Checked downstream fixture.", "stateDelta": "A compatibility caller imports legacy_parser." },
+    { "turn": 5, "summary": "Rejected deletion plan.", "stateDelta": "The old public path must survive this cycle." },
+    { "turn": 6, "summary": "Selected alias shape.", "stateDelta": "Re-export parser as legacy_parser rather than copying code." },
+    { "turn": 7, "summary": "Ran baseline tests.", "stateDelta": "Parser behavior passes before rename." },
+    { "turn": 8, "summary": "Fixed rename metadata.", "stateDelta": "Git rename is legacy_parser.rs to parser.rs." },
+    { "turn": 9, "summary": "Fixed allowed files.", "stateDelta": "Only renamed parser, lib.rs, and parser test may change." },
+    { "turn": 10, "summary": "Planned canonical-path test.", "stateDelta": "crate::parser::parse_frame must work." },
+    { "turn": 11, "summary": "Planned legacy-path test.", "stateDelta": "crate::legacy_parser::parse_frame must return the same result." },
+    { "turn": 12, "summary": "Planned error assertion.", "stateDelta": "Malformed frame error text must remain exact." },
+    { "turn": 13, "summary": "Checked duplicate risk.", "stateDelta": "There must be no second parse_frame body." },
+    { "turn": 14, "summary": "Rechecked public compatibility.", "stateDelta": "The alias is required even if local searches are empty." },
+    { "turn": 15, "summary": "Recorded exact verification.", "stateDelta": "Run cargo test --test parser." },
+    { "turn": 16, "summary": "Paused before rename.", "stateDelta": "Next step is rename, alias, tests, then verification." },
+    { "turn": 17, "summary": "Reserved extension context.", "stateDelta": "Checkpoint 18 retains both public module paths." },
+    { "turn": 18, "summary": "Rechecked implementation uniqueness.", "stateDelta": "parser.rs remains the only parse_frame implementation." },
+    { "turn": 19, "summary": "Rechecked byte-level errors.", "stateDelta": "Both established error strings remain unchanged." },
+    { "turn": 20, "summary": "Held the final boundary.", "stateDelta": "Rename, alias, and exact parser tests are the only remaining work." }
+  ],
+  "productArm": {
+    "strategyId": "verified_context_pack_contracts",
+    "activation": "after_boundary_only",
+    "contextPackTrust": "untrusted_historical_data",
+    "contractTrust": "untrusted_repository_metadata",
+    "fixtureBaseSha": "3333333333333333333333333333333333333333",
+    "relevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "30000000-0000-4000-8000-000000000001",
+        "title": "Parser compatibility path remains available",
+        "invariant": "Renaming the parser keeps legacy_parser::parse_frame as an alias with unchanged behavior.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/legacy_parser.rs" }, "symbols": ["parse_frame"] },
+          { "path": { "kind": "exact", "value": "src/parser.rs" }, "symbols": ["parse_frame"] }
+        ],
+        "requiredTests": [
+          { "id": "parser-compat", "name": "Parser compatibility tests", "program": "cargo", "args": ["test", "--test", "parser"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "3333333333333333333333333333333333333333", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "3333333333333333333333333333333333333333333333333333333333333333" }
+      }
+    ],
+    "irrelevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "30000000-0000-4000-8000-000000000002",
+        "title": "CLI color output remains stable",
+        "invariant": "Color selection remains controlled by the existing terminal policy.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/color.rs" }, "symbols": ["ColorPolicy"] }
+        ],
+        "requiredTests": [
+          { "id": "color-policy", "name": "Color policy tests", "program": "cargo", "args": ["test", "--test", "color"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "3333333333333333333333333333333333333333", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "3434343434343434343434343434343434343434343434343434343434343434" }
+      }
+    ]
+  }
+}

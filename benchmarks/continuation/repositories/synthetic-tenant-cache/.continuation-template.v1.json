@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "synthetic-tenant-cache",
+  "runtime": "node-22",
+  "networkInstallRequired": false,
+  "baselineTestArgv": ["npm", "test", "--", "tests/cache.test.ts"]
+}

@@ -1,0 +1,272 @@
+{
+  "schemaVersion": 1,
+  "evidenceClass": "continuation_benchmark_derived_summary",
+  "fixtureSha256": "4f6ae416871a9a502377cad82396053883ab0aebaa479c016baad3d3f7363b4a",
+  "completedArms": 6,
+  "expectedArms": 864,
+  "remainingArms": 858,
+  "models": {
+    "gpt-5.5": {
+      "model": "gpt-5.5",
+      "observedModelSnapshotIds": [
+        "gpt-5.5"
+      ],
+      "snapshotStable": true,
+      "allPaidStagesIdentified": true,
+      "seriousErrorCoverageComplete": true,
+      "completedArms": 6,
+      "baseMatrix": {
+        "complete": false,
+        "completedArms": 6,
+        "expectedArms": 432,
+        "expectedPairsPerCondition": 24,
+        "conditions": [
+          {
+            "strategy": "same_task",
+            "checkpoint": 0,
+            "observedArms": 3
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 2,
+            "observedArms": 0
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 4,
+            "observedArms": 0
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 6,
+            "observedArms": 0
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 8,
+            "observedArms": 0
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 10,
+            "observedArms": 0
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 12,
+            "observedArms": 0
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 14,
+            "observedArms": 0
+          },
+          {
+            "strategy": "same_task",
+            "checkpoint": 16,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 0,
+            "observedArms": 3
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 2,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 4,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 6,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 8,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 10,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 12,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 14,
+            "observedArms": 0
+          },
+          {
+            "strategy": "native_handoff",
+            "checkpoint": 16,
+            "observedArms": 0
+          }
+        ]
+      },
+      "strategyComparison": [
+        {
+          "checkpoint": 0,
+          "baselineStrategy": "same_task",
+          "comparisonStrategy": "native_handoff",
+          "pairedArmCount": 3,
+          "coverage": {
+            "complete": false,
+            "expectedPairCount": 24,
+            "observedPairCount": 3,
+            "uniquePairCount": 3,
+            "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+          },
+          "accuracyDifferencePp": {
+            "available": false,
+            "estimate": null,
+            "lower": null,
+            "upper": null,
+            "confidence": 0.95,
+            "method": "seeded_paired_percentile_bootstrap",
+            "iterations": 0,
+            "seed": null,
+            "n": 0,
+            "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+          },
+          "seriousErrorDifferencePp": {
+            "available": false,
+            "estimate": null,
+            "lower": null,
+            "upper": null,
+            "confidence": 0.95,
+            "method": "seeded_paired_percentile_bootstrap",
+            "iterations": 0,
+            "seed": null,
+            "n": 0,
+            "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+          },
+          "completionLatencyPercentChange": {
+            "available": false,
+            "estimate": null,
+            "lower": null,
+            "upper": null,
+            "confidence": 0.95,
+            "method": "seeded_paired_percentile_bootstrap",
+            "iterations": 0,
+            "seed": null,
+            "n": 0,
+            "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+          },
+          "endToEndLatencyPercentChange": {
+            "available": false,
+            "estimate": null,
+            "lower": null,
+            "upper": null,
+            "confidence": 0.95,
+            "method": "seeded_paired_percentile_bootstrap",
+            "iterations": 0,
+            "seed": null,
+            "n": 0,
+            "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+          },
+          "stateRecallDifferencePp": {
+            "goal": {
+              "available": false,
+              "estimate": null,
+              "lower": null,
+              "upper": null,
+              "confidence": 0.95,
+              "method": "seeded_paired_percentile_bootstrap",
+              "iterations": 0,
+              "seed": null,
+              "n": 0,
+              "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+            },
+            "changedFiles": {
+              "available": false,
+              "estimate": null,
+              "lower": null,
+              "upper": null,
+              "confidence": 0.95,
+              "method": "seeded_paired_percentile_bootstrap",
+              "iterations": 0,
+              "seed": null,
+              "n": 0,
+              "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+            },
+            "testStatus": {
+              "available": false,
+              "estimate": null,
+              "lower": null,
+              "upper": null,
+              "confidence": 0.95,
+              "method": "seeded_paired_percentile_bootstrap",
+              "iterations": 0,
+              "seed": null,
+              "n": 0,
+              "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+            },
+            "nextStep": {
+              "available": false,
+              "estimate": null,
+              "lower": null,
+              "upper": null,
+              "confidence": 0.95,
+              "method": "seeded_paired_percentile_bootstrap",
+              "iterations": 0,
+              "seed": null,
+              "n": 0,
+              "reason": "condition coverage is incomplete: expected 24 unique pairs, observed 3 rows and 3 unique pairs"
+            }
+          }
+        }
+      ],
+      "degradationBoundary": {
+        "detected": false,
+        "boundaryCheckpoint": null,
+        "confirmedAtCheckpoint": null,
+        "confirmingMetrics": [],
+        "checks": [],
+        "reason": "no metric crossed its point threshold and adverse-side 95% CI at two consecutive checkpoints; isolated or uncertain spikes were not adopted",
+        "thresholds": {
+          "successDropPp": -10,
+          "seriousErrorIncreasePp": 10,
+          "medianLatencyIncreasePercent": 25
+        },
+        "statisticalLimitations": [
+          "Each model/scenario/strategy/checkpoint condition has only n=3 repeats; confidence intervals are low-power and may be wide.",
+          "Scenario-repeat arms are paired for comparisons, but the eight scenarios are not assumed to be interchangeable population samples.",
+          "Bootstrap intervals describe this fixed benchmark matrix and must not be generalized to untested model snapshots or versions."
+        ]
+      },
+      "nextCheckpoints": [],
+      "productGate": null,
+      "recommendation": {
+        "action": "no_auto_rollover",
+        "threshold": null,
+        "modelSpecific": true,
+        "validatedSnapshotsOnly": [
+          "gpt-5.5"
+        ],
+        "reasons": [
+          "the required base measured matrix is incomplete for this model",
+          "no confirmed two-checkpoint degradation boundary"
+        ]
+      }
+    }
+  },
+  "recommendation": {
+    "action": "no_auto_rollover",
+    "untestedModels": "no recommendation"
+  },
+  "statisticalLimitations": [
+    "Each model/scenario/strategy/checkpoint condition has only n=3 repeats; confidence intervals are low-power and may be wide.",
+    "Scenario-repeat arms are paired for comparisons, but the eight scenarios are not assumed to be interchangeable population samples.",
+    "Bootstrap intervals describe this fixed benchmark matrix and must not be generalized to untested model snapshots or versions."
+  ]
+}

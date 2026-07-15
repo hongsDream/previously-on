@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "control.v1.schema.json",
+  "title": "Continuation benchmark append-only control event V1",
+  "type": "object",
+  "required": ["schemaVersion", "event", "recordedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "event": {
+      "enum": [
+        "source_checkpoint",
+        "source_compaction_intent",
+        "source_compaction_completed",
+        "paid_stage_checkpoint",
+        "attempt_started",
+        "attempt_completed",
+        "attempt_abandoned",
+        "attempt_paused",
+        "rate_limit_observed",
+        "pause",
+        "resume"
+      ]
+    },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "campaignLockSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "fixtureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "recordSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sourceKey": { "type": "string" },
+    "sourceSequence": { "type": "integer", "minimum": 0 },
+    "armKey": { "type": ["string", "null"] },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "stage": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "enum": ["source_checkpoint", "source_compaction_intent", "source_compaction_completed"]
+          }
+        },
+        "required": ["event"]
+      },
+      "then": {
+        "required": [
+          "campaignLockSha256",
+          "fixtureSha256",
+          "recordSha256",
+          "sourceKey",
+          "sourceSequence"
+        ]
+      }
+    }
+  ]
+}

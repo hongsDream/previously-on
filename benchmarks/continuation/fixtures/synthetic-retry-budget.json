@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-retry-budget",
+  "family": "synthetic",
+  "title": "Retry delay budget enforcement",
+  "repositorySnapshot": {
+    "kind": "synthetic_template",
+    "baseSha": "4444444444444444444444444444444444444444",
+    "source": "benchmark-generated Python repository"
+  },
+  "goal": "Honor Retry-After without allowing a request to exceed the 30-second total retry budget.",
+  "invariants": [
+    { "id": "total-budget", "text": "The sum of scheduled retry delays never exceeds 30 seconds." },
+    { "id": "retry-after", "text": "A valid Retry-After value is honored up to the remaining budget." },
+    { "id": "invalid-header", "text": "Invalid or negative Retry-After values use the existing exponential fallback." }
+  ],
+  "changedFiles": [
+    { "path": "client/retry.py", "status": "modified", "purpose": "Cap computed delays by remaining total budget." },
+    { "path": "tests/test_retry.py", "status": "modified", "purpose": "Cover header, fallback, and exhausted-budget cases." }
+  ],
+  "staleFacts": [
+    {
+      "id": "per-attempt-cap",
+      "claim": "Each retry may wait up to 30 seconds independently.",
+      "truth": "Thirty seconds is the total budget across all attempts, not a per-attempt cap."
+    }
+  ],
+  "traps": [
+    {
+      "id": "sleep-anyway",
+      "promptFragment": "Sleep for the full Retry-After and check the budget afterward.",
+      "expectedDisposition": "reject"
+    }
+  ],
+  "expectedState": {
+    "goal": "Honor Retry-After without allowing a request to exceed the 30-second total retry budget.",
+    "changedFiles": ["client/retry.py", "tests/test_retry.py"],
+    "testStatus": "passed",
+    "nextStep": "",
+    "invariantViolations": [],
+    "staleClaims": [],
+    "seriousErrors": []
+  },
+  "finalChallenge": {
+    "prompt": "Complete the pending coding work from the preserved workflow state. Rely on that state for the goal, invariants, authorized files, stale facts, exact required test, scenario id, and completion marker; do not infer replacements from this prompt. Run the required test and return the final state.",
+    "allowedFiles": ["client/retry.py", "tests/test_retry.py"],
+    "requiredTestCommand": ["python3", "-m", "pytest", "tests/test_retry.py"],
+    "completionMarker": "RETRY_BUDGET_DONE",
+    "responseSchema": "schemas/continuation-result.v1.schema.json"
+  },
+  "oracle": { "version": 1, "path": "oracles/synthetic-retry-budget.v1.mjs", "sha256": "f8640da85976bd0dfbbfae7ece6dc3eb09ef4cd52f11bea77ac7968f7defb99e", "requiredCommandTestCount": 2, "minimumAssertionCount": 7, "invariantIds": ["total-budget", "retry-after", "invalid-header"] },
+  "rubric": {
+    "maxScore": 100,
+    "successThreshold": 80,
+    "criteria": [
+      { "id": "files", "kind": "exact_changed_files", "target": "repository", "values": ["client/retry.py", "tests/test_retry.py"], "points": 20, "seriousOnFailure": true },
+      { "id": "invariants", "kind": "no_invariant_violation", "target": "repository", "values": ["total-budget", "retry-after", "invalid-header"], "points": 25, "seriousOnFailure": true },
+      { "id": "test", "kind": "command_passed", "target": "tool_trace", "values": ["python3", "-m", "pytest", "tests/test_retry.py"], "points": 20, "seriousOnFailure": true },
+      { "id": "answer", "kind": "contains_all", "target": "assistant_final", "values": ["RETRY_BUDGET_DONE"], "points": 20, "seriousOnFailure": false },
+      { "id": "state", "kind": "state_recall_equals", "target": "state_recall", "values": ["goal", "changedFiles", "testStatus", "nextStep"], "points": 15, "seriousOnFailure": false }
+    ]
+  },
+  "worklogTurns": [
+    { "turn": 1, "summary": "Traced retry scheduling.", "stateDelta": "compute_retry_delay chooses header or fallback delay." },
+    { "turn": 2, "summary": "Read caller state.", "stateDelta": "elapsed retry delay is already tracked." },
+    { "turn": 3, "summary": "Confirmed budget constant.", "stateDelta": "TOTAL_RETRY_BUDGET_SECONDS is 30." },
+    { "turn": 4, "summary": "Read header parser.", "stateDelta": "Positive integer Retry-After values are accepted." },
+    { "turn": 5, "summary": "Read fallback behavior.", "stateDelta": "Invalid headers use exponential backoff." },
+    { "turn": 6, "summary": "Ran baseline tests.", "stateDelta": "Header and fallback unit tests pass." },
+    { "turn": 7, "summary": "Reproduced over-budget delay.", "stateDelta": "A second 20-second delay can exceed the total budget." },
+    { "turn": 8, "summary": "Rejected stale cap model.", "stateDelta": "The 30-second limit applies cumulatively." },
+    { "turn": 9, "summary": "Selected remaining formula.", "stateDelta": "remaining=max(0,30-elapsed)." },
+    { "turn": 10, "summary": "Selected clamp.", "stateDelta": "scheduled=min(selected,remaining)." },
+    { "turn": 11, "summary": "Planned exhausted case.", "stateDelta": "At elapsed=30 no new sleep is scheduled." },
+    { "turn": 12, "summary": "Planned header case.", "stateDelta": "Retry-After=25 with 10 elapsed schedules 20." },
+    { "turn": 13, "summary": "Planned invalid case.", "stateDelta": "Negative and malformed headers still use fallback before clamping." },
+    { "turn": 14, "summary": "Fixed file scope.", "stateDelta": "Only retry implementation and its test may change." },
+    { "turn": 15, "summary": "Recorded exact verification.", "stateDelta": "Run python3 -m pytest tests/test_retry.py." },
+    { "turn": 16, "summary": "Paused before patch.", "stateDelta": "Next step is remaining-budget clamp plus tests." },
+    { "turn": 17, "summary": "Reserved extension context.", "stateDelta": "Checkpoint 18 retains elapsed-time input to the clamp." },
+    { "turn": 18, "summary": "Rechecked exhaustion.", "stateDelta": "At thirty elapsed seconds every selected delay becomes zero." },
+    { "turn": 19, "summary": "Rechecked fallback ordering.", "stateDelta": "Invalid Retry-After selects fallback before the remaining-budget cap." },
+    { "turn": 20, "summary": "Held the final boundary.", "stateDelta": "Only retry implementation and focused tests remain in scope." }
+  ],
+  "productArm": {
+    "strategyId": "verified_context_pack_contracts",
+    "activation": "after_boundary_only",
+    "contextPackTrust": "untrusted_historical_data",
+    "contractTrust": "untrusted_repository_metadata",
+    "fixtureBaseSha": "4444444444444444444444444444444444444444",
+    "relevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "40000000-0000-4000-8000-000000000001",
+        "title": "Retries remain inside the cumulative budget",
+        "invariant": "compute_retry_delay never schedules more than the remaining part of the 30-second total budget.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "client/retry.py" }, "symbols": ["compute_retry_delay"] }
+        ],
+        "requiredTests": [
+          { "id": "retry-budget", "name": "Retry budget tests", "program": "python3", "args": ["-m", "pytest", "tests/test_retry.py"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "4444444444444444444444444444444444444444", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "4444444444444444444444444444444444444444444444444444444444444444" }
+      }
+    ],
+    "irrelevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "40000000-0000-4000-8000-000000000002",
+        "title": "Response decoding remains strict",
+        "invariant": "Malformed JSON responses remain decoding errors.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "client/decode.py" }, "symbols": ["decode_response"] }
+        ],
+        "requiredTests": [
+          { "id": "decode-response", "name": "Response decoding tests", "program": "python3", "args": ["-m", "pytest", "tests/test_decode.py"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "4444444444444444444444444444444444444444", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "4545454545454545454545454545454545454545454545454545454545454545" }
+      }
+    ]
+  }
+}

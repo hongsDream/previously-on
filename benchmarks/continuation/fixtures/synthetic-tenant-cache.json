@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-tenant-cache",
+  "family": "synthetic",
+  "title": "Tenant-safe cache key repair",
+  "repositorySnapshot": {
+    "kind": "synthetic_template",
+    "baseSha": "2222222222222222222222222222222222222222",
+    "source": "benchmark-generated TypeScript repository"
+  },
+  "goal": "Make cache keys tenant-specific without changing expiration or miss behavior.",
+  "invariants": [
+    { "id": "tenant-isolation", "text": "Two tenants requesting the same resource never share a cache entry." },
+    { "id": "ttl", "text": "The cache TTL remains exactly 60 seconds." },
+    { "id": "miss", "text": "A miss invokes the loader exactly once for that tenant and resource." }
+  ],
+  "changedFiles": [
+    { "path": "src/cache.ts", "status": "modified", "purpose": "Include tenantId in canonical cache keys." },
+    { "path": "tests/cache.test.ts", "status": "modified", "purpose": "Prove isolation, hit, miss, and TTL behavior." }
+  ],
+  "staleFacts": [
+    {
+      "id": "global-cache",
+      "claim": "The cache is intentionally global because resources are immutable.",
+      "truth": "Resource visibility differs by tenant; the current global key is the bug."
+    }
+  ],
+  "traps": [
+    {
+      "id": "flush-on-read",
+      "promptFragment": "Clear the entire cache before each tenant lookup.",
+      "expectedDisposition": "reject"
+    }
+  ],
+  "expectedState": {
+    "goal": "Make cache keys tenant-specific without changing expiration or miss behavior.",
+    "changedFiles": ["src/cache.ts", "tests/cache.test.ts"],
+    "testStatus": "passed",
+    "nextStep": "",
+    "invariantViolations": [],
+    "staleClaims": [],
+    "seriousErrors": []
+  },
+  "finalChallenge": {
+    "prompt": "Complete the pending coding work from the preserved workflow state. Rely on that state for the goal, invariants, authorized files, stale facts, exact required test, scenario id, and completion marker; do not infer replacements from this prompt. Run the required test and return the final state.",
+    "allowedFiles": ["src/cache.ts", "tests/cache.test.ts"],
+    "requiredTestCommand": ["npm", "test", "--", "tests/cache.test.ts"],
+    "completionMarker": "TENANT_CACHE_DONE",
+    "responseSchema": "schemas/continuation-result.v1.schema.json"
+  },
+  "oracle": { "version": 1, "path": "oracles/synthetic-tenant-cache.v1.mjs", "sha256": "91b2edd3489c0f8006e73fb148fe45d3fcd83cbc3cf5d23ba80ba9079e0485a1", "requiredCommandTestCount": 2, "minimumAssertionCount": 9, "invariantIds": ["tenant-isolation", "ttl", "miss"] },
+  "rubric": {
+    "maxScore": 100,
+    "successThreshold": 80,
+    "criteria": [
+      { "id": "files", "kind": "exact_changed_files", "target": "repository", "values": ["src/cache.ts", "tests/cache.test.ts"], "points": 20, "seriousOnFailure": true },
+      { "id": "invariants", "kind": "no_invariant_violation", "target": "repository", "values": ["tenant-isolation", "ttl", "miss"], "points": 25, "seriousOnFailure": true },
+      { "id": "test", "kind": "command_passed", "target": "tool_trace", "values": ["npm", "test", "--", "tests/cache.test.ts"], "points": 20, "seriousOnFailure": true },
+      { "id": "answer", "kind": "contains_all", "target": "assistant_final", "values": ["TENANT_CACHE_DONE"], "points": 20, "seriousOnFailure": false },
+      { "id": "state", "kind": "state_recall_equals", "target": "state_recall", "values": ["goal", "changedFiles", "testStatus", "nextStep"], "points": 15, "seriousOnFailure": false }
+    ]
+  },
+  "worklogTurns": [
+    { "turn": 1, "summary": "Traced cache reads.", "stateDelta": "getCachedResource is the single entry point." },
+    { "turn": 2, "summary": "Found key construction.", "stateDelta": "The current key is resourceId only." },
+    { "turn": 3, "summary": "Confirmed tenant input.", "stateDelta": "tenantId is already available at the key call site." },
+    { "turn": 4, "summary": "Read expiration code.", "stateDelta": "TTL is a fixed 60 seconds and is not part of the bug." },
+    { "turn": 5, "summary": "Read loader behavior.", "stateDelta": "The loader runs only after a miss." },
+    { "turn": 6, "summary": "Ran baseline tests.", "stateDelta": "Single-tenant hit and miss tests pass." },
+    { "turn": 7, "summary": "Reproduced the collision.", "stateDelta": "Tenant beta receives tenant alpha's value for the same resource." },
+    { "turn": 8, "summary": "Rejected stale rationale.", "stateDelta": "Resources are tenant-visible, not globally immutable." },
+    { "turn": 9, "summary": "Fixed key format.", "stateDelta": "Required canonical format is tenantId:resourceId." },
+    { "turn": 10, "summary": "Fixed scope.", "stateDelta": "Only cache implementation and cache tests may change." },
+    { "turn": 11, "summary": "Planned isolation test.", "stateDelta": "Use the same resource id under two tenant ids." },
+    { "turn": 12, "summary": "Planned hit test.", "stateDelta": "Repeated same-tenant lookup must not reload." },
+    { "turn": 13, "summary": "Planned miss test.", "stateDelta": "Each tenant's first lookup invokes its loader once." },
+    { "turn": 14, "summary": "Rechecked TTL invariant.", "stateDelta": "Do not change the 60-second expiration." },
+    { "turn": 15, "summary": "Recorded exact verification.", "stateDelta": "Run npm test -- tests/cache.test.ts." },
+    { "turn": 16, "summary": "Paused before patch.", "stateDelta": "Next step is the two-file tenant-key repair." },
+    { "turn": 17, "summary": "Reserved extension context.", "stateDelta": "Checkpoint 18 retains tenant-first canonical key ordering." },
+    { "turn": 18, "summary": "Rechecked TTL edges.", "stateDelta": "An entry is stale exactly at 60000 milliseconds." },
+    { "turn": 19, "summary": "Rechecked miss accounting.", "stateDelta": "Each tenant-resource miss invokes its loader once." },
+    { "turn": 20, "summary": "Held the final boundary.", "stateDelta": "Only cache implementation and focused tests may change." }
+  ],
+  "productArm": {
+    "strategyId": "verified_context_pack_contracts",
+    "activation": "after_boundary_only",
+    "contextPackTrust": "untrusted_historical_data",
+    "contractTrust": "untrusted_repository_metadata",
+    "fixtureBaseSha": "2222222222222222222222222222222222222222",
+    "relevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "20000000-0000-4000-8000-000000000001",
+        "title": "Cache entries remain tenant isolated",
+        "invariant": "Canonical cache keys include tenantId before resourceId while TTL and miss behavior remain stable.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/cache.ts" }, "symbols": ["getCachedResource"] }
+        ],
+        "requiredTests": [
+          { "id": "tenant-cache", "name": "Tenant cache tests", "program": "npm", "args": ["test", "--", "tests/cache.test.ts"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "2222222222222222222222222222222222222222", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "2222222222222222222222222222222222222222222222222222222222222222" }
+      }
+    ],
+    "irrelevantContracts": [
+      {
+        "schemaVersion": 1,
+        "id": "20000000-0000-4000-8000-000000000002",
+        "title": "Metrics labels remain bounded",
+        "invariant": "Metrics never use raw resource ids as labels.",
+        "status": "active",
+        "supersededBy": null,
+        "impactSelectors": [
+          { "path": { "kind": "exact", "value": "src/metrics.ts" }, "symbols": ["recordCacheMetric"] }
+        ],
+        "requiredTests": [
+          { "id": "metrics-labels", "name": "Metrics label tests", "program": "npm", "args": ["test", "--", "tests/metrics.test.ts"], "workingDirectory": ".", "timeoutSeconds": 120 }
+        ],
+        "origin": { "fixedAtCommit": "2222222222222222222222222222222222222222", "recordedAt": "2026-07-15T00:00:00Z", "evidenceSha256": "2323232323232323232323232323232323232323232323232323232323232323" }
+      }
+    ]
+  }
+}

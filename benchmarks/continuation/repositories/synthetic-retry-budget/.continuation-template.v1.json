@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "synthetic-retry-budget",
+  "runtime": "python3",
+  "networkInstallRequired": false,
+  "baselineTestArgv": ["python3", "-m", "pytest", "tests/test_retry.py"]
+}

@@ -1,0 +1,11 @@
+# Live evidence is append-only, local, and may contain repository-specific metadata.
+*.jsonl
+campaign-lock.v1.json
+calibration/
+workspaces/
+
+# Derived dry-run and recommendation artifacts below are intentionally versioned.
+!dry-run-plan.v1.json
+!threshold-recommendation.v1.json
+!threshold-recommendation.v1.md
+!execution-checkpoint.v1.json

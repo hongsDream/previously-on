@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "manifest.v1.schema.json",
+  "title": "PreviouslyOn continuation benchmark manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "benchmarkId",
+    "prerequisite",
+    "execution",
+    "matrix",
+    "fairness",
+    "metrics",
+    "degradationBoundary",
+    "productArmGate",
+    "failureTaxonomy",
+    "safety",
+    "fixtureSet",
+    "fixtures",
+    "schemas"
+  ],
+  "properties": {
+    "$schema": { "const": "schemas/manifest.v1.schema.json" },
+    "schemaVersion": { "const": 1 },
+    "benchmarkId": { "const": "previously-on-continuation-v1" },
+    "prerequisite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskId", "mergeSha", "requiredOnOriginMain"],
+      "properties": {
+        "taskId": { "const": "019f63ad-a12b-78f2-8fa4-bb4c4a528078" },
+        "mergeSha": { "const": "7aba2ba71a40b713be54d3540386fa4195026354" },
+        "requiredOnOriginMain": { "const": true }
+      }
+    },
+    "execution": { "type": "object" },
+    "matrix": { "type": "object" },
+    "fairness": { "type": "object" },
+    "metrics": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "degradationBoundary": { "type": "object" },
+    "productArmGate": { "type": "object" },
+    "failureTaxonomy": { "const": "failure-taxonomy.v1.json" },
+    "safety": { "type": "object" },
+    "fixtureSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hashAlgorithm", "canonicalization", "expectedSha256"],
+      "properties": {
+        "hashAlgorithm": { "const": "sha256" },
+        "canonicalization": { "const": "sorted_relative_path_nul_raw_bytes_nul" },
+        "expectedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "family", "path"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "family": { "enum": ["synthetic", "previously_on"] },
+          "path": { "type": "string", "pattern": "^fixtures/[a-z0-9-]+\\.json$" }
+        }
+      }
+    },
+    "schemas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "fixture", "regressionContract", "continuationResult", "result", "control", "summary"],
+      "properties": {
+        "manifest": { "const": "schemas/manifest.v1.schema.json" },
+        "fixture": { "const": "schemas/fixture.v1.schema.json" },
+        "regressionContract": { "const": "schemas/regression-contract.v1.schema.json" },
+        "continuationResult": { "const": "schemas/continuation-result.v1.schema.json" },
+        "result": { "const": "schemas/result.v1.schema.json" },
+        "control": { "const": "schemas/control.v1.schema.json" },
+        "summary": { "const": "schemas/summary.v1.schema.json" }
+      }
+    }
+  }
+}

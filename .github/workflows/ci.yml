@@ -37,6 +37,12 @@ jobs:
       - name: Install locked UI dependencies and build embedded assets
         run: npm ci && npm run build
         working-directory: ui
+      - name: Continuation benchmark harness and 864-arm dry-run
+        run: |
+          node --test benchmarks/continuation/test/*.test.mjs
+          node benchmarks/continuation/runner.mjs \
+            --dry-run \
+            --output "${RUNNER_TEMP}/continuation-dry-run-plan.v1.json"
       - name: Rust formatting
         run: cargo fmt --check
       - name: Rust lint

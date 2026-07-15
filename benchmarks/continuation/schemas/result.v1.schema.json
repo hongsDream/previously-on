@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "result.v1.schema.json",
+  "title": "Continuation benchmark append-only result V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "event", "recordedAt", "payload", "recordSha256"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "event": { "enum": ["arm_completed", "arm_model_error"] },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "arm", "binding", "model", "metrics", "handoff", "productContext", "oracle", "provider", "provenance"],
+      "properties": {
+        "phase": { "enum": ["calibration", "measured"] },
+        "arm": { "$ref": "#/definitions/arm" },
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["campaignLockSha256", "fixtureSha256", "sourceSnapshotSha256", "prerequisiteMergeSha", "fixtureSetSha256", "manifestSha256"],
+          "properties": {
+            "campaignLockSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "fixtureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "sourceSnapshotSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "prerequisiteMergeSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "fixtureSetSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "manifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        "model": { "type": "object" },
+        "metrics": { "type": "object" },
+        "handoff": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/handoff" }
+          ]
+        },
+        "productContext": { "type": ["object", "null"] },
+        "oracle": { "type": "object" },
+        "provider": { "type": "object" },
+        "provenance": { "type": "object" }
+      }
+    },
+    "recordSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "definitions": {
+    "handoff": {
+      "type": "object",
+      "required": [
+        "sha256",
+        "deliveredSha256",
+        "checkpointSha256",
+        "byteLength",
+        "reusedFromNativeArmKey",
+        "nativeResultRecordSha256"
+      ],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "deliveredSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "checkpointSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "byteLength": { "type": "integer", "minimum": 1 },
+        "reusedFromNativeArmKey": { "type": ["string", "null"] },
+        "nativeResultRecordSha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          ]
+        }
+      }
+    },
+    "arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "scenario", "strategy", "compaction", "repetition", "fixtureSha256", "key"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "scenario": { "type": "string", "minLength": 1 },
+        "strategy": { "enum": ["same_task", "native_handoff", "verified_context_pack_contracts"] },
+        "compaction": { "type": "integer", "minimum": 0 },
+        "repetition": { "type": "integer", "minimum": 1 },
+        "fixtureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
