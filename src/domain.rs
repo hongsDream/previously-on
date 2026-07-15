@@ -214,6 +214,8 @@ pub enum EventKind {
     ContextCompaction,
     ContextUsageUpdated,
     ContinuationSuggested,
+    RegressionCandidateRecorded,
+    ContractEvaluationRecorded,
     #[default]
     SessionStopped,
     Unknown,

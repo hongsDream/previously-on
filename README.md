@@ -14,12 +14,13 @@ not an instruction and not a replacement for checking the current source.
 - a task timeline with source-thread identity, relative activity age, turn and compaction counts,
   and observed context usage;
 - deterministic context packs with provenance, freshness, and capture-coverage warnings;
+- Git-shared regression contracts that connect changed paths and literal symbols to required tests;
 - one-time new-thread advice after a session crosses a continuation threshold;
 - no API key, telemetry, or outbound network access in the default mode;
 - repository-scoped JSON export and complete local purge.
 
-PreviouslyOn deliberately does not include a code graph, chat replay, cloud sync, multi-agent
-integration, or automatic Context Pack injection.
+PreviouslyOn deliberately does not include a dependency graph, chat replay, cloud sync,
+multi-agent integration, automatic task switching, or automatic Context Pack injection.
 
 ## Install
 
@@ -55,6 +56,12 @@ npm --prefix ui run build
 cargo install --path . --locked
 ```
 
+Regression Contracts are part of the current unreleased source tree; the already-published
+`0.1.0-alpha.1` package predates these commands. Until a later release includes them, build this
+checkout from source. A released `previously contracts init --github-actions` pins the same
+PreviouslyOn package version that generated the workflow and installs it outside the consumer
+repository, so the gate never assumes that repository is a Rust project.
+
 ## Quick start
 
 ```bash
@@ -63,6 +70,9 @@ previously run codex --repo /absolute/path/to/your/repository -- <codex argument
 previously status
 previously doctor
 previously ui
+previously contracts init --github-actions
+previously contracts validate
+previously contracts check --base origin/main --execute --json
 ```
 
 The review UI is deterministic and local. v0.1 does not invoke an AI model from the UI; facts are
@@ -118,6 +128,46 @@ supported yet.
 
 The MCP server is read-only and exposes `suggest_resume`, `resume_task`, `search_tasks`,
 `explain_fact`, and `get_task_timeline`.
+
+## Regression Contracts
+
+Regression Contracts keep a repository's proven bug fixes and service invariants in Git. Each
+approved contract is one camelCase JSON file at `.previously-on/contracts/<uuid>.json`. A file is
+active in the current checkout as soon as it is written; the normal commit and pull-request flow
+shares it with the team.
+
+Contracts use case-sensitive Git path selectors (`exact` or `prefix`) and optional literal symbol
+identifiers. Selector groups are ORed. A group always requires a path match, and when it lists
+symbols at least one must occur in a changed hunk. Renames inspect both paths. If a binary,
+unreadable, or oversized diff prevents symbol inspection, PreviouslyOn conservatively treats the
+path match as relevant and reports a warning.
+
+Required tests are argv records, never shell strings:
+
+```json
+{
+  "id": "tenant-isolation",
+  "name": "Tenant isolation integration",
+  "program": "./scripts/test-tenant-isolation",
+  "args": [],
+  "workingDirectory": ".",
+  "timeoutSeconds": 900
+}
+```
+
+The Codex `PreToolUse` hook supplies relevant contract metadata as non-blocking context. The Stop
+hook blocks completion once when a relevant required test is missing or failed, records
+`contract_blocked` readiness, and avoids an automatic stop loop. Hooks improve the Codex workflow,
+but the generated GitHub Actions check is the hard gate: it computes the base/HEAD merge base,
+deduplicates identical argv tests, executes them directly, and fails closed on invalid contracts,
+missing executables, timeouts, or nonzero exits.
+
+Automatic candidates are evidence-only: the same normalized test command must fail, code must
+change, and the command must then pass; alternatively, a test-file change and a code change may be
+followed by a passing test. Ordinary pass-only tasks do not create candidates. Manual candidates
+cover service invariants. Candidates and evaluations stay in the local canonical event log and
+SQLite projection until approval writes the Git JSON; no raw prompt, tool output, or source code is
+written to a contract.
 
 ## Local data and privacy
 

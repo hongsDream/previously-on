@@ -3,12 +3,18 @@ use std::process::Command;
 use std::sync::{Arc, Barrier};
 
 use chrono::Utc;
+use previously_on::contracts::{
+    CandidateEvidenceKindV1, ContractOriginV1, ContractReadinessV1, ContractStatusV1,
+    ImpactPathSelectorV1, ImpactSelectorGroupV1, PathSelectorKindV1, RegressionContractV1,
+    RequiredTestStateV1, RequiredTestV1,
+};
 use previously_on::domain::{
     ChangeAttribution, ContinuationReasonV1, ContinuationStateV1, EventEnvelopeV1, EventKind,
     TaskLifecycle, TaskV1, TestStatus, SCHEMA_VERSION_V1,
 };
 use previously_on::hook::{
-    append_fallback, capture, ingest_hook_event, replay_fallback, HookDeliveryStatus, HookEvent,
+    append_fallback, capture, ingest_hook_event, replay_fallback, HookAckV1, HookDeliveryStatus,
+    HookEvent,
 };
 use previously_on::store::Store;
 use serde_json::json;
@@ -719,4 +725,786 @@ fn concurrent_next_prompts_claim_only_one_continuation_suggestion() {
             .count(),
         1
     );
+}
+
+#[test]
+fn evidence_only_regression_candidates_require_fail_edit_pass_or_test_and_code_edits() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(temp.path(), &["init", repo.to_str().unwrap()]);
+    std::fs::write(
+        repo.join("src/auth.rs"),
+        "pub fn auth() -> bool { false }\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "src/auth.rs"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Contract Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+
+    begin_hook_task(&store, &repo, "candidate-failure", "Fix auth regression");
+    record_test_hook(
+        &store,
+        &repo,
+        "candidate-failure",
+        "failure-test",
+        "cargo test auth",
+        1,
+    );
+    record_patch_hook(
+        &store,
+        &repo,
+        "candidate-failure",
+        "failure-fix",
+        &[("src/auth.rs", "pub fn auth() -> bool { true }\n")],
+    );
+    record_test_hook(
+        &store,
+        &repo,
+        "candidate-failure",
+        "passing-test",
+        "cargo test auth",
+        0,
+    );
+    let repository_id = previously_on::git::repository_identity(&repo).unwrap().id;
+    let candidates = store
+        .list_regression_candidates(Some(&repository_id))
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].evidence_kind,
+        CandidateEvidenceKindV1::FailureEditPass
+    );
+    assert_eq!(candidates[0].required_tests[0].program, "cargo");
+    assert_eq!(candidates[0].required_tests[0].args, ["test", "auth"]);
+
+    begin_hook_task(
+        &store,
+        &repo,
+        "candidate-pass-only",
+        "Ordinary passing work",
+    );
+    record_patch_hook(
+        &store,
+        &repo,
+        "candidate-pass-only",
+        "ordinary-edit",
+        &[("src/ordinary.rs", "pub fn ordinary() {}\n")],
+    );
+    record_test_hook(
+        &store,
+        &repo,
+        "candidate-pass-only",
+        "ordinary-pass",
+        "cargo test ordinary",
+        0,
+    );
+    assert_eq!(
+        store
+            .list_regression_candidates(Some(&repository_id))
+            .unwrap()
+            .len(),
+        1,
+        "a pass-only ordinary task must not create a candidate"
+    );
+
+    begin_hook_task(
+        &store,
+        &repo,
+        "candidate-test-edit",
+        "Add a regression test and fix",
+    );
+    record_patch_hook(
+        &store,
+        &repo,
+        "candidate-test-edit",
+        "test-and-code-edit",
+        &[
+            ("src/feature.rs", "pub fn feature() -> bool { true }\n"),
+            (
+                "tests/feature_test.rs",
+                "#[test]\nfn feature_stays_true() {}\n",
+            ),
+        ],
+    );
+    record_test_hook(
+        &store,
+        &repo,
+        "candidate-test-edit",
+        "test-file-pass",
+        "cargo test feature",
+        0,
+    );
+    let candidates = store
+        .list_regression_candidates(Some(&repository_id))
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.evidence_kind == CandidateEvidenceKindV1::TestFileEditPass));
+}
+
+#[test]
+fn relevant_contract_context_stop_freshness_and_loop_guard_are_persisted() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(temp.path(), &["init", repo.to_str().unwrap()]);
+    std::fs::write(
+        repo.join("src/auth.rs"),
+        "pub fn auth() -> bool { false }\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "src/auth.rs"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Contract Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let snapshot = previously_on::git::capture_snapshot(&repo).unwrap();
+    previously_on::contracts::write_contract(
+        &repo,
+        &RegressionContractV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "00000000-0000-4000-8000-000000000101".into(),
+            title: "Authentication must remain covered".into(),
+            invariant: "Authentication behavior stays stable".into(),
+            status: ContractStatusV1::Active,
+            superseded_by: None,
+            impact_selectors: vec![ImpactSelectorGroupV1 {
+                path: ImpactPathSelectorV1 {
+                    kind: PathSelectorKindV1::Exact,
+                    value: "src/auth.rs".into(),
+                },
+                symbols: Vec::new(),
+            }],
+            required_tests: vec![RequiredTestV1 {
+                id: "auth-test".into(),
+                name: "auth test".into(),
+                program: "cargo".into(),
+                args: vec!["test".into(), "auth".into()],
+                working_directory: ".".into(),
+                timeout_seconds: 900,
+            }],
+            origin: ContractOriginV1 {
+                fixed_at_commit: snapshot.head.unwrap(),
+                recorded_at: Utc::now(),
+                evidence_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
+            },
+        },
+    )
+    .unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    begin_hook_task(&store, &repo, "contract-stop", "Change authentication");
+    let pre_ack = record_patch_hook(
+        &store,
+        &repo,
+        "contract-stop",
+        "auth-edit",
+        &[("src/auth.rs", "pub fn auth() -> bool { true }\n")],
+    );
+    let context = pre_ack
+        .contract_context
+        .expect("PreToolUse Contract context");
+    assert!(context.contains("Authentication must remain covered"));
+    assert!(context.contains("auth-test"));
+
+    let first_stop = record_stop_hook(&store, &repo, "contract-stop", "stop-1", false);
+    assert!(first_stop
+        .stop_block_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("cargo test auth")));
+    let second_stop = record_stop_hook(&store, &repo, "contract-stop", "stop-2", true);
+    assert!(second_stop.stop_block_reason.is_none());
+    let repeated_stop = record_stop_hook(&store, &repo, "contract-stop", "stop-2b", false);
+    assert!(
+        repeated_stop.stop_block_reason.is_none(),
+        "the stored fingerprint must prevent a repeated continuation"
+    );
+
+    record_test_hook(
+        &store,
+        &repo,
+        "contract-stop",
+        "auth-pass",
+        "cargo test auth",
+        0,
+    );
+    let ready_stop = record_stop_hook(&store, &repo, "contract-stop", "stop-3", false);
+    assert!(ready_stop.stop_block_reason.is_none());
+
+    record_patch_hook(
+        &store,
+        &repo,
+        "contract-stop",
+        "auth-edit-again",
+        &[("src/auth.rs", "pub fn auth() -> bool { false }\n")],
+    );
+    let stale_stop = record_stop_hook(&store, &repo, "contract-stop", "stop-4", false);
+    assert!(stale_stop.stop_block_reason.is_some());
+    let repository_id = previously_on::git::repository_identity(&repo).unwrap().id;
+    let evaluations = store
+        .list_contract_evaluations(Some(&repository_id))
+        .unwrap();
+    assert!(evaluations
+        .iter()
+        .any(|evaluation| evaluation.readiness == ContractReadinessV1::Ready));
+    assert!(evaluations.iter().any(|evaluation| {
+        evaluation.readiness == ContractReadinessV1::ContractBlocked
+            && evaluation
+                .required_tests
+                .iter()
+                .any(|test| test.state == RequiredTestStateV1::Stale)
+    }));
+    assert_eq!(
+        evaluations
+            .iter()
+            .filter(|evaluation| evaluation.continuation_issued)
+            .count(),
+        2,
+        "one continuation is allowed for each distinct related content fingerprint"
+    );
+}
+
+#[test]
+fn invalid_contract_stop_error_does_not_reblock_an_active_stop_hook() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".previously-on/contracts")).unwrap();
+    git(temp.path(), &["init", repo.to_str().unwrap()]);
+    std::fs::write(
+        repo.join(".previously-on/contracts/invalid.json"),
+        r#"{"schemaVersion":1,"id":"invalid"}"#,
+    )
+    .unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    begin_hook_task(
+        &store,
+        &repo,
+        "invalid-contract",
+        "Inspect invalid Contract",
+    );
+    let first = record_stop_hook(&store, &repo, "invalid-contract", "invalid-stop-1", false);
+    assert!(first.stop_block_reason.is_some());
+    let second = record_stop_hook(&store, &repo, "invalid-contract", "invalid-stop-2", true);
+    assert!(second.stop_block_reason.is_none());
+    let repeated = record_stop_hook(&store, &repo, "invalid-contract", "invalid-stop-3", false);
+    assert!(repeated.stop_block_reason.is_none());
+    let repository_id = previously_on::git::repository_identity(&repo).unwrap().id;
+    let evaluations = store
+        .list_contract_evaluations(Some(&repository_id))
+        .unwrap();
+    assert!(evaluations
+        .iter()
+        .all(|evaluation| { evaluation.readiness == ContractReadinessV1::ContractBlocked }));
+}
+
+#[test]
+fn required_test_freshness_matches_repository_relative_subdirectory_cwd() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join("ui/src")).unwrap();
+    git(temp.path(), &["init", repo.to_str().unwrap()]);
+    std::fs::write(repo.join("ui/src/app.ts"), "export const ready = false;\n").unwrap();
+    git(&repo, &["add", "ui/src/app.ts"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Contract Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let snapshot = previously_on::git::capture_snapshot(&repo).unwrap();
+    previously_on::contracts::write_contract(
+        &repo,
+        &RegressionContractV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "00000000-0000-4000-8000-000000000102".into(),
+            title: "UI behavior stays tested".into(),
+            invariant: "UI readiness remains true".into(),
+            status: ContractStatusV1::Active,
+            superseded_by: None,
+            impact_selectors: vec![ImpactSelectorGroupV1 {
+                path: ImpactPathSelectorV1 {
+                    kind: PathSelectorKindV1::Exact,
+                    value: "ui/src/app.ts".into(),
+                },
+                symbols: Vec::new(),
+            }],
+            required_tests: vec![RequiredTestV1 {
+                id: "ui-test".into(),
+                name: "UI tests".into(),
+                program: "npm".into(),
+                args: vec!["test".into()],
+                working_directory: "ui".into(),
+                timeout_seconds: 900,
+            }],
+            origin: ContractOriginV1 {
+                fixed_at_commit: snapshot.head.unwrap(),
+                recorded_at: Utc::now(),
+                evidence_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .into(),
+            },
+        },
+    )
+    .unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    begin_hook_task(&store, &repo, "subdir-cwd", "Update UI readiness");
+    record_patch_hook(
+        &store,
+        &repo,
+        "subdir-cwd",
+        "ui-edit",
+        &[("ui/src/app.ts", "export const ready = true;\n")],
+    );
+    record_test_hook(
+        &store,
+        &repo.join("ui"),
+        "subdir-cwd",
+        "ui-pass",
+        "npm test",
+        0,
+    );
+    let stop = record_stop_hook(&store, &repo, "subdir-cwd", "ui-stop", false);
+    let repository_id = previously_on::git::repository_identity(&repo).unwrap().id;
+    let evaluations = store
+        .list_contract_evaluations(Some(&repository_id))
+        .unwrap();
+    assert!(
+        stop.stop_block_reason.is_none(),
+        "unexpected block: {:?}; evaluations={evaluations:#?}",
+        stop.stop_block_reason
+    );
+    assert!(evaluations
+        .iter()
+        .any(|evaluation| evaluation.readiness == ContractReadinessV1::Ready));
+}
+
+#[test]
+fn resumed_task_keeps_committed_related_change_blocked_until_the_required_test_runs() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(temp.path(), &["init", repo.to_str().unwrap()]);
+    std::fs::write(repo.join("src/auth.rs"), "pub fn auth() -> bool { true }\n").unwrap();
+    git(&repo, &["add", "src/auth.rs"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Contract Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let snapshot = previously_on::git::capture_snapshot(&repo).unwrap();
+    previously_on::contracts::write_contract(
+        &repo,
+        &RegressionContractV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "00000000-0000-4000-8000-000000000103".into(),
+            title: "Authentication stays verified".into(),
+            invariant: "Authentication remains enabled".into(),
+            status: ContractStatusV1::Active,
+            superseded_by: None,
+            impact_selectors: vec![ImpactSelectorGroupV1 {
+                path: ImpactPathSelectorV1 {
+                    kind: PathSelectorKindV1::Exact,
+                    value: "src/auth.rs".into(),
+                },
+                symbols: Vec::new(),
+            }],
+            required_tests: vec![RequiredTestV1 {
+                id: "auth-test".into(),
+                name: "Authentication regression".into(),
+                program: "cargo".into(),
+                args: vec!["test".into(), "auth".into()],
+                working_directory: ".".into(),
+                timeout_seconds: 900,
+            }],
+            origin: ContractOriginV1 {
+                fixed_at_commit: snapshot.head.unwrap(),
+                recorded_at: Utc::now(),
+                evidence_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .into(),
+            },
+        },
+    )
+    .unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+
+    begin_hook_task(&store, &repo, "contract-session-a", "Change authentication");
+    let task_id = store
+        .get_session("contract-session-a")
+        .unwrap()
+        .unwrap()
+        .task_id
+        .unwrap();
+    record_patch_hook(
+        &store,
+        &repo,
+        "contract-session-a",
+        "auth-edit",
+        &[("src/auth.rs", "pub fn auth() -> bool { false }\n")],
+    );
+    git(&repo, &["add", "src/auth.rs"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Contract Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "change auth",
+        ],
+    );
+    assert!(
+        record_stop_hook(&store, &repo, "contract-session-a", "stop-a", false)
+            .stop_block_reason
+            .is_some()
+    );
+
+    let prompt = json!({
+        "session_id": "contract-session-b",
+        "turn_id": "prompt-b",
+        "cwd": repo,
+        "prompt": "Change authentication"
+    });
+    let suggestion = ingest_hook_event(&store, captured(HookEvent::UserPromptSubmit, prompt))
+        .unwrap()
+        .candidate
+        .unwrap();
+    assert_eq!(suggestion.task_id, task_id);
+    let resume = json!({
+        "session_id": "contract-session-b",
+        "turn_id": "resume-b",
+        "cwd": repo,
+        "tool_name": "mcp__previously_on__resume_task",
+        "tool_use_id": "resume-task-b",
+        "tool_input": {"task_id": task_id},
+        "tool_response": {"content": "verified pack returned"}
+    });
+    ingest_hook_event(&store, captured(HookEvent::PostToolUse, resume)).unwrap();
+    let resumed_stop = record_stop_hook(&store, &repo, "contract-session-b", "stop-b", false);
+    assert!(
+        resumed_stop.stop_block_reason.is_none(),
+        "the persisted once-per-fingerprint continuation guard should prevent a loop"
+    );
+
+    let repository_id = previously_on::git::repository_identity(&repo).unwrap().id;
+    let latest = store
+        .list_contract_evaluations(Some(&repository_id))
+        .unwrap()
+        .into_iter()
+        .find(|evaluation| evaluation.task_id.as_deref() == Some(task_id.as_str()))
+        .unwrap();
+    assert_eq!(latest.readiness, ContractReadinessV1::ContractBlocked);
+    assert!(latest
+        .required_tests
+        .iter()
+        .any(|test| test.state == RequiredTestStateV1::Missing));
+}
+
+#[test]
+fn queued_passing_test_cannot_certify_related_content_changed_before_replay() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(temp.path(), &["init", repo.to_str().unwrap()]);
+    std::fs::write(repo.join("src/auth.rs"), "pub fn auth() -> bool { true }\n").unwrap();
+    git(&repo, &["add", "src/auth.rs"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Contract Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let snapshot = previously_on::git::capture_snapshot(&repo).unwrap();
+    previously_on::contracts::write_contract(
+        &repo,
+        &RegressionContractV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "00000000-0000-4000-8000-000000000104".into(),
+            title: "Authentication stays verified".into(),
+            invariant: "Authentication remains enabled".into(),
+            status: ContractStatusV1::Active,
+            superseded_by: None,
+            impact_selectors: vec![ImpactSelectorGroupV1 {
+                path: ImpactPathSelectorV1 {
+                    kind: PathSelectorKindV1::Exact,
+                    value: "src/auth.rs".into(),
+                },
+                symbols: Vec::new(),
+            }],
+            required_tests: vec![RequiredTestV1 {
+                id: "auth-test".into(),
+                name: "Authentication regression".into(),
+                program: "cargo".into(),
+                args: vec!["test".into(), "auth".into()],
+                working_directory: ".".into(),
+                timeout_seconds: 900,
+            }],
+            origin: ContractOriginV1 {
+                fixed_at_commit: snapshot.head.unwrap(),
+                recorded_at: Utc::now(),
+                evidence_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    .into(),
+            },
+        },
+    )
+    .unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    begin_hook_task(&store, &repo, "queued-pass", "Change authentication");
+    record_patch_hook(
+        &store,
+        &repo,
+        "queued-pass",
+        "auth-edit-before-test",
+        &[("src/auth.rs", "pub fn auth() -> bool { false }\n")],
+    );
+
+    let mut passing_payload = hook_base(&repo, "queued-pass", "auth-pass-queued");
+    passing_payload["tool_name"] = json!("Bash");
+    passing_payload["tool_use_id"] = json!("auth-pass-queued");
+    passing_payload["tool_input"] = json!({"command":"cargo test auth"});
+    passing_payload["tool_response"] = json!({"exit_code":0,"output":"passed"});
+    let queued_pass = captured(HookEvent::PostToolUse, passing_payload);
+    assert!(queued_pass
+        .payload
+        .get("source_test_git_snapshot")
+        .is_some());
+    let queue = temp.path().join("queue/events.jsonl");
+    append_fallback(&queue, &queued_pass).unwrap();
+
+    std::fs::write(
+        repo.join("src/auth.rs"),
+        "pub fn auth() -> bool { false }\npub fn changed_after_test() {}\n",
+    )
+    .unwrap();
+    replay_fallback(&store, &queue).unwrap();
+    let stop = record_stop_hook(&store, &repo, "queued-pass", "stop-after-replay", false);
+    assert!(stop.stop_block_reason.is_some());
+
+    let repository_id = previously_on::git::repository_identity(&repo).unwrap().id;
+    let evaluations = store
+        .list_contract_evaluations(Some(&repository_id))
+        .unwrap();
+    assert!(evaluations.iter().any(|evaluation| {
+        evaluation.required_tests.iter().any(|test| {
+            matches!(
+                test.state,
+                RequiredTestStateV1::Stale | RequiredTestStateV1::Missing
+            )
+        })
+    }));
+    assert!(!evaluations
+        .iter()
+        .any(|evaluation| evaluation.readiness == ContractReadinessV1::Ready));
+}
+
+#[test]
+fn symbol_scoped_contract_ignores_inspectable_unrelated_text_changes() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(temp.path(), &["init", repo.to_str().unwrap()]);
+    std::fs::write(
+        repo.join("src/auth.rs"),
+        "pub fn tenant_guard() -> bool { true }\npub fn unrelated() {}\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "src/auth.rs"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Contract Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let snapshot = previously_on::git::capture_snapshot(&repo).unwrap();
+    previously_on::contracts::write_contract(
+        &repo,
+        &RegressionContractV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "00000000-0000-4000-8000-000000000105".into(),
+            title: "Tenant guard remains protected".into(),
+            invariant: "Tenant guard remains enabled".into(),
+            status: ContractStatusV1::Active,
+            superseded_by: None,
+            impact_selectors: vec![ImpactSelectorGroupV1 {
+                path: ImpactPathSelectorV1 {
+                    kind: PathSelectorKindV1::Exact,
+                    value: "src/auth.rs".into(),
+                },
+                symbols: vec!["tenant_guard".into()],
+            }],
+            required_tests: vec![RequiredTestV1 {
+                id: "tenant-test".into(),
+                name: "Tenant regression".into(),
+                program: "cargo".into(),
+                args: vec!["test".into(), "tenant".into()],
+                working_directory: ".".into(),
+                timeout_seconds: 900,
+            }],
+            origin: ContractOriginV1 {
+                fixed_at_commit: snapshot.head.unwrap(),
+                recorded_at: Utc::now(),
+                evidence_sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    .into(),
+            },
+        },
+    )
+    .unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    begin_hook_task(&store, &repo, "symbol-unrelated", "Update unrelated helper");
+    let pre = record_patch_hook(
+        &store,
+        &repo,
+        "symbol-unrelated",
+        "unrelated-edit",
+        &[(
+            "src/auth.rs",
+            "pub fn tenant_guard() -> bool { true }\npub fn unrelated() { println!(\"changed\"); }\n",
+        )],
+    );
+    assert!(
+        pre.contract_context.is_some(),
+        "PreToolUse remains conservative"
+    );
+    let stop = record_stop_hook(&store, &repo, "symbol-unrelated", "symbol-stop", false);
+    assert!(stop.stop_block_reason.is_none());
+    let repository_id = previously_on::git::repository_identity(&repo).unwrap().id;
+    let latest = store
+        .list_contract_evaluations(Some(&repository_id))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(latest.readiness, ContractReadinessV1::Ready);
+    assert!(latest.relevant_contracts.is_empty());
+}
+
+fn hook_base(repo: &std::path::Path, session_id: &str, position: &str) -> serde_json::Value {
+    json!({
+        "session_id": session_id,
+        "turn_id": position,
+        "cwd": repo
+    })
+}
+
+fn begin_hook_task(store: &Store, repo: &std::path::Path, session_id: &str, prompt: &str) {
+    ingest_hook_event(
+        store,
+        captured(
+            HookEvent::SessionStart,
+            hook_base(repo, session_id, "session-start"),
+        ),
+    )
+    .unwrap();
+    let mut payload = hook_base(repo, session_id, "prompt-1");
+    payload["prompt"] = json!(prompt);
+    ingest_hook_event(store, captured(HookEvent::UserPromptSubmit, payload)).unwrap();
+}
+
+fn record_patch_hook(
+    store: &Store,
+    repo: &std::path::Path,
+    session_id: &str,
+    tool_id: &str,
+    files: &[(&str, &str)],
+) -> HookAckV1 {
+    let mut payload = hook_base(repo, session_id, tool_id);
+    payload["tool_name"] = json!("apply_patch");
+    payload["tool_use_id"] = json!(tool_id);
+    payload["tool_input"] = json!({
+        "command": files
+            .iter()
+            .map(|(path, _)| format!("*** Update File: {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    let pre_ack =
+        ingest_hook_event(store, captured(HookEvent::PreToolUse, payload.clone())).unwrap();
+    for (path, contents) in files {
+        let path = repo.join(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+    payload["tool_response"] = json!({"content":"Done"});
+    ingest_hook_event(store, captured(HookEvent::PostToolUse, payload)).unwrap();
+    pre_ack
+}
+
+fn record_test_hook(
+    store: &Store,
+    repo: &std::path::Path,
+    session_id: &str,
+    tool_id: &str,
+    command: &str,
+    exit_code: i64,
+) {
+    let mut payload = hook_base(repo, session_id, tool_id);
+    payload["tool_name"] = json!("Bash");
+    payload["tool_use_id"] = json!(tool_id);
+    payload["tool_input"] = json!({"command":command});
+    payload["tool_response"] = json!({
+        "exit_code":exit_code,
+        "output":if exit_code == 0 { "passed" } else { "failed" }
+    });
+    ingest_hook_event(store, captured(HookEvent::PostToolUse, payload)).unwrap();
+}
+
+fn record_stop_hook(
+    store: &Store,
+    repo: &std::path::Path,
+    session_id: &str,
+    turn_id: &str,
+    stop_hook_active: bool,
+) -> HookAckV1 {
+    let mut payload = hook_base(repo, session_id, turn_id);
+    payload["stop_hook_active"] = json!(stop_hook_active);
+    payload["last_assistant_message"] = json!("done");
+    ingest_hook_event(store, captured(HookEvent::Stop, payload)).unwrap()
 }

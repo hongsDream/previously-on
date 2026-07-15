@@ -1,3 +1,4 @@
+use crate::contracts::{ContractEvaluationV1, RegressionCandidateV1};
 use crate::domain::{
     deterministic_id, CheckpointV1, ContextUsageV1, ContinuationAdviceV1, ContinuationReasonV1,
     ContinuationStateV1, CoverageV1, EventEnvelopeV1, EventKind, EvidenceV1, FactLifecycle, FactV1,
@@ -434,6 +435,27 @@ impl Store {
         .collect()
     }
 
+    pub fn list_task_events(
+        &self,
+        repository_id: &str,
+        task_id: &str,
+    ) -> Result<Vec<EventEnvelopeV1>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT event_json FROM canonical_events
+             WHERE repository_id = ?1 AND task_id = ?2
+             ORDER BY occurred_at, COALESCE(sequence_no, 9223372036854775807), event_id",
+        )?;
+        let rows = statement.query_map(params![repository_id, task_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| {
+            let json = row?;
+            serde_json::from_str(&json).context("deserialize task event")
+        })
+        .collect()
+    }
+
     pub fn session_event_count(&self, session_id: &str, kind: EventKind) -> Result<u64> {
         let connection = self.connect()?;
         connection
@@ -499,6 +521,70 @@ impl Store {
             "SELECT test_json FROM test_results WHERE task_id = ?1 ORDER BY occurred_at DESC, id",
             [task_id],
         )
+    }
+
+    pub fn get_regression_candidate(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<RegressionCandidateV1>> {
+        query_json_optional(
+            &self.connect()?,
+            "SELECT candidate_json FROM regression_candidates WHERE id = ?1",
+            [candidate_id],
+        )
+    }
+
+    pub fn list_regression_candidates(
+        &self,
+        repository_id: Option<&str>,
+    ) -> Result<Vec<RegressionCandidateV1>> {
+        let connection = self.connect()?;
+        if let Some(repository_id) = repository_id {
+            query_json_rows(
+                &connection,
+                "SELECT candidate_json FROM regression_candidates
+                 WHERE repository_id = ?1 ORDER BY updated_at DESC, id",
+                [repository_id],
+            )
+        } else {
+            query_json_rows(
+                &connection,
+                "SELECT candidate_json FROM regression_candidates ORDER BY updated_at DESC, id",
+                [],
+            )
+        }
+    }
+
+    pub fn get_contract_evaluation(
+        &self,
+        evaluation_id: &str,
+    ) -> Result<Option<ContractEvaluationV1>> {
+        query_json_optional(
+            &self.connect()?,
+            "SELECT evaluation_json FROM contract_evaluations WHERE id = ?1",
+            [evaluation_id],
+        )
+    }
+
+    pub fn list_contract_evaluations(
+        &self,
+        repository_id: Option<&str>,
+    ) -> Result<Vec<ContractEvaluationV1>> {
+        let connection = self.connect()?;
+        if let Some(repository_id) = repository_id {
+            query_json_rows(
+                &connection,
+                "SELECT evaluation_json FROM contract_evaluations
+                 WHERE repository_id = ?1 ORDER BY evaluated_at DESC, id",
+                [repository_id],
+            )
+        } else {
+            query_json_rows(
+                &connection,
+                "SELECT evaluation_json FROM contract_evaluations ORDER BY evaluated_at DESC, id",
+                [],
+            )
+        }
     }
 
     pub fn get_task_timeline(&self, task_id: &str) -> Result<Option<TaskTimelineV1>> {
@@ -748,6 +834,8 @@ impl Store {
             file_changes.extend(self.list_file_changes(&task_id)?);
             test_results.extend(self.list_test_results(&task_id)?);
         }
+        let regression_candidates = self.list_regression_candidates(repository_id)?;
+        let contract_evaluations = self.list_contract_evaluations(repository_id)?;
         Ok(json!({
             "schema_version": SCHEMA_VERSION_V1,
             "exported_at": timestamp(Utc::now()),
@@ -760,6 +848,8 @@ impl Store {
             "evidence": evidence,
             "file_changes": file_changes,
             "test_results": test_results,
+            "regressionCandidates": regression_candidates,
+            "contractEvaluations": contract_evaluations,
         }))
     }
 
@@ -850,6 +940,77 @@ impl Store {
             .collect::<std::collections::BTreeSet<_>>();
         drop(connection);
 
+        // Candidates and readiness are durable local workflow state. Retain only the newest
+        // canonical snapshot for each candidate and repository/task evaluation key so the
+        // projections remain rebuildable without keeping an unbounded evaluation history.
+        let mut latest_candidate_events = std::collections::BTreeMap::new();
+        let mut latest_evaluation_events = std::collections::BTreeMap::new();
+        let mut latest_passing_test_events = std::collections::BTreeMap::new();
+        let mut latest_continuation_guard_events = std::collections::BTreeMap::new();
+        for event in &events {
+            match event.kind {
+                EventKind::RegressionCandidateRecorded => {
+                    if let Some(id) = event
+                        .payload
+                        .pointer("/regressionCandidate/id")
+                        .and_then(Value::as_str)
+                    {
+                        latest_candidate_events.insert(id.to_string(), event.event_id.clone());
+                    }
+                }
+                EventKind::ContractEvaluationRecorded => {
+                    latest_evaluation_events.insert(
+                        (event.repository_id.clone(), event.task_id.clone()),
+                        event.event_id.clone(),
+                    );
+                    if let Ok(evaluation) = serde_json::from_value::<ContractEvaluationV1>(
+                        event
+                            .payload
+                            .get("contractEvaluation")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    ) {
+                        if evaluation.continuation_issued {
+                            latest_continuation_guard_events.insert(
+                                (
+                                    event.repository_id.clone(),
+                                    event.task_id.clone(),
+                                    evaluation.content_fingerprint.clone(),
+                                    evaluation
+                                        .relevant_contracts
+                                        .iter()
+                                        .map(|contract| contract.id.clone())
+                                        .collect::<std::collections::BTreeSet<_>>(),
+                                ),
+                                event.event_id.clone(),
+                            );
+                        }
+                        for test in evaluation.required_tests.into_iter().filter(|test| {
+                            test.state == crate::contracts::RequiredTestStateV1::Passed
+                        }) {
+                            latest_passing_test_events.insert(
+                                (
+                                    event.repository_id.clone(),
+                                    event.task_id.clone(),
+                                    test.program,
+                                    test.args,
+                                    test.working_directory,
+                                ),
+                                event.event_id.clone(),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let retained_contract_event_ids = latest_candidate_events
+            .into_values()
+            .chain(latest_evaluation_events.into_values())
+            .chain(latest_passing_test_events.into_values())
+            .chain(latest_continuation_guard_events.into_values())
+            .collect::<std::collections::BTreeSet<_>>();
+
         let retained = events
             .iter()
             .filter(|event| {
@@ -865,6 +1026,7 @@ impl Store {
                         .pointer("/evidence/id")
                         .and_then(Value::as_str)
                         .is_some_and(|id| pinned_evidence_ids.contains(id))
+                    || retained_contract_event_ids.contains(&event.event_id)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1245,6 +1407,24 @@ CREATE TABLE IF NOT EXISTS test_results (
   test_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS test_results_task ON test_results(task_id, occurred_at);
+CREATE TABLE IF NOT EXISTS regression_candidates (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  task_id TEXT,
+  updated_at TEXT NOT NULL,
+  candidate_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS regression_candidates_repository
+  ON regression_candidates(repository_id, updated_at);
+CREATE TABLE IF NOT EXISTS contract_evaluations (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  task_id TEXT,
+  evaluated_at TEXT NOT NULL,
+  evaluation_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS contract_evaluations_repository
+  ON contract_evaluations(repository_id, evaluated_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS task_fts USING fts5(task_id UNINDEXED, title, goal, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS fact_fts USING fts5(fact_id UNINDEXED, content, tokenize='unicode61');
 "#;
@@ -1254,6 +1434,8 @@ fn rebuild_projections_tx(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         "DELETE FROM task_fts;
          DELETE FROM fact_fts;
+         DELETE FROM contract_evaluations;
+         DELETE FROM regression_candidates;
          DELETE FROM test_results;
          DELETE FROM file_changes;
          DELETE FROM evidence;
@@ -1328,6 +1510,20 @@ fn apply_event_projection(transaction: &Transaction<'_>, event: &EventEnvelopeV1
             for change in payload_array::<FileChangeV1>(&event.payload, "file_changes") {
                 upsert_file_change_tx(transaction, &change)?;
             }
+        }
+        EventKind::RegressionCandidateRecorded => {
+            let candidate = event
+                .payload
+                .get("regressionCandidate")
+                .context("regression candidate event is missing regressionCandidate")?;
+            upsert_regression_candidate_tx(transaction, event, candidate)?;
+        }
+        EventKind::ContractEvaluationRecorded => {
+            let evaluation = event
+                .payload
+                .get("contractEvaluation")
+                .context("contract evaluation event is missing contractEvaluation")?;
+            upsert_contract_evaluation_tx(transaction, event, evaluation)?;
         }
         _ => {}
     }
@@ -1784,6 +1980,64 @@ fn upsert_test_result_tx(transaction: &Transaction<'_>, test: &TestResultV1) -> 
             test.task_id,
             test.session_id,
             timestamp(test.occurred_at),
+            json
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_regression_candidate_tx(
+    transaction: &Transaction<'_>,
+    event: &EventEnvelopeV1,
+    candidate: &Value,
+) -> Result<()> {
+    let candidate = redact_value(candidate);
+    let id = candidate
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .context("regression candidate id is missing")?;
+    let json = serde_json::to_string(&candidate)?;
+    transaction.execute(
+        "INSERT INTO regression_candidates(id, repository_id, task_id, updated_at, candidate_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, updated_at=excluded.updated_at,
+           candidate_json=excluded.candidate_json",
+        params![
+            id,
+            event.repository_id,
+            event.task_id,
+            timestamp(event.occurred_at),
+            json
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_contract_evaluation_tx(
+    transaction: &Transaction<'_>,
+    event: &EventEnvelopeV1,
+    evaluation: &Value,
+) -> Result<()> {
+    let evaluation = redact_value(evaluation);
+    let id = evaluation
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .context("contract evaluation id is missing")?;
+    let json = serde_json::to_string(&evaluation)?;
+    transaction.execute(
+        "INSERT INTO contract_evaluations(id, repository_id, task_id, evaluated_at, evaluation_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, evaluated_at=excluded.evaluated_at,
+           evaluation_json=excluded.evaluation_json",
+        params![
+            id,
+            event.repository_id,
+            event.task_id,
+            timestamp(event.occurred_at),
             json
         ],
     )?;

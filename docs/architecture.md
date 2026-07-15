@@ -27,9 +27,11 @@ Codex hooks ──> redaction/caps ──> Unix socket ──> insert-only event
                                                   │
 Codex App Server reconciliation ──────────────────┤
 Git snapshots and diffs ──────────────────────────┤
+Git regression contracts ─────────────────────────┤
                                                   ▼
                                       SQLite deterministic projections
-                                      tasks / sessions / checkpoints / facts / FTS
+                                      tasks / sessions / checkpoints / facts
+                                      contract candidates / evaluations / FTS
                                                   │
                                ┌──────────────────┴──────────────────┐
                                ▼                                     ▼
@@ -39,6 +41,31 @@ Git snapshots and diffs ──────────────────�
 The database runs in WAL mode. Canonical events are insert-only during ingestion. Retention
 and repository purge use maintenance compaction: surviving rows are copied to a new database,
 validated, fsynced, and atomically swapped so deleted evidence cannot return during rebuild.
+
+Approved Regression Contracts are intentionally outside SQLite's source-of-truth boundary. They
+live as one file per contract under `.previously-on/contracts/`, become active from the current
+working tree immediately, and are shared by ordinary Git workflows. Local candidate and readiness
+projections remain canonical-event-backed so rebuild, export, retention, and repository purge are
+deterministic. Purging local repository data never deletes Git-owned contract files.
+
+## Regression contract evaluation
+
+The v1 impact engine compares the merge base with `HEAD` and includes dirty working-tree changes.
+It matches case-sensitive exact or prefix paths, inspects old and new rename paths, and performs
+literal identifier-token matching only in changed hunks. It does not infer dependencies or use a
+model. When symbol inspection cannot be completed safely for a path-matched binary, unreadable, or
+oversized diff, the result is conservatively relevant and carries a warning.
+
+Test freshness binds a successful argv execution to the content fingerprint of the relevant files
+at that time. A later related content change makes the test stale. CLI execution deduplicates the
+tuple `(program, args, workingDirectory)`, enforces a 1–3600 second timeout (900 seconds by
+default), and treats invalid schemas, conflicting active contracts, missing executables, timeouts,
+and nonzero exits as failures.
+
+The PreToolUse hook is advisory and never blocks editing. The Stop hook may issue one continuation
+with the exact required argv when readiness is blocked; persisted evaluation state and Codex's
+`stop_hook_active` flag prevent an automatic loop. GitHub Actions remains the enforcement boundary.
+No dependency graph or automatic new-task transition is part of v1.
 
 ## Session timeline and continuation advice
 

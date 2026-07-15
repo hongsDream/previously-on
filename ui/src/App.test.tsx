@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
@@ -32,7 +32,7 @@ describe('PreviouslyOn review workspace', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Refactor authentication boundary' })).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('Local API unavailable');
+    expect(screen.getByText(/Local API unavailable · read-only sample workspace/)).toBeInTheDocument();
     expect(screen.getAllByText('Authentication boundary will be enforced in middleware layer; handlers will depend on AuthContext interface only.').length).toBeGreaterThan(0);
     expect(screen.getAllByText('864 tokens').length).toBeGreaterThan(0);
   });
@@ -132,8 +132,189 @@ describe('PreviouslyOn review workspace', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'new-repo is connected' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Regression contracts' })).toBeInTheDocument();
+    expect(screen.getByText('Readiness unavailable')).toBeInTheDocument();
     expect(screen.getByText(/ready to capture the next Codex session/)).toBeInTheDocument();
     expect(screen.queryByText(/sample workspace/)).not.toBeInTheDocument();
+  });
+
+  it('creates a manual candidate with camelCase argv fields', async () => {
+    const data = liveWorkspace();
+    data.contractCandidates = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/bootstrap') return { ok: true, json: async () => data };
+      const draft = JSON.parse(String(init?.body));
+      return {
+        ok: true,
+        json: async () => ({
+          candidate: {
+            schemaVersion: 1,
+            id: 'manual-candidate-created',
+            repositoryId: data.repository.path,
+            status: 'pending',
+            origin: {
+              fixedAtCommit: 'abcdef12',
+              recordedAt: '2025-05-20T00:00:00Z',
+              evidenceSha256: '9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c0211e17dab5a23999c',
+            },
+            evidenceKind: 'manual',
+            evidenceSha256: '9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c0211e17dab5a23999c',
+            createdAt: '2025-05-20T00:00:00Z',
+            updatedAt: '2025-05-20T00:00:00Z',
+            ...draft,
+          },
+        }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'New candidate' }));
+    await user.type(screen.getByLabelText('Title'), 'Preserve billing idempotency');
+    await user.type(screen.getByLabelText('Invariant'), 'A webhook event is applied at most once.');
+    await user.type(screen.getByLabelText('Git path'), 'src/billing/');
+    await user.type(screen.getByLabelText('Test name'), 'Billing webhook regression');
+    await user.type(screen.getByLabelText('Program'), 'cargo');
+    fireEvent.change(screen.getByLabelText('Arguments (one per line)'), { target: { value: 'test\nbilling_webhook' } });
+    await user.click(screen.getByRole('button', { name: 'Create candidate' }));
+
+    await waitFor(() => {
+      const mutation = fetchMock.mock.calls.find(([input]) => String(input) === '/api/contract-candidates');
+      expect(mutation?.[1]?.method).toBe('POST');
+      expect(JSON.parse(String(mutation?.[1]?.body))).toMatchObject({
+        title: 'Preserve billing idempotency',
+        invariant: 'A webhook event is applied at most once.',
+        impactSelectors: [{ path: { kind: 'exact', value: 'src/billing/' }, symbols: [] }],
+        requiredTests: [{
+          name: 'Billing webhook regression',
+          program: 'cargo',
+          args: ['test', 'billing_webhook'],
+          workingDirectory: '.',
+          timeoutSeconds: 900,
+        }],
+      });
+    });
+    expect(await screen.findByRole('heading', { name: 'Preserve billing idempotency' })).toBeInTheDocument();
+  });
+
+  it('edits and approves a pending candidate, then supersedes an active contract', async () => {
+    const data = liveWorkspace();
+    const pending = data.contractCandidates[0];
+    const approvedContract = {
+      schemaVersion: 1 as const,
+      id: 'new-auth-contract',
+      title: 'Authentication remains middleware-owned',
+      invariant: pending.invariant,
+      status: 'active' as const,
+      impactSelectors: pending.impactSelectors,
+      requiredTests: pending.requiredTests,
+      origin: {
+        fixedAtCommit: 'abcdef12',
+        recordedAt: '2025-05-20T00:00:00Z',
+        evidenceSha256: '88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936d9c158e',
+      },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') return { ok: true, json: async () => data };
+      if (path.endsWith('/approve')) return { ok: true, json: async () => ({ contract: approvedContract }) };
+      if (path.endsWith('/supersede')) {
+        return { ok: true, json: async () => ({
+          contract: { ...data.contracts[0], status: 'superseded', supersededBy: approvedContract.id },
+        }) };
+      }
+      const draft = JSON.parse(String(init?.body));
+      return { ok: true, json: async () => ({ candidate: { ...pending, ...draft } }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: `Edit ${pending.title}` }));
+    const title = screen.getByLabelText('Title');
+    await user.clear(title);
+    await user.type(title, approvedContract.title);
+    await user.click(screen.getByRole('button', { name: 'Save candidate' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).includes(`/api/contract-candidates/${pending.id}`) && init?.method === 'PATCH')).toBe(true));
+
+    await user.click(await screen.findByRole('button', { name: `Approve ${approvedContract.title}` }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith(`/${pending.id}/approve`))).toBe(true));
+    expect(await screen.findByRole('heading', { name: approvedContract.title })).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText(`Replacement for ${data.contracts[0].title}`), approvedContract.id);
+    await user.click(screen.getByRole('button', { name: `Supersede ${data.contracts[0].title}` }));
+    await waitFor(() => {
+      const mutation = fetchMock.mock.calls.find(([input]) => String(input).endsWith(`/${data.contracts[0].id}/supersede`));
+      expect(JSON.parse(String(mutation?.[1]?.body))).toEqual({ supersededBy: approvedContract.id });
+    });
+    expect(screen.getByText(`Superseded by ${approvedContract.id}`)).toBeInTheDocument();
+  });
+
+  it('shows passed, failed, missing, and stale required test states', async () => {
+    const data = liveWorkspace();
+    data.contractEvaluation!.requiredTests = (['passed', 'failed', 'missing', 'stale'] as const).map((status, index) => ({
+      contractId: data.contracts[0].id,
+      testId: `test-${status}`,
+      name: `Required test ${index + 1}`,
+      program: 'cargo',
+      args: ['test', `test_${status}`],
+      workingDirectory: '.',
+      timeoutSeconds: 900,
+      state: status,
+    }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    render(<App />);
+
+    expect(await screen.findByText('Not ready to complete')).toBeInTheDocument();
+    for (const status of ['passed', 'failed', 'missing', 'stale']) {
+      expect(screen.getAllByText(status).find((item) => item.classList.contains(`test-state-${status}`))).toBeDefined();
+    }
+    expect(screen.getByText('Prefix src/middleware/ matched src/middleware/access.ts')).toBeInTheDocument();
+  });
+
+  it('shows Contract readiness for the selected task instead of the newest repository evaluation', async () => {
+    const data = liveWorkspace();
+    const blocked = structuredClone(data.contractEvaluation!);
+    blocked.taskId = data.tasks[0].id;
+    blocked.readiness = 'contract_blocked';
+    const ready = structuredClone(blocked);
+    ready.id = 'evaluation-tenant-audit';
+    ready.taskId = data.tasks[1].id;
+    ready.readiness = 'ready';
+    ready.requiredTests = ready.requiredTests.map((test) => ({ ...test, state: 'passed' as const }));
+    data.contractEvaluation = blocked;
+    data.contractEvaluations = [blocked, ready];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByText('Not ready to complete')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Add tenant audit trail/ }));
+    expect(await screen.findByText('Ready to complete')).toBeInTheDocument();
+    expect(screen.queryByText('Not ready to complete')).not.toBeInTheDocument();
+  });
+
+  it('rolls back an optimistic candidate edit when the API rejects it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const data = liveWorkspace();
+    const pending = data.contractCandidates[0];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/bootstrap') return { ok: true, json: async () => data };
+      return { ok: false, status: 500, json: async () => ({ error: 'failed' }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: `Edit ${pending.title}` }));
+    const title = screen.getByLabelText('Title');
+    await user.clear(title);
+    await user.type(title, 'Unsafe optimistic title');
+    await user.click(screen.getByRole('button', { name: 'Save candidate' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('PreviouslyOn API is unavailable');
+    await waitFor(() => expect(screen.getByRole('heading', { name: pending.title })).toBeInTheDocument());
   });
 
   it('renders the actual selected context pack and persists explicit replacement relations', async () => {

@@ -3,6 +3,24 @@
 All notable changes are documented here. This project follows Semantic Versioning for published
 interfaces; prerelease compatibility may still change between alpha versions.
 
+## [Unreleased]
+
+### Added
+
+- Git-backed Regression Contracts with strict camelCase schemas, path and literal-symbol impact
+  matching, argv-only required tests, content-fingerprint freshness, and fail-closed validation.
+- Evidence-only automatic candidates plus manual invariant candidates in canonical events and
+  SQLite projections, with local review, approval, and supersede workflows.
+- Public `previously contracts init`, `validate`, and merge-base-aware `check` commands, including
+  a version-pinned macOS GitHub Actions hard gate.
+- Non-blocking PreToolUse contract context and one-shot Stop blocking for missing, stale, or failed
+  required tests.
+
+### Security
+
+- Git Contract files exclude raw prompts, tool output, source code, environment values, and
+  secrets; local candidate and evaluation data remains redacted before persistence.
+
 ## [0.1.0-alpha.1] - 2026-07-13
 
 ### Added

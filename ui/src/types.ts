@@ -3,6 +3,104 @@ export type TemporalStatus = 'unchanged' | 'changed' | 'diverged' | 'broken' | '
 export type FactStatus = 'candidate' | 'confirmed' | 'pinned' | 'invalid' | 'superseded';
 export type TaskStatus = 'active' | 'completed' | 'abandoned';
 export type ContinuationState = 'normal' | 'eligible' | 'suggested';
+export type ContractStatus = 'active' | 'superseded';
+export type ContractReadiness = 'ready' | 'contract_blocked';
+export type RequiredTestStatus = 'passed' | 'failed' | 'missing' | 'stale';
+
+export interface ContractPathSelectorV1 {
+  kind: 'exact' | 'prefix';
+  value: string;
+}
+
+export interface ContractImpactSelectorV1 {
+  path: ContractPathSelectorV1;
+  symbols: string[];
+}
+
+export interface ContractRequiredTestV1 {
+  id: string;
+  name: string;
+  program: string;
+  args: string[];
+  workingDirectory: string;
+  timeoutSeconds: number;
+}
+
+export interface ContractOriginV1 {
+  fixedAtCommit: string;
+  recordedAt: string;
+  evidenceSha256: string;
+}
+
+export interface RegressionContractV1 {
+  schemaVersion: 1;
+  id: string;
+  title: string;
+  invariant: string;
+  status: ContractStatus;
+  supersededBy?: string | null;
+  impactSelectors: ContractImpactSelectorV1[];
+  requiredTests: ContractRequiredTestV1[];
+  origin: ContractOriginV1;
+}
+
+export interface RegressionCandidateV1 {
+  schemaVersion: 1;
+  id: string;
+  repositoryId: string;
+  taskId?: string | null;
+  title: string;
+  invariant: string;
+  status: 'pending' | 'approved' | 'rejected';
+  impactSelectors: ContractImpactSelectorV1[];
+  requiredTests: ContractRequiredTestV1[];
+  origin: ContractOriginV1;
+  evidenceKind: 'failure_edit_pass' | 'test_file_edit_pass' | 'manual';
+  evidenceSha256: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type RegressionCandidateDraftV1 = Pick<
+  RegressionCandidateV1,
+  'title' | 'invariant' | 'impactSelectors' | 'requiredTests'
+>;
+
+export interface RelevantContractV1 {
+  id: string;
+  title: string;
+  invariant: string;
+  matchReasons: string[];
+}
+
+export interface RequiredTestEvaluationV1 {
+  contractId: string;
+  testId: string;
+  name: string;
+  program: string;
+  args: string[];
+  workingDirectory: string;
+  timeoutSeconds: number;
+  state: RequiredTestStatus;
+  detail?: string | null;
+}
+
+export interface ContractEvaluationV1 {
+  schemaVersion: 1;
+  id: string;
+  repositoryId: string;
+  taskId?: string | null;
+  readiness: ContractReadiness;
+  evaluatedAt: string;
+  relevantContracts: RelevantContractV1[];
+  requiredTests: RequiredTestEvaluationV1[];
+  warnings: string[];
+  contentFingerprint: string;
+  continuationIssued: boolean;
+  base?: string | null;
+  head?: string | null;
+  mergeBase?: string | null;
+}
 
 export interface ContextUsage {
   totalTokens: number;
@@ -189,6 +287,10 @@ export interface BootstrapData {
   checkpoints: Checkpoint[];
   facts: Fact[];
   evidence: Evidence[];
+  contracts: RegressionContractV1[];
+  contractCandidates: RegressionCandidateV1[];
+  contractEvaluation: ContractEvaluationV1 | null;
+  contractEvaluations: ContractEvaluationV1[];
   resumeCandidate?: ResumeCandidate;
   contextPacks: Record<string, ContextPack>;
 }

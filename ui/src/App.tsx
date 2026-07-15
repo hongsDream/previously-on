@@ -4,17 +4,23 @@ import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
 import { Sidebar } from './components/Sidebar';
 import { TaskWorkspace } from './components/TaskWorkspace';
+import { RegressionContractsPanel } from './components/RegressionContractsPanel';
 import { fallbackData } from './data/fallback';
 import {
   exportRepository,
   fetchBootstrap,
   ApiUnavailableError,
+  approveContractCandidate,
+  createContractCandidate,
   purgeRepository,
   revalidateFact,
+  supersedeRegressionContract,
+  updateContractCandidate,
   updateFactStatus,
   updateTaskStatus,
 } from './lib/api';
-import type { BootstrapData, Checkpoint, FactStatus, TaskStatus } from './types';
+import type { ContractMutationResponse } from './lib/api';
+import type { BootstrapData, Checkpoint, FactStatus, RegressionCandidateDraftV1, TaskStatus } from './types';
 
 export function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
@@ -37,12 +43,13 @@ export function App() {
     const controller = new AbortController();
     fetchBootstrap(controller.signal)
       .then((bootstrap) => {
-        setData(bootstrap);
-        const task = bootstrap.tasks[0];
+        const normalized = normalizeBootstrap(bootstrap);
+        setData(normalized);
+        const task = normalized.tasks[0];
         const checkpointId = task?.checkpointIds[1] ?? task?.checkpointIds[0] ?? '';
         setSelectedTaskId(task?.id ?? '');
         setSelectedCheckpointId(checkpointId);
-        setSelectedEvidenceId(bootstrap.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? bootstrap.evidence[0]?.id ?? '');
+        setSelectedEvidenceId(normalized.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? normalized.evidence[0]?.id ?? '');
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -120,6 +127,8 @@ export function App() {
         checkpoints: [],
         facts: [],
         evidence: [],
+        contractCandidates: [],
+        contractEvaluation: null,
         resumeCandidate: undefined,
         contextPacks: {},
       } : current);
@@ -127,6 +136,63 @@ export function App() {
       setSelectedCheckpointId('');
       setSelectedEvidenceId('');
     }
+  }
+
+  async function handleCreateContractCandidate(draft: RegressionCandidateDraftV1) {
+    const result = await performMutation(() => createContractCandidate(draft));
+    if (!result) return false;
+    setData((current) => current ? mergeContractMutation(current, result) : current);
+    return true;
+  }
+
+  async function handleUpdateContractCandidate(id: string, draft: RegressionCandidateDraftV1) {
+    const previous = currentData.contractCandidates.find((candidate) => candidate.id === id);
+    setData((current) => current ? {
+      ...current,
+      contractCandidates: current.contractCandidates.map((candidate) => candidate.id === id ? { ...candidate, ...draft } : candidate),
+    } : current);
+    const result = await performMutation(() => updateContractCandidate(id, draft));
+    if (!result) {
+      if (previous) {
+        setData((current) => current ? {
+          ...current,
+          contractCandidates: current.contractCandidates.map((candidate) => candidate.id === id ? previous : candidate),
+        } : current);
+      }
+      return false;
+    }
+    setData((current) => current ? mergeContractMutation(current, result) : current);
+    return true;
+  }
+
+  async function handleApproveContractCandidate(id: string) {
+    const result = await performMutation(() => approveContractCandidate(id));
+    if (!result) return false;
+    setData((current) => current ? mergeContractMutation({
+      ...current,
+      contractCandidates: current.contractCandidates.filter((candidate) => candidate.id !== id),
+    }, result) : current);
+    return true;
+  }
+
+  async function handleSupersedeContract(id: string, supersededBy: string) {
+    const previous = currentData.contracts.find((contract) => contract.id === id);
+    setData((current) => current ? {
+      ...current,
+      contracts: current.contracts.map((contract) => contract.id === id ? { ...contract, status: 'superseded', supersededBy } : contract),
+    } : current);
+    const result = await performMutation(() => supersedeRegressionContract(id, supersededBy));
+    if (!result) {
+      if (previous) {
+        setData((current) => current ? {
+          ...current,
+          contracts: current.contracts.map((contract) => contract.id === id ? previous : contract),
+        } : current);
+      }
+      return false;
+    }
+    setData((current) => current ? mergeContractMutation(current, result) : current);
+    return true;
   }
 
   if (data.tasks.length === 0) {
@@ -151,7 +217,20 @@ export function App() {
             onTaskSelect={() => undefined}
             onEvidenceOpen={() => setMobileInspectorOpen(true)}
           />
-          <EmptyWorkspace repositoryName={data.repository.name} />
+          <main className="repository-empty-workspace">
+            <RegressionContractsPanel
+              contracts={data.contracts}
+              candidates={data.contractCandidates}
+              evaluation={data.contractEvaluation}
+              disabled={offlineFallback}
+              mutationPending={mutationPending}
+              onCreateCandidate={handleCreateContractCandidate}
+              onUpdateCandidate={handleUpdateContractCandidate}
+              onApproveCandidate={handleApproveContractCandidate}
+              onSupersedeContract={handleSupersedeContract}
+            />
+            <EmptyWorkspace repositoryName={data.repository.name} />
+          </main>
         </div>
         <BottomNavigation onEvidenceOpen={() => setMobileInspectorOpen(true)} />
       </div>
@@ -171,6 +250,9 @@ export function App() {
     : undefined;
   const selectedFact = data.facts.find((fact) => fact.id === selectedEvidence?.factId) ?? data.facts[0];
   const resumeCandidate = data.resumeCandidate?.taskId === selectedTask.id ? data.resumeCandidate : undefined;
+  const selectedContractEvaluation = data.contractEvaluations.find(
+    (evaluation) => evaluation.taskId === selectedTask.id,
+  ) ?? (data.contractEvaluation?.taskId === selectedTask.id ? data.contractEvaluation : null);
 
   const selectTask = (taskId: string) => {
     const task = data.tasks.find((item) => item.id === taskId);
@@ -283,12 +365,20 @@ export function App() {
           selectedCheckpoint={selectedCheckpoint}
           resumeCandidate={resumeCandidate}
           contextPack={data.contextPacks[selectedTask.id]}
+          contracts={data.contracts}
+          contractCandidates={data.contractCandidates}
+          contractEvaluation={selectedContractEvaluation}
           contextPackExpanded={contextPackExpanded}
           onCheckpointSelect={selectCheckpoint}
           onReviewResume={reviewCandidate}
           onDismissResume={dismissCandidate}
           onToggleContextPack={() => setContextPackExpanded((expanded) => !expanded)}
           onTaskStatusChange={(nextStatus) => void handleTaskStatus(nextStatus)}
+          onCreateContractCandidate={handleCreateContractCandidate}
+          onUpdateContractCandidate={handleUpdateContractCandidate}
+          onApproveContractCandidate={handleApproveContractCandidate}
+          onSupersedeContract={handleSupersedeContract}
+          contractMutationsDisabled={offlineFallback}
           mutationPending={mutationPending}
           onBack={() => document.getElementById('task-search')?.focus()}
         />
@@ -333,7 +423,7 @@ function LoadingScreen() {
 
 function EmptyWorkspace({ repositoryName }: { repositoryName: string }) {
   return (
-    <main className="repository-empty-state">
+    <section className="repository-empty-state">
       <span className="empty-lineage-mark" aria-hidden="true" />
       <h1>{repositoryName} is connected</h1>
       <p>PreviouslyOn is ready to capture the next Codex session. Start a task in this repository, then return here to review its first verified checkpoint.</p>
@@ -342,6 +432,40 @@ function EmptyWorkspace({ repositoryName }: { repositoryName: string }) {
         <li><strong>Finish the session</strong><span>A local checkpoint is created from captured events and Git state.</span></li>
         <li><strong>Review evidence</strong><span>Confirm facts before they can enter a context pack.</span></li>
       </ol>
-    </main>
+    </section>
   );
+}
+
+function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
+  return {
+    ...bootstrap,
+    contracts: bootstrap.contracts ?? [],
+    contractCandidates: bootstrap.contractCandidates ?? [],
+    contractEvaluation: bootstrap.contractEvaluation ?? null,
+    contractEvaluations: bootstrap.contractEvaluations ?? [],
+  };
+}
+
+function mergeContractMutation(current: BootstrapData, response: ContractMutationResponse): BootstrapData {
+  let contracts = response.contracts ?? current.contracts;
+  let contractCandidates = response.contractCandidates ?? current.contractCandidates;
+  if (!response.contracts && response.contract) {
+    const exists = contracts.some((contract) => contract.id === response.contract?.id);
+    contracts = exists
+      ? contracts.map((contract) => contract.id === response.contract?.id ? response.contract! : contract)
+      : [...contracts, response.contract];
+  }
+  if (!response.contractCandidates && response.candidate) {
+    const exists = contractCandidates.some((candidate) => candidate.id === response.candidate?.id);
+    contractCandidates = exists
+      ? contractCandidates.map((candidate) => candidate.id === response.candidate?.id ? response.candidate! : candidate)
+      : [...contractCandidates, response.candidate];
+  }
+  return {
+    ...current,
+    contracts,
+    contractCandidates,
+    contractEvaluation: response.contractEvaluation === undefined ? current.contractEvaluation : response.contractEvaluation,
+    contractEvaluations: current.contractEvaluations,
+  };
 }

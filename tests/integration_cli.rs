@@ -1,5 +1,7 @@
 use clap::Parser;
-use previously_on::config::{Cli, Commands, ImportTarget, RunTarget, SetupTarget, UninstallTarget};
+use previously_on::config::{
+    Cli, Commands, ContractsTarget, ImportTarget, RunTarget, SetupTarget, UninstallTarget,
+};
 
 #[test]
 fn parses_public_cli_surface() {
@@ -53,6 +55,28 @@ fn parses_public_cli_surface() {
             target: RunTarget::Codex { codex_args, .. }
         } if codex_args == ["--model", "gpt-test"]
     ));
+    let contracts = Cli::try_parse_from([
+        "previously",
+        "contracts",
+        "check",
+        "--base",
+        "origin/main",
+        "--execute",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        contracts.command,
+        Commands::Contracts {
+            target: ContractsTarget::Check {
+                base,
+                execute: true,
+                json: true,
+            }
+        } if base == "origin/main"
+    ));
+    Cli::try_parse_from(["previously", "contracts", "init", "--github-actions"]).unwrap();
+    Cli::try_parse_from(["previously", "contracts", "validate"]).unwrap();
 }
 
 #[test]
@@ -138,4 +162,137 @@ exit 42
         .unwrap();
     assert_eq!(recorded_cwd, repo.canonicalize().unwrap());
     assert_eq!(lines.collect::<Vec<_>>(), ["--model", "gpt-test"]);
+}
+
+#[test]
+fn contracts_check_json_reports_plan_blocking_with_a_nonzero_exit() {
+    use assert_cmd::cargo::cargo_bin_cmd;
+    use predicates::prelude::PredicateBooleanExt;
+    use predicates::str::contains;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap()
+        .success());
+    for args in [
+        ["config", "user.email", "cli@example.test"],
+        ["config", "user.name", "CLI Contracts"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "fn protected() {}\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(temp.path())
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["commit", "-qm", "base"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap()
+        .success());
+    let base = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    let base = String::from_utf8(base.stdout).unwrap().trim().to_string();
+    let id = uuid::Uuid::new_v4().to_string();
+    let directory = temp.path().join(".previously-on/contracts");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join(format!("{id}.json")),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": 1,
+            "id": id.clone(),
+            "title": "Protect CLI",
+            "invariant": "protected stays correct",
+            "status": "active",
+            "supersededBy": null,
+            "impactSelectors": [{
+                "path": {"kind": "exact", "value": "src/lib.rs"},
+                "symbols": []
+            }],
+            "requiredTests": [{
+                "id": "cli-test",
+                "name": "CLI test",
+                "program": "git",
+                "args": ["status", "--porcelain"],
+                "workingDirectory": ".",
+                "timeoutSeconds": 60
+            }],
+            "origin": {
+                "fixedAtCommit": base.clone(),
+                "recordedAt": chrono::Utc::now(),
+                "evidenceSha256": "b".repeat(64)
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        "fn protected_changed() {}\n",
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("previously")
+        .current_dir(temp.path())
+        .args(["contracts", "check", "--base", &base, "--json"])
+        .assert()
+        .failure()
+        .stdout(
+            contains("\"readiness\": \"contract_blocked\"").and(contains("\"program\": \"git\"")),
+        );
+
+    cargo_bin_cmd!("previously")
+        .current_dir(temp.path())
+        .args(["contracts", "check", "--base", &base, "--execute", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"readiness\": \"ready\"").and(contains("\"state\": \"passed\"")));
+
+    let contract_path = directory.join(format!("{id}.json"));
+    let mut invalid: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&contract_path).unwrap()).unwrap();
+    invalid["schemaVersion"] = serde_json::json!(2);
+    std::fs::write(&contract_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
+    cargo_bin_cmd!("previously")
+        .current_dir(temp.path())
+        .args(["contracts", "check", "--base", &base, "--json"])
+        .assert()
+        .failure()
+        .stdout(
+            contains("\"readiness\": \"contract_blocked\"")
+                .and(contains("unsupported schemaVersion 2")),
+        );
+
+    let raw_secret = "cli-secret-value-must-not-escape";
+    invalid["schemaVersion"] = serde_json::json!(1);
+    invalid["requiredTests"][0]["args"] = serde_json::json!(["--api-key", raw_secret]);
+    std::fs::write(&contract_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
+    cargo_bin_cmd!("previously")
+        .current_dir(temp.path())
+        .args(["contracts", "validate"])
+        .assert()
+        .failure()
+        .stderr(contains("contains sensitive data").and(contains(raw_secret).not()));
+    cargo_bin_cmd!("previously")
+        .current_dir(temp.path())
+        .args(["contracts", "check", "--base", &base, "--json"])
+        .assert()
+        .failure()
+        .stdout(contains("\"readiness\": \"contract_blocked\"").and(contains(raw_secret).not()));
 }
