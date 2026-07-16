@@ -9,10 +9,20 @@ interface AppHeaderProps {
   onExport: () => void;
   onPurge: () => void;
   actionsDisabled?: boolean;
+  previewDisabled?: boolean;
 }
 
-export function AppHeader({ repository, onPreview, onExport, onPurge, actionsDisabled = false }: AppHeaderProps) {
+const repositoryStateCopy: Record<BootstrapData['repository']['state'], string> = {
+  unregistered: 'Not registered',
+  'registered-empty': 'Registered · awaiting first checkpoint',
+  active: 'Active',
+  degraded: 'Degraded',
+};
+
+export function AppHeader({ repository, onPreview, onExport, onPurge, actionsDisabled = false, previewDisabled = false }: AppHeaderProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const isUnregistered = repository.state === 'unregistered';
+  const stateCopy = repositoryStateCopy[repository.state];
 
   return (
     <header className="app-header">
@@ -27,31 +37,31 @@ export function AppHeader({ repository, onPreview, onExport, onPurge, actionsDis
 
       <div className="connection-strip" aria-label="Repository connection">
         <Headphones size={15} />
-        <span>{repository.connected ? 'Connected' : 'Disconnected'}</span>
+        <span>{stateCopy}</span>
         <span className={`health-dot health-${repository.captureHealth}`} aria-hidden="true" />
-        <span className="repo-path">{repository.path}</span>
-        <span className="repo-branch"><GitBranch size={13} /> {repository.branch}</span>
+        {isUnregistered ? null : <span className="repo-path">{repository.path}</span>}
+        {isUnregistered ? null : <span className="repo-branch"><GitBranch size={13} /> {repository.branch}</span>}
       </div>
 
       <button className="mobile-repository" type="button" disabled>
         <span className="github-disc" aria-hidden="true">GH</span>
-        <span>{repository.name}</span>
+        <span>{isUnregistered ? 'No repository' : repository.name}</span>
         <ChevronDown size={17} />
       </button>
-      <button className="mobile-capture-health" type="button" disabled aria-label={`Capture health: ${repository.captureHealth}`}>
+      <button className="mobile-capture-health" type="button" disabled aria-label={`Repository state: ${stateCopy}`}>
         <i className={`health-dot health-${repository.captureHealth}`} />
-        <span>{repository.captureHealth === 'good' ? 'Healthy' : repository.captureHealth}</span>
+        <span>{stateCopy}</span>
         <ChevronRight size={15} />
       </button>
 
       <div className="header-actions">
-        <button className="capture-health" type="button" disabled aria-label={`Capture health: ${repository.captureHealth}`}>
-          <span>Capture health</span>
+        <button className="capture-health" type="button" disabled aria-label={`Repository state: ${stateCopy}`}>
+          <span>Repository state</span>
           <i className={`health-dot health-${repository.captureHealth}`} />
-          <strong>{repository.captureHealth === 'good' ? 'Good' : repository.captureHealth}</strong>
+          <strong>{stateCopy}</strong>
           <ChevronRight size={15} />
         </button>
-        <button className="primary-button preview-button" type="button" onClick={onPreview}>
+        <button className="primary-button preview-button" type="button" disabled={previewDisabled} onClick={onPreview}>
           <Box size={15} />
           Preview context pack
         </button>

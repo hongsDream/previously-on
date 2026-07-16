@@ -560,7 +560,7 @@ describe('PreviouslyOn review workspace', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        repository: { name: 'new-repo', path: '/tmp/new-repo', branch: 'main', connected: true, captureHealth: 'good' },
+        repository: { name: 'new-repo', path: '/tmp/new-repo', branch: 'main', connected: true, state: 'registered-empty', captureHealth: 'good' },
         tasks: [],
         checkpoints: [],
         facts: [],
@@ -569,6 +569,7 @@ describe('PreviouslyOn review workspace', () => {
       }),
     }));
 
+    const user = userEvent.setup();
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'new-repo is connected' })).toBeInTheDocument();
@@ -576,6 +577,87 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getByText('Readiness unavailable')).toBeInTheDocument();
     expect(screen.getByText(/ready to capture the next Codex session/)).toBeInTheDocument();
     expect(screen.queryByText(/sample workspace/)).not.toBeInTheDocument();
+
+    const settings = screen.getAllByRole('button', { name: 'Settings' });
+    await user.click(settings.at(-1)!);
+    expect(screen.getByRole('main', { name: 'Settings' })).toBeInTheDocument();
+    const tasks = screen.getAllByRole('button', { name: 'Tasks' });
+    await user.click(tasks.at(-1)!);
+    expect(screen.getByRole('heading', { name: 'new-repo is connected' })).toBeInTheDocument();
+  });
+
+  it('shows copyable first-run steps without executing commands and disables repository actions', async () => {
+    const data = liveWorkspace();
+    data.repository = {
+      name: 'No repository',
+      path: '',
+      branch: 'detached',
+      connected: false,
+      state: 'unregistered',
+      captureHealth: 'offline',
+    };
+    data.tasks = [];
+    data.checkpoints = [];
+    data.facts = [];
+    data.evidence = [];
+    data.sessions = [];
+    data.contracts = [];
+    data.contractCandidates = [];
+    data.contractEvaluation = null;
+    data.contractEvaluations = [];
+    data.contextPacks = {};
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => data });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Connect your first repository' })).toBeInTheDocument();
+    expect(screen.getAllByText('Not registered').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Connected')).not.toBeInTheDocument();
+    expect(screen.queryByText('Ready to complete')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview context pack' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'New candidate' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'More options' }));
+    expect(screen.getByRole('menuitem', { name: 'Export JSON' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: 'Delete repository data' })).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Repository path'), '/tmp/My Repo');
+    const copyAll = screen.getByRole('button', { name: 'Copy all steps' });
+    copyAll.focus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith([
+      "previously setup codex --repo '/tmp/My Repo'",
+      'previously doctor',
+      'Restart Codex',
+      "previously run codex --repo '/tmp/My Repo' --",
+    ].join('\n')));
+    expect(screen.getByRole('button', { name: 'Copied all' })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['active', 'good', false],
+    ['degraded', 'degraded', true],
+  ] as const)('renders the explicit %s repository state', async (state, captureHealth, showsWarning) => {
+    const data = liveWorkspace();
+    data.repository.state = state;
+    data.repository.captureHealth = captureHealth;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+
+    render(<App />);
+
+    expect((await screen.findAllByRole('button', { name: `Repository state: ${state === 'active' ? 'Active' : 'Degraded'}` })).length).toBeGreaterThan(0);
+    if (showsWarning) {
+      expect(screen.getByText(/Capture degraded · review missing evidence/)).toBeInTheDocument();
+    } else {
+      expect(screen.queryByText(/Capture degraded · review missing evidence/)).not.toBeInTheDocument();
+    }
+    expect(screen.getByText('Local device')).toBeInTheDocument();
+    expect(screen.getByText('· No cloud account')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('jdoe');
   });
 
   it('creates a manual candidate with camelCase argv fields', async () => {

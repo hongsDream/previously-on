@@ -11,6 +11,7 @@ export const fallbackData: BootstrapData = {
     path: '~/Projects/acme-app',
     branch: 'main',
     connected: true,
+    state: 'active',
     captureHealth: 'good',
   },
   tasks: [

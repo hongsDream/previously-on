@@ -190,7 +190,12 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         .store
         .list_repositories()
         .map_err(ApiError::internal)?;
-    let repository = repositories.first();
+    let configured_repository = if repositories.is_empty() {
+        setup_manifest_repository(&state)
+    } else {
+        None
+    };
+    let repository = repositories.first().or(configured_repository.as_ref());
     let contracts = repository
         .filter(|repository| std::path::Path::new(&repository.path).exists())
         .map(|repository| crate::contracts::load_contracts(&repository.path))
@@ -208,12 +213,13 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     let contract_evaluation = contract_evaluations
         .first()
         .cloned()
-        .unwrap_or_else(|| empty_contract_evaluation(repository.map(|item| item.id.as_str())));
+        .or_else(|| repository.map(|item| empty_contract_evaluation(Some(&item.id))));
     let task_grouping_operations = state
         .store
         .list_task_grouping_operations(repository.map(|item| item.id.as_str()))
         .map_err(ApiError::internal)?;
-    let graph_summary = repository
+    let graph_summary = repositories
+        .first()
         .map(|repository| {
             crate::graph::derive_relationship_graph(&state.store, &repository.id, None, &contracts)
                 .map(|graph| crate::graph::compact_summary(&graph))
@@ -263,7 +269,8 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     let mut session_values = Vec::new();
     let mut task_values = Vec::new();
     let mut context_packs = serde_json::Map::new();
-    let mut capture_degraded = false;
+    let mut capture_degraded =
+        repository.is_some_and(|item| !std::path::Path::new(&item.path).is_dir());
 
     for task in &tasks {
         let task_events = state
@@ -751,6 +758,15 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     }
 
     let current_task = tasks.first();
+    let repository_state = if repository.is_none() {
+        "unregistered"
+    } else if capture_degraded {
+        "degraded"
+    } else if checkpoint_values.is_empty() {
+        "registered-empty"
+    } else {
+        "active"
+    };
     let repository_json = json!({
         "name": repository
             .and_then(|repo| std::path::Path::new(&repo.path).file_name())
@@ -759,12 +775,11 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "path": repository.map(|repo| repo.path.clone()).unwrap_or_default(),
         "branch": current_task.and_then(|task| task.branch.clone()).unwrap_or_else(|| "detached".to_string()),
         "connected": repository.is_some(),
-        "captureHealth": if repository.is_none() {
-            "offline"
-        } else if capture_degraded || checkpoint_values.is_empty() {
-            "degraded"
-        } else {
-            "good"
+        "state": repository_state,
+        "captureHealth": match repository_state {
+            "unregistered" => "offline",
+            "degraded" => "degraded",
+            _ => "good",
         }
     });
 
@@ -792,6 +807,25 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "contextPacks": context_packs
     });
     Ok(Json(redact_value(&payload)))
+}
+
+fn setup_manifest_repository(state: &AppState) -> Option<crate::domain::RepositoryV1> {
+    let manifest = crate::setup::read_manifest(&state.data_dir.join("setup-manifest.json")).ok()?;
+    let path = manifest.repository.to_string_lossy().into_owned();
+    let id = crate::git::repository_identity(&manifest.repository)
+        .map(|identity| identity.id)
+        .unwrap_or_else(|_| path.clone());
+    let installed_at = chrono::DateTime::parse_from_rfc3339(&manifest.installed_at)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    Some(crate::domain::RepositoryV1 {
+        schema_version: crate::domain::SCHEMA_VERSION_V1,
+        id,
+        path,
+        remote_url: None,
+        created_at: installed_at,
+        updated_at: installed_at,
+    })
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -2009,6 +2043,24 @@ mod tests {
             response.status(),
             StatusCode::OK | StatusCode::NOT_FOUND
         ));
+    }
+
+    #[tokio::test]
+    async fn unregistered_bootstrap_is_explicit_and_has_no_contract_evaluation() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState {
+            store: Store::open(temp.path().join("previously.sqlite3")).unwrap(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+
+        let Json(payload) = bootstrap(State(state), authorized_headers()).await.unwrap();
+
+        assert_eq!(payload["repository"]["state"], "unregistered");
+        assert_eq!(payload["repository"]["connected"], false);
+        assert_eq!(payload["repository"]["captureHealth"], "offline");
+        assert!(payload["contractEvaluation"].is_null());
+        assert_eq!(payload["tasks"], json!([]));
     }
 
     #[test]
