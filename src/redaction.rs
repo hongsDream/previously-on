@@ -57,13 +57,13 @@ static AUTHORIZATION: Lazy<Regex> = Lazy::new(|| {
 });
 static ASSIGNMENT: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?im)\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|secret[_-]?(?:key|access[_-]?key)|private[_-]?key|session[_-]?token|npm[_-]?token|token))\b(\s*(?:=|:)\s*)('[^'\r\n]*'|"[^"\r\n]*"|[^\s,;\r\n}]+)"#,
+        r#"(?im)\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|auth(?:orization)?|password|passwd|client[_-]?secret|secret[_-]?(?:key|access[_-]?key)|private[_-]?key|session[_-]?token|npm[_-]?token|token|cookie|credentials?|database[_-]?url|connection[_-]?(?:string|url)|dsn))\b(\s*(?:=|:)\s*)('[^'\r\n]*'|"[^"\r\n]*"|[^\s,;\r\n}]+)"#,
     )
     .expect("assignment regex")
 });
 static CLI_SECRET_FLAG: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?im)(--(?:[a-z0-9]+[-_])*(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|password|passwd|client[-_]?secret|secret(?:[-_]?(?:key|access[-_]?key))?|private[-_]?key|session[-_]?token|npm[-_]?token|token)(?:\s*=\s*|\s+))('[^'\r\n]*'|"[^"\r\n]*"|[^\s,;\r\n}]+)"#,
+        r#"(?im)(--(?:[a-z0-9]+[-_])*(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|auth(?:orization)?|password|passwd|client[-_]?secret|secret(?:[-_]?(?:key|access[-_]?key))?|private[-_]?key|session[-_]?token|npm[-_]?token|token|cookie|credentials?|database[-_]?url|connection[-_]?(?:string|url)|dsn)(?:\s*=\s*|\s+))('[^'\r\n]*'|"[^"\r\n]*"|[^\s,;\r\n}]+)"#,
     )
     .expect("CLI secret flag regex")
 });
@@ -170,6 +170,7 @@ fn is_sensitive_key(key: &str) -> bool {
     matches!(
         normalized.as_str(),
         "authorization"
+            | "auth"
             | "cookie"
             | "setcookie"
             | "credential"
@@ -178,8 +179,13 @@ fn is_sensitive_key(key: &str) -> bool {
             | "passwd"
             | "privatekey"
             | "token"
+            | "databaseurl"
+            | "connectionstring"
+            | "connectionurl"
+            | "dsn"
     ) || [
         "token",
+        "auth",
         "cookie",
         "credential",
         "credentials",

@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-use std::fs;
-use std::io::Read;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, ExitCode, Stdio};
@@ -652,17 +652,28 @@ async fn import_codex_threads(config: &AppConfig, repo: &Path) -> Result<()> {
 }
 
 fn queue_line_count(path: &Path) -> Result<usize> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
+    match crate::store::read_private_file(path, "fallback queue")? {
+        Some(bytes) => {
+            let contents = String::from_utf8(bytes).context("fallback queue is not UTF-8")?;
+            Ok(contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count())
+        }
+        None => Ok(0),
     }
 }
 
 pub(crate) fn purge_queue(path: &Path, repository_id: &str) -> Result<()> {
+    let parent = path.parent().context("queue path has no parent")?;
+    match fs::symlink_metadata(parent) {
+        Ok(_) => crate::store::validate_private_directory(parent, "fallback queue directory")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    if !crate::store::validate_private_regular_file(path, "fallback queue")? {
+        return Ok(());
+    }
     if path
         .file_name()
         .and_then(|name| name.to_str())
@@ -679,10 +690,9 @@ pub(crate) fn purge_queue(path: &Path, repository_id: &str) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let contents = match crate::store::read_private_file(path, "fallback queue")? {
+        Some(bytes) => String::from_utf8(bytes).context("fallback queue is not UTF-8")?,
+        None => return Ok(()),
     };
     let mut kept_lines = Vec::new();
     for (index, line) in contents.lines().enumerate() {
@@ -707,13 +717,13 @@ pub(crate) fn purge_queue(path: &Path, repository_id: &str) -> Result<()> {
         format!("{kept}\n")
     };
     let temporary = path.with_extension(format!("purge-{}.tmp", uuid::Uuid::now_v7()));
-    fs::write(&temporary, replacement)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-    }
-    fs::File::open(&temporary)?.sync_all()?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    let mut file =
+        crate::store::open_private_file(&temporary, "temporary fallback queue", &mut options)?;
+    file.write_all(replacement.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(&temporary, path)?;
     if let Some(parent) = path.parent() {
         fs::File::open(parent)?.sync_all()?;

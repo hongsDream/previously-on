@@ -281,15 +281,28 @@ async fn agent_lineage_paginates_skips_cross_repo_and_replays_new_observations()
     let second_page = json!({
         "data": [
             summary("thread-orphan", "session-orphan", &repository, "subAgentReview", Some("thread-missing"), 103),
-            summary("thread-foreign", "session-foreign", &foreign, "subAgentOther", None, 104)
+            summary("thread-foreign", "session-foreign", &foreign, "subAgentOther", None, 104),
+            summary("thread-mismatch", "session-mismatch", &repository, "subAgent", None, 105),
+            summary("thread-cross-read", "session-cross-read", &repository, "subAgent", None, 106),
+            summary("thread-unavailable", "session-unavailable", &repository, "subAgentOther", None, 107)
         ],
         "nextCursor": null
     });
-    let read_response = |id: &str| {
+    let read_response = |id: &str, cwd: &std::path::Path| {
         json!({"thread": {
             "id": id,
+            "cwd": cwd,
             "status": {"type":"idle"},
-            "turns": [{"items":[{"type":"agentMessage","text":format!("summary {id}")}]}]
+            "turns": [{"items":[
+                {"type":"agentMessage","text":format!("summary {id}")},
+                {"type":"fileChange","changes":[
+                    {"path":"src/lib.rs"},
+                    {"path":"../escape.rs"},
+                    {"path":"/tmp/absolute.rs"},
+                    {"path":".env.production"},
+                    {"path":"config/credentials.json"}
+                ]}
+            ]}]
         }})
     };
     let script = format!(
@@ -314,12 +327,23 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{read_child}}}'
 IFS= read -r read_orphan
 case "$read_orphan" in *'"threadId":"thread-orphan"'*) ;; *) exit 16 ;; esac
 printf '%s\n' '{{"jsonrpc":"2.0","id":6,"result":{read_orphan}}}'
+IFS= read -r read_mismatch
+case "$read_mismatch" in *'"threadId":"thread-mismatch"'*) ;; *) exit 17 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":7,"result":{read_mismatch}}}'
+IFS= read -r read_cross
+case "$read_cross" in *'"threadId":"thread-cross-read"'*) ;; *) exit 18 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":8,"result":{read_cross}}}'
+IFS= read -r read_unavailable
+case "$read_unavailable" in *'"threadId":"thread-unavailable"'*) ;; *) exit 19 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":9,"error":{{"code":-32004,"message":"thread unavailable"}}}}'
 "#,
         first_page = first_page,
         second_page = second_page,
-        read_parent = read_response("thread-parent"),
-        read_child = read_response("thread-child"),
-        read_orphan = read_response("thread-orphan"),
+        read_parent = read_response("thread-parent", &repository),
+        read_child = read_response("thread-child", &repository),
+        read_orphan = read_response("thread-orphan", &repository),
+        read_mismatch = read_response("wrong-thread", &repository),
+        read_cross = read_response("thread-cross-read", &foreign),
     );
     let (_fake_temp, fake) = fake_codex(&script);
     let mut client = AppServerClient::connect_with_program_experimental(&fake)
@@ -330,10 +354,31 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":6,"result":{read_orphan}}}'
         .unwrap();
     client.shutdown().await.unwrap();
 
-    assert_eq!(agents.len(), 3);
+    assert_eq!(agents.len(), 4);
     assert!(!agents
         .iter()
         .any(|agent| agent.thread_id == "thread-foreign"));
+    assert!(!agents
+        .iter()
+        .any(|agent| agent.thread_id == "thread-mismatch"));
+    assert!(!agents
+        .iter()
+        .any(|agent| agent.thread_id == "thread-cross-read"));
+    let unavailable = agents
+        .iter()
+        .find(|agent| agent.thread_id == "thread-unavailable")
+        .unwrap();
+    assert_eq!(
+        unavailable.association_state,
+        AgentAssociationStateV1::Degraded
+    );
+    assert_eq!(
+        unavailable.degraded_reason.as_deref(),
+        Some("thread/read unavailable; summary-only observation")
+    );
+    assert!(unavailable.output_summary.is_none());
+    assert!(unavailable.files.is_empty());
+    assert!(unavailable.tests.is_empty());
     let parent = agents
         .iter()
         .find(|agent| agent.thread_id == "thread-parent")
@@ -351,6 +396,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":6,"result":{read_orphan}}}'
     assert_eq!(child.parent_thread_id.as_deref(), Some("thread-parent"));
     assert_eq!(orphan.task_id, None);
     assert_eq!(orphan.association_state, AgentAssociationStateV1::Unlinked);
+    assert!(agents
+        .iter()
+        .filter(|agent| agent.thread_id != "thread-unavailable")
+        .all(|agent| agent.files == ["src/lib.rs".to_string()]));
 
     let mut updated_parent = parent.clone();
     updated_parent.status = "completed".into();

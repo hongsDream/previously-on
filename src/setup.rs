@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -136,6 +136,12 @@ pub fn install_codex_with_options(
         );
     }
 
+    let data_dir_exists =
+        validate_optional_trusted_private_directory(&paths.data_dir, "setup data directory")?;
+    if data_dir_exists {
+        let _ = recover_setup_journal(paths)?;
+    }
+
     // Validate an existing ownership record before creating directories, backups, reserve files,
     // or replaying a recovery journal. A malformed/unsupported/foreign manifest must be a strict
     // no-op rather than being silently treated as a first install.
@@ -155,12 +161,11 @@ pub fn install_codex_with_options(
     )?;
     let repository_identity = crate::git::repository_identity(&repository).ok();
 
+    ensure_trusted_data_dir(&paths.data_dir)?;
     fs::create_dir_all(&paths.codex_home)
         .with_context(|| format!("create Codex home directory {}", paths.codex_home.display()))?;
-    fs::create_dir_all(paths.backup_dir())
-        .with_context(|| format!("create backup directory {}", paths.backup_dir().display()))?;
+    ensure_trusted_private_directory(&paths.backup_dir(), "setup backup directory")?;
     crate::hook::ensure_reserve_file(&paths.data_dir.join("queue/events.jsonl"))?;
-    let _ = recover_setup_journal(paths)?;
     let existing_manifest = read_optional_manifest(&paths.manifest_path())?;
     if let Some(manifest) = existing_manifest.as_ref() {
         validate_manifest_for_install(manifest, paths, &repository)?;
@@ -265,7 +270,7 @@ pub fn uninstall_codex(paths: &SetupPaths) -> Result<bool> {
 }
 
 pub fn uninstall_codex_detailed(paths: &SetupPaths) -> Result<UninstallResult> {
-    fs::create_dir_all(&paths.data_dir)?;
+    ensure_trusted_data_dir(&paths.data_dir)?;
     let recovered_operation = recover_setup_journal(paths)?;
     let manifest = match read_manifest(&paths.manifest_path()) {
         Ok(manifest) => manifest,
@@ -282,11 +287,13 @@ pub fn uninstall_codex_detailed(paths: &SetupPaths) -> Result<UninstallResult> {
         }
         Err(error) => return Err(error),
     };
+    validate_manifest_for_uninstall(&manifest, paths)?;
 
     let mut warnings = Vec::new();
     let hooks_desired = uninstall_target_bytes(
         &paths.hooks_path(),
         &manifest.hooks_backup,
+        &paths.backup_dir(),
         &manifest.installed_hooks_sha256,
         || {
             Ok(serde_json::to_vec_pretty(&remove_managed_hooks(
@@ -299,6 +306,7 @@ pub fn uninstall_codex_detailed(paths: &SetupPaths) -> Result<UninstallResult> {
     let config_desired = uninstall_target_bytes(
         &paths.config_path(),
         &manifest.config_backup,
+        &paths.backup_dir(),
         &manifest.installed_config_sha256,
         || {
             let source = fs::read_to_string(paths.config_path())?;
@@ -311,7 +319,7 @@ pub fn uninstall_codex_detailed(paths: &SetupPaths) -> Result<UninstallResult> {
         &mut warnings,
         "config.toml",
     )?;
-    let manifest_bytes = fs::read(paths.manifest_path())?;
+    let manifest_bytes = read_trusted_private_file(&paths.manifest_path(), "setup manifest")?;
     let archived_manifest = paths.data_dir.join(format!(
         "setup-manifest.uninstalled-{}-{}.json",
         Utc::now().timestamp(),
@@ -344,8 +352,8 @@ pub fn uninstall_codex_detailed(paths: &SetupPaths) -> Result<UninstallResult> {
 }
 
 pub fn read_manifest(path: &Path) -> Result<SetupManifestV1> {
-    let bytes =
-        fs::read(path).with_context(|| format!("read setup manifest {}", path.display()))?;
+    let bytes = read_trusted_private_file(path, "setup manifest")
+        .with_context(|| format!("read setup manifest {}", path.display()))?;
     let manifest: SetupManifestV1 = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse setup manifest {}", path.display()))?;
     ensure_manifest_matches(&manifest)?;
@@ -362,14 +370,14 @@ pub fn ai_refresh_profile_matches(paths: &SetupPaths, manifest: &SetupManifestV1
 }
 
 fn read_optional_manifest(path: &Path) -> Result<Option<SetupManifestV1>> {
-    match fs::read(path) {
-        Ok(bytes) => {
+    match read_optional_trusted_private_file(path, "setup manifest") {
+        Ok(Some(bytes)) => {
             let manifest: SetupManifestV1 = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse setup manifest {}", path.display()))?;
             ensure_manifest_matches(&manifest)?;
             Ok(Some(manifest))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(None) => Ok(None),
         Err(error) => Err(error).with_context(|| format!("read setup manifest {}", path.display())),
     }
 }
@@ -391,18 +399,21 @@ fn journal_target(path: &Path, desired_bytes: Option<Vec<u8>>) -> Result<SetupJo
 }
 
 fn persist_and_apply_journal(paths: &SetupPaths, journal: &SetupJournalV1) -> Result<()> {
+    validate_setup_journal(paths, journal)?;
     let bytes = serde_json::to_vec_pretty(journal)?;
     write_private_atomic(&paths.journal_path(), &bytes)?;
-    apply_setup_journal(journal)?;
+    apply_setup_journal(paths, journal)?;
     remove_private_file_durable(&paths.journal_path())?;
     Ok(())
 }
 
 fn recover_setup_journal(paths: &SetupPaths) -> Result<Option<SetupJournalOperation>> {
-    let bytes = match fs::read(paths.journal_path()) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let bytes = match read_optional_trusted_private_file(
+        &paths.journal_path(),
+        "setup recovery journal",
+    )? {
+        Some(bytes) => bytes,
+        None => return Ok(None),
     };
     let journal: SetupJournalV1 = serde_json::from_slice(&bytes).with_context(|| {
         format!(
@@ -413,12 +424,113 @@ fn recover_setup_journal(paths: &SetupPaths) -> Result<Option<SetupJournalOperat
     if journal.version != JOURNAL_VERSION || journal.managed_id != MANAGED_ID {
         bail!("unsupported or foreign setup recovery journal");
     }
-    apply_setup_journal(&journal)?;
+    validate_setup_journal(paths, &journal)?;
+    apply_setup_journal(paths, &journal)?;
     remove_private_file_durable(&paths.journal_path())?;
     Ok(Some(journal.operation))
 }
 
-fn apply_setup_journal(journal: &SetupJournalV1) -> Result<()> {
+fn validate_setup_journal(paths: &SetupPaths, journal: &SetupJournalV1) -> Result<()> {
+    if journal.version != JOURNAL_VERSION || journal.managed_id != MANAGED_ID {
+        bail!("unsupported or foreign setup recovery journal");
+    }
+
+    for target in &journal.targets {
+        match (target.original_existed, target.original_sha256.as_deref()) {
+            (true, Some(hash)) if hash == digest(&target.original_bytes) => {}
+            (false, None) if target.original_bytes.is_empty() => {}
+            _ => bail!("setup recovery journal original target hash mismatch"),
+        }
+        match (&target.desired_bytes, target.desired_sha256.as_deref()) {
+            (Some(bytes), Some(hash)) if hash == digest(bytes) => {}
+            (None, None) => {}
+            _ => bail!("setup recovery journal target hash mismatch"),
+        }
+    }
+
+    let hooks_path = paths.hooks_path();
+    let config_path = paths.config_path();
+    let manifest_path = paths.manifest_path();
+    let count = |path: &Path| {
+        journal
+            .targets
+            .iter()
+            .filter(|target| target.path == path)
+            .count()
+    };
+
+    match journal.operation {
+        SetupJournalOperation::Install => {
+            if journal.targets.len() != 3
+                || count(&hooks_path) != 1
+                || count(&config_path) != 1
+                || count(&manifest_path) != 1
+                || journal.targets.iter().any(|target| {
+                    !matches!(
+                        target.path.as_path(),
+                        path if path == hooks_path || path == config_path || path == manifest_path
+                    ) || target.desired_bytes.is_none()
+                })
+            {
+                bail!("setup recovery journal install targets do not match the exact allowlist");
+            }
+        }
+        SetupJournalOperation::Uninstall => {
+            let archives = journal
+                .targets
+                .iter()
+                .filter(|target| is_uninstalled_manifest_archive(paths, &target.path))
+                .collect::<Vec<_>>();
+            if journal.targets.len() != 4
+                || count(&hooks_path) != 1
+                || count(&config_path) != 1
+                || count(&manifest_path) != 1
+                || archives.len() != 1
+                || journal.targets.iter().any(|target| {
+                    target.path != hooks_path
+                        && target.path != config_path
+                        && target.path != manifest_path
+                        && !is_uninstalled_manifest_archive(paths, &target.path)
+                })
+                || journal
+                    .targets
+                    .iter()
+                    .find(|target| target.path == manifest_path)
+                    .is_some_and(|target| target.desired_bytes.is_some())
+                || archives[0].desired_bytes.is_none()
+                || archives[0].original_existed
+            {
+                bail!("setup recovery journal uninstall targets do not match the exact allowlist");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_uninstalled_manifest_archive(paths: &SetupPaths, path: &Path) -> bool {
+    if path.parent() != Some(paths.data_dir.as_path()) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(middle) = name
+        .strip_prefix("setup-manifest.uninstalled-")
+        .and_then(|name| name.strip_suffix(".json"))
+    else {
+        return false;
+    };
+    let Some((timestamp, uuid)) = middle.split_once('-') else {
+        return false;
+    };
+    !timestamp.is_empty()
+        && timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        && timestamp.parse::<i64>().is_ok()
+        && uuid::Uuid::parse_str(uuid).is_ok()
+}
+
+fn apply_setup_journal(paths: &SetupPaths, journal: &SetupJournalV1) -> Result<()> {
+    validate_setup_journal(paths, journal)?;
     for target in &journal.targets {
         match &target.desired_bytes {
             Some(bytes) => {
@@ -436,6 +548,7 @@ fn apply_setup_journal(journal: &SetupJournalV1) -> Result<()> {
 fn uninstall_target_bytes<F>(
     path: &Path,
     backup: &BackupRecord,
+    backup_dir: &Path,
     installed_sha256: &str,
     remove_managed: F,
     warnings: &mut Vec<String>,
@@ -450,7 +563,7 @@ where
         Err(error) => return Err(error.into()),
     };
     if current.as_deref().map(digest).as_deref() == Some(installed_sha256) {
-        return restore_backup_bytes(backup);
+        return restore_backup_bytes(backup, backup_dir, label);
     }
     warnings.push(format!(
         "{label} changed after setup; removed only the managed block and preserved user changes"
@@ -461,7 +574,11 @@ where
     remove_managed().map(Some)
 }
 
-fn restore_backup_bytes(backup: &BackupRecord) -> Result<Option<Vec<u8>>> {
+fn restore_backup_bytes(
+    backup: &BackupRecord,
+    backup_dir: &Path,
+    label: &str,
+) -> Result<Option<Vec<u8>>> {
     if !backup.existed {
         return Ok(None);
     }
@@ -469,7 +586,9 @@ fn restore_backup_bytes(backup: &BackupRecord) -> Result<Option<Vec<u8>>> {
         .backup_path
         .as_deref()
         .context("setup backup path is missing")?;
-    let bytes = fs::read(path).with_context(|| format!("read setup backup {}", path.display()))?;
+    validate_backup_path(path, backup_dir, label, backup.sha256.as_deref())?;
+    let bytes = read_trusted_private_file(path, "setup backup")
+        .with_context(|| format!("read setup backup {}", path.display()))?;
     if backup.sha256.as_deref() != Some(digest(&bytes).as_str()) {
         bail!("setup backup hash mismatch: {}", path.display());
     }
@@ -488,12 +607,17 @@ fn validate_manifest_for_install(
     paths: &SetupPaths,
     repository: &Path,
 ) -> Result<()> {
-    if manifest.repository != repository
-        || manifest.hooks_path != paths.hooks_path()
-        || manifest.config_path != paths.config_path()
-    {
+    if manifest.repository != repository {
         bail!("setup manifest belongs to a different repository or Codex installation");
     }
+    validate_manifest_for_uninstall(manifest, paths)
+}
+
+fn validate_manifest_for_uninstall(manifest: &SetupManifestV1, paths: &SetupPaths) -> Result<()> {
+    if manifest.hooks_path != paths.hooks_path() || manifest.config_path != paths.config_path() {
+        bail!("setup manifest belongs to a different repository or Codex installation");
+    }
+    validate_trusted_private_directory(&paths.backup_dir(), "setup backup directory")?;
     validate_backup_record(&manifest.hooks_backup, &paths.backup_dir(), "hooks.json")?;
     validate_backup_record(&manifest.config_backup, &paths.backup_dir(), "config.toml")?;
     if !is_sha256(&manifest.installed_hooks_sha256) || !is_sha256(&manifest.installed_config_sha256)
@@ -520,10 +644,9 @@ fn validate_backup_record(record: &BackupRecord, backup_dir: &Path, label: &str)
         record.sha256.as_deref(),
     ) {
         (false, None, None) => Ok(()),
-        (true, Some(path), Some(expected_hash))
-            if path.parent() == Some(backup_dir) && is_sha256(expected_hash) =>
-        {
-            let bytes = fs::read(path)
+        (true, Some(path), Some(expected_hash)) if is_sha256(expected_hash) => {
+            validate_backup_path(path, backup_dir, label, Some(expected_hash))?;
+            let bytes = read_trusted_private_file(path, "setup backup")
                 .with_context(|| format!("setup manifest {label} backup is unavailable"))?;
             if digest(&bytes) != expected_hash {
                 bail!("setup manifest {label} backup hash mismatch");
@@ -534,8 +657,167 @@ fn validate_backup_record(record: &BackupRecord, backup_dir: &Path, label: &str)
     }
 }
 
+fn validate_backup_path(
+    path: &Path,
+    backup_dir: &Path,
+    label: &str,
+    expected_hash: Option<&str>,
+) -> Result<()> {
+    let expected_hash = expected_hash.context("setup backup hash is missing")?;
+    if !is_sha256(expected_hash) {
+        bail!("setup manifest contains an invalid {label} backup hash");
+    }
+    let expected_name = format!("{label}.{}.bak", &expected_hash[..12]);
+    if path != backup_dir.join(expected_name) {
+        bail!("setup manifest contains an invalid {label} backup path");
+    }
+    Ok(())
+}
+
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn ensure_trusted_data_dir(path: &Path) -> Result<()> {
+    ensure_trusted_private_directory(path, "setup data directory")
+}
+
+fn ensure_trusted_private_directory(path: &Path, label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_trusted_private_directory(path, label),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create parent directory {}", parent.display()))?;
+            }
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(path) {
+                Ok(()) => set_private_directory(path)?,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+            validate_trusted_private_directory(path, label)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn validate_trusted_private_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "{label} must be a regular directory, not a symlink: {}",
+            path.display()
+        );
+    }
+    validate_private_metadata(&metadata, true, label, path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+        let directory = options
+            .open(path)
+            .with_context(|| format!("open trusted {label} {}", path.display()))?;
+        validate_private_metadata(&directory.metadata()?, true, label, path)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_trusted_private_directory(path: &Path, label: &str) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            validate_trusted_private_directory(path, label)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_optional_trusted_private_file(path: &Path, label: &str) -> Result<Option<Vec<u8>>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "{label} must be a regular file, not a symlink: {}",
+            path.display()
+        );
+    }
+    validate_private_metadata(&metadata, false, label, path)?;
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("open trusted {label} {}", path.display()))?;
+    validate_private_metadata(&file.metadata()?, false, label, path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn read_trusted_private_file(path: &Path, label: &str) -> Result<Vec<u8>> {
+    match read_optional_trusted_private_file(path, label)? {
+        Some(bytes) => Ok(bytes),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{label} does not exist: {}", path.display()),
+        )
+        .into()),
+    }
+}
+
+#[cfg(unix)]
+fn validate_private_metadata(
+    metadata: &fs::Metadata,
+    directory: bool,
+    label: &str,
+    path: &Path,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        bail!(
+            "{label} is not owned by the current user: {}",
+            path.display()
+        );
+    }
+    if metadata.mode() & 0o077 != 0 {
+        let boundary = if directory { "0700" } else { "0600" };
+        bail!(
+            "{label} exceeds the private {boundary} boundary: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_private_metadata(
+    _metadata: &fs::Metadata,
+    _directory: bool,
+    _label: &str,
+    _path: &Path,
+) -> Result<()> {
+    Ok(())
 }
 
 pub fn managed_hook_command(executable: &Path, data_dir: &Path, event: &str) -> String {
@@ -861,8 +1143,13 @@ fn backup_file(path: &Path, backup_dir: &Path, name: &str) -> Result<BackupRecor
     let bytes = fs::read(path)?;
     let hash = digest(&bytes);
     let backup_path = backup_dir.join(format!("{}.{}.bak", name, &hash[..12]));
-    if !backup_path.exists() {
-        write_private_atomic(&backup_path, &bytes)?;
+    match read_optional_trusted_private_file(&backup_path, "setup backup")? {
+        Some(existing) if existing == bytes => {}
+        Some(_) => bail!(
+            "existing setup backup hash mismatch: {}",
+            backup_path.display()
+        ),
+        None => write_private_atomic(&backup_path, &bytes)?,
     }
     Ok(BackupRecord {
         existed: true,

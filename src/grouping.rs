@@ -392,7 +392,10 @@ pub fn task_title_suggestion(
 }
 
 pub fn request_fingerprint(request: &TaskGroupingRequestV1, session_ids: &[String]) -> String {
-    let mut session_ids = session_ids.to_vec();
+    let mut session_ids = session_ids
+        .iter()
+        .map(|session_id| session_id.trim().to_string())
+        .collect::<Vec<_>>();
     session_ids.sort();
     let normalized = serde_json::json!({
         "action": request.action,
@@ -408,8 +411,9 @@ pub fn request_fingerprint(request: &TaskGroupingRequestV1, session_ids: &[Strin
 }
 
 fn validate_operation_id(value: &str) -> Result<()> {
-    let value = value.trim();
-    if value.is_empty()
+    let trimmed = value.trim();
+    if value != trimmed
+        || trimmed.is_empty()
         || value.len() > 120
         || !value
             .bytes()

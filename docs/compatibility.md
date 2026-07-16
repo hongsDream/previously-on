@@ -1,11 +1,41 @@
 # Compatibility
 
-The published PreviouslyOn `0.1.0-alpha.1` currently supports the explicit `previously run codex`
-and `previously import codex` path on macOS. The `0.1.0-alpha.2` source candidate adds Hook/App
-Server automatic continuation, but it is not a supported public release claim until an exact
-commit-and-version-bound live artifact passes the gate below. Historical `alpha.1` evidence cannot
-be relabelled for `alpha.2`, and the existing 60 authenticated workflows are not rerun by this
-product implementation task.
+The last public tag is `0.1.0-alpha.1`; the alpha.2 code line was merged to `main` without a public
+version tag. The `0.1.0-alpha.3` source preview adds task grouping, a verified relationship graph,
+beta AI candidate refresh, and same-device local agent lineage. It is not a new public release
+claim: this work does not create a tag, GitHub Release, or crates.io publication. Historical
+evidence cannot be relabelled for `alpha.3`, and the existing 60 authenticated compatibility
+workflows are not rerun by this product implementation task.
+
+## Alpha.3 App Server capability boundary
+
+The release regression suite uses fake App Servers to verify the documented experimental request
+shapes without starting a real model turn. `permissionProfile/list` must report the managed
+`previously-input-only` profile as allowed before Refresh is enabled. `thread/start` then receives
+named `permissions` and approval `never`, never both `permissions` and legacy `sandbox`, while
+`turn/start` receives the strict candidate `outputSchema`. The configured default model is
+inherited rather than hard-coded. A single initialized client performs profile verification and
+execution from a minimal allowlisted environment; concurrent operation/candidate claims are
+transactional and cannot fan out duplicate calls.
+
+Agent import requests the documented interactive and sub-agent `sourceKinds` with pagination and
+uses experimental `parentThreadId` only when it is present. Unsupported methods, a blocked
+profile, malformed pagination, cross-repository threads, or missing parents degrade or fail closed;
+`thread/read` must also return the requested ID and same logical repository, and unsafe file paths
+are dropped. These cases are never converted into inferred compatibility. No public Codex desktop
+focus/open interface has been verified, so the source preview exposes Copy ID and Find in Codex
+guidance only.
+
+An actual AI calibration/model call remains unavailable in this non-interactive release task. It
+requires a compatible App Server, a verified permission profile, and fresh user approval at the
+time of execution. No token, model, or latency metric is fabricated when the App Server does not
+expose it.
+
+The contract references are the official [App Server API overview](https://learn.chatgpt.com/docs/app-server#api-overview),
+[thread start/resume](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread),
+[turn start](https://learn.chatgpt.com/docs/app-server#start-a-turn), and
+[permissions](https://learn.chatgpt.com/docs/permissions) documentation. No private API or
+undocumented desktop deep link is part of this preview.
 
 The repository contains a local mapped-regression matrix with five categories and six entries each:
 

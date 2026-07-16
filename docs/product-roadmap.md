@@ -13,7 +13,7 @@ questions:
 The review UI and Context Pack exist to support that continuation. Automatic fresh-task
 continuation is a core product capability, not a benchmark-only feature.
 
-## Included in `0.1.0-alpha.2`
+## Included in the `0.1.0-alpha.3` source preview
 
 - **Project overview:** active tasks, recent Codex source task IDs, verified decisions, unresolved
   items, and touched code areas.
@@ -28,10 +28,18 @@ continuation is a core product capability, not a benchmark-only feature.
   prompt only after success. Idempotent operation records prevent blind duplicate creation.
 - **Failure visibility:** pending, recovered, started, and failed rollover state plus the new Codex
   task ID are visible in the task workspace.
+- **Task integrity controls:** deterministic task title suggestions, explicit task editing, and
+  previewed append-only session move, merge, split, undo, and operation history.
+- **Verified relationship graph:** accessible graph and table views derived from canonical events,
+  projections, and Regression Contracts with source provenance and no guessed dependency edges.
+- **Opt-in AI fact refresh:** a user-triggered beta that runs only after the managed input-only
+  permission profile is verified and produces candidates for explicit review, never Evidence.
+- **Local agent lineage:** read-only same-device interactive and sub-agent observation with
+  capability-gated parentage, degraded missing-parent state, Copy ID, and Find in Codex guidance.
 
 ## Provisional alpha policy
 
-`0.1.0-alpha.2` uses **seven observed compactions OR 80% observed context-window usage**. The
+`0.1.0-alpha.3` uses **seven observed compactions OR 80% observed context-window usage**. The
 existing 72-hour inactivity plus relevant-code-change trigger remains an independent stale-context
 safety rule.
 
@@ -70,16 +78,19 @@ records `no_auto_rollover_recommendation` and keeps the pilot policy explicitly 
 
 ## Next product work
 
-1. **Task discovery quality:** merge/split controls for incorrectly grouped sessions and clearer
-   task naming suggestions.
-2. **Richer code map:** symbol and dependency relationships once they can be derived
-   deterministically without pretending that path co-occurrence proves a dependency.
-3. **Continuation navigation:** focus/open the new Codex task if a documented desktop interface is
-   introduced; do not depend on private deep links.
-4. **AI-assisted fact refresh:** candidate-only output after an input-only or deny-read execution
-   boundary passes prompt-injection fixtures.
-5. **Team and multi-agent views:** shared provenance and access controls before any cloud sync or
-   cross-agent automation.
+1. **Continuation navigation:** focus/open the new Codex task only if a documented desktop
+   interface is introduced; do not depend on private deep links.
+2. **Relationship expansion:** add dependency edges only when a verified build-system or language
+   source can prove them; path co-occurrence, import text, and name similarity remain insufficient.
+3. **AI calibration:** obtain fresh user approval, a compatible App Server, and a verified named
+   permission profile before any real model call. Runtime capability is reported as `ready`,
+   `needs_setup`, `unsupported`, or `blocked`; the real calibration/model call in this source
+   preview verification remains unavailable/blocked rather than simulated.
+4. **Team access:** design explicit identity, provenance, and access controls before any cloud sync
+   or cross-device collaboration. Local agent lineage must not be relabelled as a team feature.
+5. **Public release:** satisfy live compatibility, signing/notarization decisions, name review,
+   protected publication environments, and human approval before any tag, GitHub Release, or
+   crates.io publication.
 
-Cloud services, full chat replay, automatic dependency inference, and private Codex APIs remain
-outside the alpha.
+Cloud services, full chat replay, agent orchestration/write-back, automatic dependency inference,
+and private Codex APIs remain outside the alpha.

@@ -1,6 +1,6 @@
 [package]
 name = "previously-on"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2021"
 rust-version = "1.90"
 license = "Apache-2.0"
@@ -25,6 +25,7 @@ include = [
     "/docs/live-compatibility-evidence.md",
     "/docs/privacy.md",
     "/docs/product-roadmap.md",
+    "/docs/release-checklist.md",
     "/fixtures/**/*.json",
     "/scripts/compatibility/*.mjs",
     "/scripts/validate-live-compatibility.mjs",
@@ -47,6 +48,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 directories = "6.0"
 hex = "0.4"
 http = "1.2"
+libc = "0.2"
 mime_guess = "2.0"
 once_cell = "1.20"
 rand = "0.9"

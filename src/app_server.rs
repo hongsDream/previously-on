@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -27,6 +28,16 @@ const MAX_PAGES: usize = 1_000;
 pub const MAX_APP_SERVER_RPC_BYTES: usize = 8 * 1024 * 1024;
 const MALFORMED_TOKEN_USAGE_WARNING: &str =
     "ignored malformed thread/tokenUsage/updated notification; token-usage coverage is degraded";
+const EXPERIMENTAL_ENV_ALLOWLIST: [&str; 8] = [
+    "PATH",
+    "HOME",
+    "CODEX_HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -914,11 +925,9 @@ impl AppServerClient {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         if experimental_api {
-            for (name, _) in std::env::vars_os() {
-                if is_sensitive_environment_name(&name) {
-                    command.env_remove(name);
-                }
-            }
+            command
+                .env_clear()
+                .envs(filtered_experimental_environment(std::env::vars_os()));
         }
         let mut child = command
             .spawn()
@@ -1641,11 +1650,19 @@ impl AppServerClient {
     }
 }
 
-fn is_sensitive_environment_name(name: &std::ffi::OsStr) -> bool {
-    let upper = name.to_string_lossy().to_ascii_uppercase();
-    ["KEY", "SECRET", "TOKEN"]
+fn filtered_experimental_environment(
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    environment
+        .into_iter()
+        .filter(|(name, _)| is_experimental_environment_allowed(name))
+        .collect()
+}
+
+fn is_experimental_environment_allowed(name: &OsStr) -> bool {
+    EXPERIMENTAL_ENV_ALLOWLIST
         .iter()
-        .any(|marker| upper.contains(marker))
+        .any(|allowed| name == OsStr::new(allowed))
 }
 
 fn validate_thread_repository(cwd: &Path, registered: &RepositoryIdentity) -> Result<()> {
@@ -1705,26 +1722,38 @@ pub async fn collect_agent_lineage(
             None => continue,
             Some(_) => continue,
         };
-        let thread = client.read_thread(&summary.id).await.ok();
-        let (output_summary, files, tests) = thread
-            .as_ref()
-            .map(extract_agent_observation)
-            .unwrap_or_default();
+        let (output_summary, files, tests, read_degraded) =
+            match client.read_thread(&summary.id).await {
+                Ok(thread)
+                    if validate_lineage_thread_read(&thread, &summary.id, &registered).is_ok() =>
+                {
+                    let (output_summary, files, tests) = extract_agent_observation(&thread);
+                    (output_summary, files, tests, false)
+                }
+                Ok(_) => continue,
+                Err(_) => (None, Vec::new(), Vec::new(), true),
+            };
         let task_id = session_tasks.get(&summary.id).cloned();
-        let association_state = if task_id.is_some() {
+        let association_state = if read_degraded {
+            AgentAssociationStateV1::Degraded
+        } else if task_id.is_some() {
             AgentAssociationStateV1::Linked
         } else if summary.parent_thread_id.is_some() {
             AgentAssociationStateV1::Unlinked
         } else {
             AgentAssociationStateV1::Degraded
         };
-        let degraded_reason = match association_state {
-            AgentAssociationStateV1::Linked => None,
-            AgentAssociationStateV1::Unlinked => {
-                Some("parent observed but task association not yet resolved".to_string())
-            }
-            AgentAssociationStateV1::Degraded => {
-                Some("no verified session or parent association".to_string())
+        let degraded_reason = if read_degraded {
+            Some("thread/read unavailable; summary-only observation".to_string())
+        } else {
+            match association_state {
+                AgentAssociationStateV1::Linked => None,
+                AgentAssociationStateV1::Unlinked => {
+                    Some("parent observed but task association not yet resolved".to_string())
+                }
+                AgentAssociationStateV1::Degraded => {
+                    Some("no verified session or parent association".to_string())
+                }
             }
         };
         let role = match source_kind {
@@ -1790,6 +1819,27 @@ pub async fn collect_agent_lineage(
     Ok(observed)
 }
 
+fn validate_lineage_thread_read(
+    thread: &Value,
+    expected_thread_id: &str,
+    registered: &RepositoryIdentity,
+) -> Result<()> {
+    let returned_id = thread
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Codex thread/read omitted thread.id; agent skipped")?;
+    if returned_id != expected_thread_id {
+        bail!("Codex thread/read returned a different thread.id; agent skipped")
+    }
+    let cwd = thread
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Codex thread/read omitted cwd; agent skipped")?;
+    validate_thread_repository(Path::new(cwd), registered)
+}
+
 fn extract_agent_observation(thread: &Value) -> (Option<String>, Vec<String>, Vec<String>) {
     let mut output_summary = None;
     let mut files = BTreeMap::<String, ()>::new();
@@ -1823,8 +1873,12 @@ fn extract_agent_observation(thread: &Value) -> (Option<String>, Vec<String>, Ve
                         .into_iter()
                         .flatten()
                     {
-                        if let Some(path) = change.get("path").and_then(Value::as_str) {
-                            files.insert(crate::redaction::redact_excerpt(path), ());
+                        if let Some(path) = change
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .and_then(crate::git::validated_repository_relative_path)
+                        {
+                            files.insert(path, ());
                         }
                     }
                 }
@@ -2095,21 +2149,51 @@ pub async fn codex_version() -> Result<String> {
 
 #[cfg(test)]
 mod environment_tests {
-    use super::is_sensitive_environment_name;
-    use std::ffi::OsStr;
+    use super::{filtered_experimental_environment, is_experimental_environment_allowed};
+    use std::ffi::{OsStr, OsString};
 
     #[test]
-    fn experimental_app_server_removes_key_secret_and_token_environment_names() {
-        for name in [
-            "OPENAI_API_KEY",
-            "CODEX_ACCESS_TOKEN",
-            "PRIVATE_SECRET_VALUE",
-            "api_key_lowercase",
-        ] {
-            assert!(is_sensitive_environment_name(OsStr::new(name)), "{name}");
-        }
+    fn experimental_app_server_inherits_only_the_minimal_environment_allowlist() {
         for name in ["PATH", "HOME", "CODEX_HOME", "TMPDIR"] {
-            assert!(!is_sensitive_environment_name(OsStr::new(name)), "{name}");
+            assert!(
+                is_experimental_environment_allowed(OsStr::new(name)),
+                "{name}"
+            );
+        }
+        let filtered = filtered_experimental_environment(
+            [
+                ("PATH", "/usr/bin"),
+                ("HOME", "/Users/test"),
+                ("CODEX_HOME", "/Users/test/.codex"),
+                ("DATABASE_URL", "postgres://user:password@example.test/db"),
+                ("CODEX_AUTH", "opaque-auth"),
+                ("OPENAI_API_KEY", "sk-test-not-real"),
+                ("PASSWORD", "password-value"),
+                ("COOKIE", "session-cookie"),
+                ("CREDENTIALS", "credential-value"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+        );
+        let names = filtered
+            .iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["PATH", "HOME", "CODEX_HOME"]);
+        let serialized = filtered
+            .iter()
+            .map(|(name, value)| format!("{}={}", name.to_string_lossy(), value.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for secret in [
+            "postgres://user:password@example.test/db",
+            "opaque-auth",
+            "sk-test-not-real",
+            "password-value",
+            "session-cookie",
+            "credential-value",
+        ] {
+            assert!(!serialized.contains(secret), "secret leaked: {secret}");
         }
     }
 }

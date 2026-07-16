@@ -199,6 +199,10 @@ fn stop_hook_waits_for_large_slow_contract_ack_instead_of_bypassing_the_block() 
         .success());
     let socket_path = temp.path().join("previously.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = String::new();
@@ -303,6 +307,12 @@ fn replay_streams_past_an_oversized_record_and_deduplicates_later_events() {
     file.write_all(&record).unwrap();
     file.write_all(b"\n").unwrap();
     file.sync_all().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
 
     replay_fallback(&store, &queue).unwrap();
 

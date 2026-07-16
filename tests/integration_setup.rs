@@ -8,6 +8,36 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+fn create_private_dir(path: &std::path::Path) {
+    fs::create_dir_all(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+fn write_private_file(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
+    fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn journal_target(path: &std::path::Path, bytes: &[u8]) -> Value {
+    let hash = hex::encode(Sha256::digest(bytes));
+    json!({
+        "path": path,
+        "originalExisted": true,
+        "originalBytes": bytes,
+        "originalSha256": hash,
+        "desiredBytes": bytes,
+        "desiredSha256": hash,
+    })
+}
+
 fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
     fn walk(
         root: &std::path::Path,
@@ -21,7 +51,16 @@ fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<
         children.sort();
         for child in children {
             let relative = child.strip_prefix(root).unwrap().to_path_buf();
-            if child.is_dir() {
+            let metadata = fs::symlink_metadata(&child).unwrap();
+            if metadata.file_type().is_symlink() {
+                entries.push((
+                    relative,
+                    Some(
+                        format!("symlink:{}", fs::read_link(&child).unwrap().display())
+                            .into_bytes(),
+                    ),
+                ));
+            } else if metadata.is_dir() {
                 entries.push((relative, None));
                 walk(root, &child, entries);
             } else {
@@ -33,6 +72,58 @@ fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<
     let mut entries = Vec::new();
     walk(root, root, &mut entries);
     entries
+}
+
+fn valid_install_journal(paths: &SetupPaths) -> Value {
+    let hooks = fs::read(paths.hooks_path()).unwrap();
+    let config = fs::read(paths.config_path()).unwrap();
+    let manifest = fs::read(paths.manifest_path()).unwrap();
+    json!({
+        "version": 1,
+        "managedId": MANAGED_ID,
+        "operation": "install",
+        "targets": [
+            journal_target(&paths.hooks_path(), &hooks),
+            journal_target(&paths.config_path(), &config),
+            journal_target(&paths.manifest_path(), &manifest),
+        ]
+    })
+}
+
+fn valid_uninstall_journal(paths: &SetupPaths) -> Value {
+    let hooks = fs::read(paths.hooks_path()).unwrap();
+    let config = fs::read(paths.config_path()).unwrap();
+    let manifest = fs::read(paths.manifest_path()).unwrap();
+    let manifest_hash = hex::encode(Sha256::digest(&manifest));
+    let archive = paths.data_dir.join(format!(
+        "setup-manifest.uninstalled-1-{}.json",
+        uuid::Uuid::now_v7()
+    ));
+    json!({
+        "version": 1,
+        "managedId": MANAGED_ID,
+        "operation": "uninstall",
+        "targets": [
+            journal_target(&paths.hooks_path(), &hooks),
+            journal_target(&paths.config_path(), &config),
+            {
+                "path": archive,
+                "originalExisted": false,
+                "originalBytes": [],
+                "originalSha256": null,
+                "desiredBytes": manifest,
+                "desiredSha256": manifest_hash,
+            },
+            {
+                "path": paths.manifest_path(),
+                "originalExisted": true,
+                "originalBytes": manifest,
+                "originalSha256": manifest_hash,
+                "desiredBytes": null,
+                "desiredSha256": null,
+            },
+        ]
+    })
 }
 
 #[test]
@@ -353,32 +444,254 @@ fn uninstall_preserves_external_changes_and_reports_degraded_result() {
 #[test]
 fn setup_finishes_an_interrupted_durable_journal_before_reinstalling() {
     let (_temp, paths, repository) = fixture();
-    fs::create_dir_all(&paths.data_dir).unwrap();
-    let marker = paths.data_dir.join("recovered-marker");
-    let desired = b"durably recovered".to_vec();
-    let journal = json!({
-        "version": 1,
-        "managedId": MANAGED_ID,
-        "operation": "install",
-        "targets": [{
-            "path": marker,
-            "originalExisted": false,
-            "originalBytes": [],
-            "originalSha256": null,
-            "desiredBytes": desired,
-            "desiredSha256": hex::encode(Sha256::digest(b"durably recovered")),
-        }]
-    });
+    install_codex(&paths, &repository).unwrap();
+    let hooks = fs::read(paths.hooks_path()).unwrap();
+    let journal = valid_install_journal(&paths);
     let journal_path = paths.data_dir.join("setup-recovery-journal.json");
-    fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    write_private_file(&journal_path, serde_json::to_vec(&journal).unwrap());
 
     install_codex(&paths, &repository).unwrap();
 
-    assert_eq!(
-        fs::read(paths.data_dir.join("recovered-marker")).unwrap(),
-        b"durably recovered"
-    );
+    assert_eq!(fs::read(paths.hooks_path()).unwrap(), hooks);
     assert!(!journal_path.exists());
+}
+
+#[test]
+fn setup_recovery_rejects_external_duplicate_and_missing_targets_without_mutation() {
+    for case in ["external", "duplicate", "missing"] {
+        let (temp, paths, repository) = fixture();
+        install_codex(&paths, &repository).unwrap();
+        let external = temp.path().join("must-not-change");
+        fs::write(&external, b"outside-safe").unwrap();
+        let mut journal = valid_install_journal(&paths);
+        match case {
+            "external" => journal["targets"][0]["path"] = json!(external),
+            "duplicate" => journal["targets"][1]["path"] = json!(paths.hooks_path()),
+            "missing" => {
+                journal["targets"].as_array_mut().unwrap().pop();
+            }
+            _ => unreachable!(),
+        }
+        let journal_path = paths.data_dir.join("setup-recovery-journal.json");
+        write_private_file(&journal_path, serde_json::to_vec(&journal).unwrap());
+        let before = tree_snapshot(temp.path());
+
+        let error = install_codex(&paths, &repository).unwrap_err();
+
+        assert!(
+            error.to_string().contains("exact allowlist"),
+            "{case}: unexpected error: {error:#}"
+        );
+        assert_eq!(fs::read(&external).unwrap(), b"outside-safe");
+        assert_eq!(tree_snapshot(temp.path()), before, "{case} mutated state");
+    }
+}
+
+#[test]
+fn uninstall_recovery_requires_one_exact_direct_child_archive_without_mutation() {
+    for case in ["external", "duplicate", "missing", "bad_name"] {
+        let (temp, paths, repository) = fixture();
+        install_codex(&paths, &repository).unwrap();
+        let external = temp.path().join("must-not-be-archive.json");
+        fs::write(&external, b"outside-safe").unwrap();
+        let mut journal = valid_uninstall_journal(&paths);
+        match case {
+            "external" => journal["targets"][2]["path"] = json!(external),
+            "duplicate" => {
+                let archive = journal["targets"][2].clone();
+                journal["targets"].as_array_mut().unwrap().push(archive);
+            }
+            "missing" => {
+                journal["targets"].as_array_mut().unwrap().remove(2);
+            }
+            "bad_name" => {
+                journal["targets"][2]["path"] = json!(paths.data_dir.join("archive.json"));
+            }
+            _ => unreachable!(),
+        }
+        let journal_path = paths.data_dir.join("setup-recovery-journal.json");
+        write_private_file(&journal_path, serde_json::to_vec(&journal).unwrap());
+        let before = tree_snapshot(temp.path());
+
+        let error = uninstall_codex_detailed(&paths).unwrap_err();
+
+        assert!(
+            error.to_string().contains("exact allowlist"),
+            "{case}: unexpected error: {error:#}"
+        );
+        assert_eq!(fs::read(&external).unwrap(), b"outside-safe");
+        assert_eq!(tree_snapshot(temp.path()), before, "{case} mutated state");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_recovery_rejects_symlinked_or_overpermissive_journals_without_mutation() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    {
+        let (temp, paths, repository) = fixture();
+        install_codex(&paths, &repository).unwrap();
+        let external_journal = temp.path().join("attacker-journal.json");
+        write_private_file(
+            &external_journal,
+            serde_json::to_vec(&valid_install_journal(&paths)).unwrap(),
+        );
+        let journal_path = paths.data_dir.join("setup-recovery-journal.json");
+        symlink(&external_journal, &journal_path).unwrap();
+        let before = tree_snapshot(temp.path());
+
+        let error = install_codex(&paths, &repository).unwrap_err();
+
+        assert!(format!("{error:#}").contains("regular file"));
+        assert_eq!(tree_snapshot(temp.path()), before);
+    }
+
+    {
+        let (temp, paths, repository) = fixture();
+        install_codex(&paths, &repository).unwrap();
+        let journal_path = paths.data_dir.join("setup-recovery-journal.json");
+        write_private_file(
+            &journal_path,
+            serde_json::to_vec(&valid_install_journal(&paths)).unwrap(),
+        );
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = tree_snapshot(temp.path());
+
+        let error = install_codex(&paths, &repository).unwrap_err();
+
+        assert!(format!("{error:#}").contains("private 0600 boundary"));
+        assert_eq!(tree_snapshot(temp.path()), before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_rejects_symlinked_or_overpermissive_data_and_manifest_boundaries() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    {
+        let (temp, paths, repository) = fixture();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::set_permissions(&paths.data_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let before = tree_snapshot(temp.path());
+
+        let error = install_codex(&paths, &repository).unwrap_err();
+
+        assert!(error.to_string().contains("private 0700 boundary"));
+        assert_eq!(tree_snapshot(temp.path()), before);
+    }
+
+    {
+        let (temp, paths, repository) = fixture();
+        let external_dir = temp.path().join("attacker-data");
+        create_private_dir(&external_dir);
+        symlink(&external_dir, &paths.data_dir).unwrap();
+        let before = tree_snapshot(temp.path());
+
+        let error = install_codex(&paths, &repository).unwrap_err();
+
+        assert!(error.to_string().contains("regular directory"));
+        assert_eq!(tree_snapshot(temp.path()), before);
+    }
+
+    {
+        let (temp, paths, repository) = fixture();
+        install_codex(&paths, &repository).unwrap();
+        let external_manifest = temp.path().join("attacker-manifest.json");
+        write_private_file(&external_manifest, fs::read(paths.manifest_path()).unwrap());
+        fs::remove_file(paths.manifest_path()).unwrap();
+        symlink(&external_manifest, paths.manifest_path()).unwrap();
+        let before = tree_snapshot(temp.path());
+
+        let error = install_codex(&paths, &repository).unwrap_err();
+
+        assert!(format!("{error:#}").contains("regular file"));
+        assert_eq!(tree_snapshot(temp.path()), before);
+    }
+
+    {
+        let (temp, paths, repository) = fixture();
+        install_codex(&paths, &repository).unwrap();
+        fs::set_permissions(paths.manifest_path(), fs::Permissions::from_mode(0o644)).unwrap();
+        let before = tree_snapshot(temp.path());
+
+        let error = install_codex(&paths, &repository).unwrap_err();
+
+        assert!(format!("{error:#}").contains("private 0600 boundary"));
+        assert_eq!(tree_snapshot(temp.path()), before);
+    }
+}
+
+#[test]
+fn uninstall_rejects_foreign_manifest_and_backup_paths_without_mutation() {
+    for case in ["hooks", "backup"] {
+        let (temp, paths, repository) = fixture();
+        fs::write(paths.hooks_path(), b"{\"hooks\":{}}\n").unwrap();
+        fs::write(paths.config_path(), b"model = \"user\"\n").unwrap();
+        install_codex(&paths, &repository).unwrap();
+        let external = temp.path().join(format!("foreign-{case}"));
+        fs::write(&external, b"outside-safe").unwrap();
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(paths.manifest_path()).unwrap()).unwrap();
+        match case {
+            "hooks" => manifest["hooksPath"] = json!(external),
+            "backup" => manifest["hooksBackup"]["backupPath"] = json!(external),
+            _ => unreachable!(),
+        }
+        write_private_file(
+            &paths.manifest_path(),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+        let before = tree_snapshot(temp.path());
+
+        let error = uninstall_codex_detailed(&paths).unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("different repository or Codex")
+                || message.contains("invalid hooks.json backup path"),
+            "{case}: unexpected error: {error:#}"
+        );
+        assert_eq!(fs::read(&external).unwrap(), b"outside-safe");
+        assert_eq!(tree_snapshot(temp.path()), before, "{case} mutated state");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_symlinked_or_overpermissive_backups_without_mutation() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    for case in ["symlink", "permissions"] {
+        let (temp, paths, repository) = fixture();
+        fs::write(paths.hooks_path(), b"{\"hooks\":{}}\n").unwrap();
+        fs::write(paths.config_path(), b"model = \"user\"\n").unwrap();
+        let manifest = install_codex(&paths, &repository).unwrap();
+        let backup = manifest.hooks_backup.backup_path.unwrap();
+        match case {
+            "symlink" => {
+                let external = temp.path().join("foreign-backup");
+                write_private_file(&external, b"outside-safe");
+                fs::remove_file(&backup).unwrap();
+                symlink(&external, &backup).unwrap();
+            }
+            "permissions" => {
+                fs::set_permissions(&backup, fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = tree_snapshot(temp.path());
+
+        let error = uninstall_codex_detailed(&paths).unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("regular file") || message.contains("private 0600 boundary"),
+            "{case}: unexpected error: {error:#}"
+        );
+        assert_eq!(tree_snapshot(temp.path()), before, "{case} mutated state");
+    }
 }
 
 #[test]
@@ -415,10 +728,10 @@ fn setup_fails_closed_without_mutations_for_invalid_existing_manifests() {
 
     for (name, manifest_bytes, expected_error) in cases {
         let (temp, paths, repository) = fixture();
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        create_private_dir(&paths.data_dir);
         fs::write(paths.hooks_path(), b"{\"userOwned\":true}\n").unwrap();
         fs::write(paths.config_path(), b"model = \"user-owned\"\n").unwrap();
-        fs::write(paths.manifest_path(), manifest_bytes).unwrap();
+        write_private_file(&paths.manifest_path(), manifest_bytes);
         let before = tree_snapshot(temp.path());
 
         let error = install_codex(&paths, &repository).unwrap_err();
@@ -438,7 +751,7 @@ fn setup_fails_closed_without_mutations_for_invalid_existing_manifests() {
 #[test]
 fn setup_rejects_a_manifest_that_claims_ownership_of_foreign_paths() {
     let (temp, paths, repository) = fixture();
-    fs::create_dir_all(&paths.data_dir).unwrap();
+    create_private_dir(&paths.data_dir);
     fs::write(paths.hooks_path(), b"{\"userOwned\":true}\n").unwrap();
     fs::write(paths.config_path(), b"model = \"user-owned\"\n").unwrap();
     let foreign_manifest = json!({
@@ -454,11 +767,10 @@ fn setup_rejects_a_manifest_that_claims_ownership_of_foreign_paths() {
         "installedHooksSha256": "0".repeat(64),
         "installedConfigSha256": "0".repeat(64)
     });
-    fs::write(
-        paths.manifest_path(),
+    write_private_file(
+        &paths.manifest_path(),
         serde_json::to_vec_pretty(&foreign_manifest).unwrap(),
-    )
-    .unwrap();
+    );
     let before = tree_snapshot(temp.path());
 
     let error = install_codex(&paths, &repository).unwrap_err();

@@ -8,6 +8,12 @@ use previously_on::store::{InsertOutcome, Store};
 use serde_json::json;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
 fn at(second: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(1_700_000_000 + second, 0)
         .single()
@@ -494,6 +500,8 @@ fn open_completes_a_purge_interrupted_after_related_data_cleanup() {
         br#"{"version":1,"repository_id":"repo-1","phase":"related_data_purged"}"#,
     )
     .unwrap();
+    #[cfg(unix)]
+    set_mode(&journal, 0o600);
 
     let recovered = Store::open(&database).unwrap();
     assert_eq!(recovered.health().unwrap().canonical_event_count, 0);
@@ -525,8 +533,12 @@ fn open_completes_tombstoned_purge_and_discards_malformed_single_repo_queue() {
     }
     let queue_dir = temp.path().join("queue");
     std::fs::create_dir_all(&queue_dir).unwrap();
+    #[cfg(unix)]
+    set_mode(&queue_dir, 0o700);
     let queue = queue_dir.join("events.jsonl");
     std::fs::write(&queue, b"malformed queue data\n").unwrap();
+    #[cfg(unix)]
+    set_mode(&queue, 0o600);
     let cache = temp.path().join("cache");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::write(cache.join("stale-secret"), b"must disappear").unwrap();
@@ -536,6 +548,8 @@ fn open_completes_tombstoned_purge_and_discards_malformed_single_repo_queue() {
         br#"{"version":1,"repository_id":"repo-1","phase":"tombstoned"}"#,
     )
     .unwrap();
+    #[cfg(unix)]
+    set_mode(&journal, 0o600);
 
     let recovered = Store::open(&database).unwrap();
     assert!(!journal.exists());
@@ -544,6 +558,84 @@ fn open_completes_tombstoned_purge_and_discards_malformed_single_repo_queue() {
     assert!(!std::path::PathBuf::from(format!("{}-wal", database.display())).exists());
     assert!(!std::path::PathBuf::from(format!("{}-shm", database.display())).exists());
     assert_eq!(recovered.health().unwrap().canonical_event_count, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn store_rejects_insecure_directory_and_symlinked_database_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        set_mode(&data, 0o777);
+        std::fs::write(data.join("marker"), b"safe").unwrap();
+
+        let error = Store::open(data.join("previously.sqlite3")).unwrap_err();
+
+        assert!(error.to_string().contains("group/world writable"));
+        assert_eq!(std::fs::read(data.join("marker")).unwrap(), b"safe");
+        assert!(!data.join("previously.sqlite3").exists());
+    }
+
+    {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        set_mode(&data, 0o700);
+        let external = temp.path().join("outside.sqlite3");
+        std::fs::write(&external, b"outside-safe").unwrap();
+        set_mode(&external, 0o600);
+        let database = data.join("previously.sqlite3");
+        symlink(&external, &database).unwrap();
+
+        let error = Store::open(&database).unwrap_err();
+
+        assert!(error.to_string().contains("regular file"));
+        assert_eq!(std::fs::read(&external).unwrap(), b"outside-safe");
+        assert!(std::fs::symlink_metadata(&database)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!data.join("previously.sqlite3.lock").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn store_rejects_symlinked_sqlite_companions_before_opening_database() {
+    use std::os::unix::fs::symlink;
+
+    for suffix in ["-wal", "-shm", "-journal", ".lock", ".purge-recovery.json"] {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("previously.sqlite3");
+        drop(Store::open(&database).unwrap());
+        let database_before = std::fs::read(&database).unwrap();
+        let companion = std::path::PathBuf::from(format!("{}{}", database.display(), suffix));
+        if companion.exists() {
+            std::fs::remove_file(&companion).unwrap();
+        }
+        let external = temp
+            .path()
+            .join(format!("outside-{}", suffix.replace('.', "dot")));
+        std::fs::write(&external, b"outside-safe").unwrap();
+        set_mode(&external, 0o600);
+        symlink(&external, &companion).unwrap();
+
+        let error = Store::open(&database).unwrap_err();
+
+        assert!(
+            error.to_string().contains("regular file"),
+            "{suffix}: unexpected error: {error:#}"
+        );
+        assert_eq!(std::fs::read(&external).unwrap(), b"outside-safe");
+        assert_eq!(std::fs::read(&database).unwrap(), database_before);
+        assert!(std::fs::symlink_metadata(&companion)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }
 
 #[test]

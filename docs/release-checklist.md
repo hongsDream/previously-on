@@ -1,82 +1,64 @@
-# `v0.1.0-alpha.2` release checklist
+# `0.1.0-alpha.3` verified source-preview checklist
 
-The release owner records links or hashes for every item before creating the tag. A failed item
-stops publication; the crate name must not be published speculatively because crates.io versions
-cannot be overwritten.
+This checklist accepts a reviewed source and CI/PR artifact preview. It does **not** authorize a
+tag, GitHub Release, crates.io publication, or live model/compatibility run. Every completed item
+must be bound to the reviewed commit. Any public-release item in the final section remains blocked.
 
-## Local and compatibility gates
+## Source-preview gates
 
-- [ ] All known audit findings are closed or explicitly release-blocking.
-- [ ] Fake App Server integration proves documented `thread/start`, `thread/name/set`,
-      `turn/start`, and `thread/resume` request shapes; successful automatic continuation is
-      idempotent and a failed attempt leaves the source prompt unblocked.
-- [ ] Project overview, Codebase Lineage, fact edit/deprecation, session exclusion, and automatic
-      rollover state pass UI typecheck, lint, tests, and production build.
-- [ ] Secret fixtures do not persist the transient automatic-continuation prompt or leak through
-      App Server errors, Context Packs, export, or the UI.
-- [ ] The mapped-regression result is labelled ineligible and is not used as live evidence.
-- [ ] A separately produced live artifact passes all 30 authenticated reconstruction workflows on
-      each npm-selected CLI version and satisfies `scripts/validate-live-compatibility.mjs`; the
-      separate mapped artifact passes all 30 category-specific fault assertions for both slots.
-- [ ] The live producer consumed the separate mapped artifact from the same clean commit and CLI
-      versions; every scenario entry matches its exact Rust target, filter, and expectation.
-- [ ] The mapped driver recorded one actual row outcome per scenario and version; every filter
-      resolved to exactly one Rust test and no zero-test or misspelled-filter pass was accepted.
-- [ ] The live artifact was produced by `scripts/compatibility/live-harness.mjs` from the reviewed
-      clean commit: 30 `exec` + `exec resume` workflows per CLI version, 60 passes total.
-- [ ] If `--resume` was used, every skipped checkpoint was revalidated against the same commit,
-      binaries, fixtures, mapped artifact, App evidence, retained file, and evidence digest; no
-      checkpoint crossed an evidence-binding change.
-- [ ] Every live workflow records ground-truth filesystem/Git/JSONL hashes and reconstructs prompt,
-      assistant final, paired file-change tool, test command, observed `gpt-5.6-sol` identity, and
-      stable linked source IDs.
-- [ ] The retained evidence bundle contains structured verdicts, stable identifiers, hashes, and
-      counts only; raw Codex JSONL, prompts, tool output, source code, credentials, and absolute
-      repository paths were not persisted.
-- [ ] Every scenario `evidencePath` and the retained mapped artifact are present in the tarball,
-      independently hashed, and accepted by the validator after safe extraction.
-- [ ] The fixture, artifact, scenario evidence, resume, finalizer, and validator all bind
-      `gpt-5.6-sol`, medium reasoning, `workspace-write`, strict config, and the 600-second timeout;
-      `CODEX_HOME` and auth are used only in the manual producer environment and never added to
-      normal CI or release environment variables.
-- [ ] Current Codex App stable and the previous obtainable build are recorded accurately in
-      retained sanitized evidence files. A degraded signature result remains release-blocking.
-- [ ] Serious stale applications are measured by a retained evaluator artifact bound to this
-      commit and version; an unmeasured or hardcoded zero is not accepted.
-- [ ] If stale evaluation was attached after the live run, `--finalize-stale-evaluation`
-      revalidated all 60 retained scenario digests and unchanged commit, binary, mapped, runner,
-      and App bindings without rerunning a Codex workflow.
-- [ ] The outbound-denied smoke exercised setup, daemon/hook persistence, MCP initialize and
-      tools/list, a loopback UI request, export, purge, repeated uninstall, and cleanup.
-- [ ] `docs/compatibility.md` contains run dates, artifact hashes, and supported/degraded status.
-- [ ] `quality`, `reliability-adversarial`, and `package-release` pass on `main`.
-- [ ] The release archive was reproduced and `SHA256SUMS` verified after extraction.
+- [ ] Version is `0.1.0-alpha.3` in Cargo, the UI package, locked metadata, the release builder,
+      issue template, and the versioned App Server probe.
+- [ ] Fixture and schema validation pass without authenticated Codex or model execution.
+- [ ] `cargo fmt --check`, locked all-target/all-feature Clippy with warnings denied, and all locked
+      Rust tests pass.
+- [ ] UI typecheck, lint, tests, production build, and `npm audit --audit-level=high` pass.
+- [ ] Task edit/grouping replay, move/merge/split/undo/idempotency, rejection, mixed provenance,
+      graph determinism/provenance/redaction, auth/CSRF, and accessible/mobile UI tests pass.
+- [ ] Fake App Servers verify permission ready/blocked/unsupported states, exact named-permission
+      request fields, no sandbox/permissions conflict, strict/malformed output, timeout/restart,
+      idempotency, prompt injection/redaction, unavailable metrics, lineage pagination,
+      cross-repository skips, and missing-parent degradation.
+- [ ] Secret scan and a focused security review find no unresolved critical/high issue in the
+      grouping, graph, AI refresh, lineage, setup, or loopback API changes.
+- [ ] `./scripts/build-release.sh` completes packaging, extracted-source offline installation,
+      offline smoke, license/SBOM generation, and byte-for-byte archive reproducibility.
+- [ ] `SHA256SUMS` verifies the source archive, macOS arm64 archive, binary, CycloneDX SBOM,
+      NOTICE, and third-party license inventory.
+- [ ] GitHub CI `quality`, `reliability-adversarial`, and `package-release` succeed for the exact PR
+      head. The package job retains `previously-on-v0.1.0-alpha.3-source.tar.gz`,
+      `previously-on-v0.1.0-alpha.3-macos-arm64.tar.gz`, and checksums for 14 days as PR artifacts.
 
-## Name and public repository gates
+## Truthful capability and documentation checks
 
-- [ ] Repeat GitHub and crates.io searches for `PreviouslyOn` and `previously-on` immediately
-      before publication; attach result URLs and timestamps.
-- [ ] Repeat the relevant trademark search and review for likelihood of confusion. Do not choose
-      an automatic replacement name if a same-field conflict is found.
-- [ ] GitHub private vulnerability reporting is enabled and its form opens successfully.
-- [ ] A `main` branch ruleset requires the three CI jobs and prevents tag deletion.
-- [ ] Actions permissions are restricted to read by default; release workflow exceptions are
-      reviewed.
-- [ ] The protected `crates-io` environment requires a human reviewer and contains only
-      `CARGO_REGISTRY_TOKEN`.
-- [ ] The protected `release-compatibility` environment requires a human reviewer and defines the
-      reviewed `LIVE_COMPATIBILITY_BUNDLE_URL` and `LIVE_COMPATIBILITY_BUNDLE_SHA256` values.
-- [ ] GitHub's hosted-runner contract still lists standard public `macos-14` as arm64; the build
-      script's runtime `uname -m` check also passes.
+- [ ] AI refresh is documented as beta, explicit opt-in, explicit user-triggered, input-only, and
+      candidate-only. AI output is not Evidence and unavailable metrics are not invented.
+- [ ] Local agent lineage is documented as same-device read-only observation, not cloud/team
+      access, orchestration, or write-back.
+- [ ] Desktop focus/open is documented as unavailable; only Copy ID and Find in Codex guidance are
+      offered, with no private deep link or fake Open button.
+- [ ] Automatic continuation is documented as a provisional policy: seven observed compactions
+      OR 80% observed context usage; independently, 72 hours of inactivity plus a relevant code
+      change. It is not called benchmark validated.
+- [ ] The continuation campaign remains untouched at 6/864 complete, 858 remaining, and
+      `no_auto_rollover`. No paid measured arm or calibration call runs.
+- [ ] The pre-existing 60 authenticated compatibility workflows are not rerun. Local mapped/schema
+      regressions remain explicitly distinct from live compatibility evidence.
+- [ ] README, architecture, privacy, compatibility, roadmap, changelog, NOTICE/license inventory,
+      and SBOM metadata describe the exact source-preview behavior and limitations.
 
-## Immutable publication sequence
+## Explicitly blocked public-release actions
 
-- [ ] Create and push `v0.1.0-alpha.2` from the reviewed clean `main` commit.
-- [ ] Approve the `release-compatibility` gate and confirm it accepts the pinned live artifact.
-- [ ] Confirm `transparentCaptureReleaseGate.eligible` is true only after all 60 scenario entries
-      and their retained evidence hashes have been reviewed.
-- [ ] Confirm the tag workflow creates a draft release and provenance attestations.
-- [ ] Inspect archive names, SBOM, NOTICE, third-party inventory, and checksums.
-- [ ] Explicitly approve the protected crates.io job.
-- [ ] Confirm `cargo install previously-on --version 0.1.0-alpha.2 --locked` succeeds.
-- [ ] Confirm the workflow publishes the GitHub release only after exact-version install passes.
+- [ ] **BLOCKED:** create or push `v0.1.0-alpha.3`.
+- [ ] **BLOCKED:** create or publish a GitHub Release.
+- [ ] **BLOCKED:** publish `previously-on 0.1.0-alpha.3` to crates.io.
+- [ ] **BLOCKED:** claim transparent capture support from mapped regressions or schema probes.
+- [ ] **BLOCKED:** run a real AI calibration/model call without a compatible App Server, verified
+      permission profile, and fresh user approval at execution time.
+- [ ] **BLOCKED:** treat the incomplete continuation campaign or provisional seven/80 policy as a
+      model-specific measured recommendation.
+
+Before any later public release, repeat name/trademark review, confirm protected publication
+environments and branch rules, supply a SHA/version-bound eligible live compatibility artifact,
+review all 60 retained workflow rows and serious-stale evaluation without rerunning validated
+work, decide signing/notarization, inspect provenance/SBOM/checksums, and obtain explicit human
+approval for each irreversible publication step.
