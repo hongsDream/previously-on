@@ -158,22 +158,16 @@ make_archive "$SOURCE_STAGE" "$SOURCE_BUNDLE_NAME" "$STAGE/source-2.tar.gz"
 cmp "$STAGE/source-1.tar.gz" "$STAGE/source-2.tar.gz"
 install -m 0644 "$STAGE/source-1.tar.gz" "$OUTPUT_DIR/$SOURCE_ARCHIVE_BASENAME"
 
-tar -tzf "$OUTPUT_DIR/$MACOS_ARCHIVE_BASENAME" | grep -F "$MACOS_BUNDLE_NAME/previously" >/dev/null
-tar -tzf "$OUTPUT_DIR/$SOURCE_ARCHIVE_BASENAME" | grep -F "$SOURCE_BUNDLE_NAME/Cargo.toml" >/dev/null
-
-ARTIFACTS=(
-  "$BINARY_BASENAME"
-  "$MACOS_ARCHIVE_BASENAME"
-  "$SOURCE_ARCHIVE_BASENAME"
-  "$SBOM_BASENAME"
-  "NOTICE"
-  "THIRD_PARTY_LICENSES.md"
-)
+CHECKSUM_ASSETS="$STAGE/checksum-assets.txt"
 (
   cd "$OUTPUT_DIR"
-  shasum -a 256 "${ARTIFACTS[@]}" > SHA256SUMS
-  shasum -a 256 -c SHA256SUMS
+  find . -maxdepth 1 -type f ! -name SHA256SUMS -exec basename {} \; \
+    | LC_ALL=C sort > "$CHECKSUM_ASSETS"
+  while IFS= read -r asset; do
+    shasum -a 256 "$asset"
+  done < "$CHECKSUM_ASSETS" > SHA256SUMS
 )
+node "$ROOT/scripts/verify-release-bundle.mjs" --directory "$OUTPUT_DIR" --version "$VERSION"
 
 echo "Release artifacts written to $OUTPUT_DIR:"
-printf '  %s\n' "${ARTIFACTS[@]}" SHA256SUMS
+find "$OUTPUT_DIR" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort | sed 's/^/  /'

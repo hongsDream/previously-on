@@ -43,6 +43,8 @@ jobs:
           node benchmarks/continuation/runner.mjs \
             --dry-run \
             --output "${RUNNER_TEMP}/continuation-dry-run-plan.v1.json"
+      - name: Release bundle verifier contract
+        run: node --test scripts/verify-release-bundle.test.mjs
       - name: Rust formatting
         run: cargo fmt --check
       - name: Rust lint
@@ -64,6 +66,22 @@ jobs:
       - name: UI dependency audit
         run: npm audit --audit-level=high
         working-directory: ui
+
+  rustsec-audit:
+    name: rustsec-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Fail on RustSec vulnerabilities
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   reliability-adversarial:
     name: reliability-adversarial
@@ -117,7 +135,7 @@ jobs:
 
   package-release:
     name: package-release
-    needs: [quality, reliability-adversarial]
+    needs: [quality, reliability-adversarial, rustsec-audit]
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -135,6 +153,10 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Build and verify release artifacts
         run: ./scripts/build-release.sh
+      - name: Reverify release bundle before upload
+        run: |
+          VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
+          node scripts/verify-release-bundle.mjs --directory outputs --version "$VERSION"
       - name: Upload verified release rehearsal
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
