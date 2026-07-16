@@ -7,7 +7,7 @@ LATEST_BIN=""
 PREVIOUS_BIN=""
 APP_CURRENT="not-run"
 APP_PREVIOUS="not-run"
-PRODUCT_VERSION="$(awk -F ' *= *' '/^version = / { gsub(/\"/, \"\", $2); print $2; exit }' "$ROOT/Cargo.toml")"
+PRODUCT_VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' "$ROOT/Cargo.toml")"
 
 usage() {
   printf '%s\n' "usage: scripts/run-compatibility.sh [--latest-bin PATH --previous-bin PATH] [--codex-app-current VERSION --codex-app-previous VERSION] [--output PATH]"
