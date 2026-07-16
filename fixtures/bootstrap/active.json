@@ -1,0 +1,194 @@
+{
+  "trust": {
+    "classification": "untrusted_historical_data",
+    "instructionPolicy": "display_only_never_execute",
+    "source": "previously_on_local_history"
+  },
+  "repository": {
+    "name": "fixture-repository",
+    "path": "/tmp/fixture-repository",
+    "branch": "main",
+    "connected": true,
+    "state": "active",
+    "captureHealth": "good"
+  },
+  "tasks": [
+    {
+      "id": "task-active",
+      "repositoryId": "repo-active",
+      "title": "Verify bootstrap contract",
+      "titleSuggestion": null,
+      "status": "active",
+      "updatedAt": "2026-07-16T00:00:05Z",
+      "checkpointIds": ["checkpoint-active"],
+      "goal": "Keep the bootstrap boundary typed",
+      "decisions": { "confirmed": 1, "proposed": 0 },
+      "openItems": { "risks": 0, "questions": 0, "actions": 0 },
+      "files": [{ "path": "src/", "count": 1 }],
+      "tests": { "passing": 1, "failing": 0, "skipped": 0 },
+      "rollover": null,
+      "codebase": {
+        "repositoryName": "fixture-repository",
+        "registeredRoot": "/tmp/fixture-repository",
+        "worktreeRoot": "/tmp/fixture-repository",
+        "branch": "main",
+        "baselineSha": "0123456789abcdef0123456789abcdef01234567",
+        "currentSha": "0123456789abcdef0123456789abcdef01234567",
+        "status": "unchanged",
+        "sourceThreadIds": ["thread-active"],
+        "sessionCount": 1
+      }
+    }
+  ],
+  "checkpoints": [
+    {
+      "id": "checkpoint-active",
+      "sequence": 1,
+      "sessionTitle": "Session 2026-07-16T00:00:04.000Z",
+      "capturedAt": "2026-07-16T00:00:04.000Z",
+      "branch": "main",
+      "sha": "01234567",
+      "filesChanged": 1,
+      "additions": 4,
+      "deletions": 1,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "coverage": 100,
+      "coverageDelta": 0,
+      "freshness": "fresh",
+      "state": "confirmed",
+      "sourceThreadId": "thread-active",
+      "lastActivityAt": "2026-07-16T00:00:04.000Z",
+      "turnCount": 1,
+      "compactionCount": 0,
+      "contextUsage": {
+        "totalTokens": 120,
+        "modelContextWindow": 128000,
+        "observedAt": "2026-07-16T00:00:04.000Z"
+      },
+      "continuationState": "normal",
+      "continuationAdvice": null,
+      "temporalRevalidation": {
+        "status": "unchanged",
+        "baselineSha": "0123456789abcdef0123456789abcdef01234567",
+        "currentSha": "0123456789abcdef0123456789abcdef01234567",
+        "changes": [],
+        "warnings": []
+      }
+    }
+  ],
+  "facts": [
+    {
+      "id": "fact-active",
+      "taskId": "task-active",
+      "kind": "decision",
+      "text": "Use an explicit bootstrap DTO.",
+      "status": "confirmed",
+      "confirmedAt": "2026-07-16T00:00:03.000Z",
+      "updatedAt": "2026-07-16T00:00:03.000Z",
+      "evidenceIds": ["evidence-active"],
+      "selectionReason": "Confirmed decision with verified evidence.",
+      "relatedFiles": ["src/server/bootstrap.rs"],
+      "deprecatedAfterCommit": null,
+      "mixedProvenance": false,
+      "provenanceSessionIds": ["session-active"]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "evidence-active",
+      "checkpointId": "checkpoint-active",
+      "factId": "fact-active",
+      "sessionId": "session-active",
+      "sessionLabel": "session-active",
+      "turnLabel": "Turn 1",
+      "capturedAt": "2026-07-16T00:00:02.000Z",
+      "source": "fixture",
+      "excerpt": "Typed bootstrap fixture evidence.",
+      "code": "Typed bootstrap fixture evidence.",
+      "freshness": "fresh",
+      "selectionReason": "Confirmed decision with verified evidence.",
+      "excludedSession": false,
+      "relatedFiles": [
+        { "path": "src/server/bootstrap.rs", "additions": 4, "deletions": 1 }
+      ]
+    }
+  ],
+  "sessions": [
+    {
+      "id": "session-active",
+      "taskId": "task-active",
+      "sourceThreadId": "thread-active",
+      "startedAt": "2026-07-16T00:00:01.000Z",
+      "lastActivityAt": "2026-07-16T00:00:04.000Z",
+      "turnCount": 1,
+      "compactionCount": 0,
+      "contextUsage": {
+        "totalTokens": 120,
+        "modelContextWindow": 128000,
+        "observedAt": "2026-07-16T00:00:04.000Z"
+      },
+      "continuationState": "normal",
+      "excluded": false
+    }
+  ],
+  "contracts": [],
+  "contractCandidates": [],
+  "contractEvaluation": {
+    "schemaVersion": 1,
+    "id": "evaluation-empty",
+    "repositoryId": "repo-active",
+    "taskId": null,
+    "readiness": "ready",
+    "evaluatedAt": "2026-07-16T00:00:05Z",
+    "relevantContracts": [],
+    "requiredTests": [],
+    "warnings": [],
+    "contentFingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "continuationIssued": false,
+    "base": null,
+    "head": null,
+    "mergeBase": null
+  },
+  "contractEvaluations": [],
+  "taskGroupingOperations": [],
+  "graphSummary": {
+    "nodeCount": 2,
+    "edgeCount": 1,
+    "verifiedEdgeCount": 1,
+    "nodesByKind": { "session": 1, "task": 1 },
+    "edgesByKind": { "task-has-session": 1 }
+  },
+  "aiRefreshCapability": {
+    "status": "needs_setup",
+    "profileName": "previously-input-only",
+    "reason": "run setup codex with --enable-ai-refresh",
+    "checkedAt": "2026-07-16T00:00:05Z"
+  },
+  "factRefreshOperations": [],
+  "agents": [],
+  "contextPacks": {
+    "task-active": {
+      "schema_version": 1,
+      "repository_id": "repo-active",
+      "task_id": "task-active",
+      "generated_at": "2026-07-16T00:00:05Z",
+      "token_budget": 1200,
+      "token_count": 0,
+      "goal": "Keep the bootstrap boundary typed",
+      "facts": [],
+      "unresolved_items": [],
+      "files": [],
+      "tests": [],
+      "temporal_revalidation": null,
+      "current_validation": null,
+      "coverage": {
+        "schema_version": 1,
+        "status": "complete",
+        "captured": [],
+        "missing": [],
+        "warnings": []
+      }
+    }
+  }
+}
