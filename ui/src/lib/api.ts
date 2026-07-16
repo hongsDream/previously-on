@@ -5,7 +5,11 @@ import type {
   RegressionCandidateDraftV1,
   RegressionCandidateV1,
   RegressionContractV1,
-  TaskStatus,
+  RelationshipGraphV1,
+  TaskGroupingOperationV1,
+  TaskGroupingPreviewV1,
+  TaskGroupingRequestV1,
+  TaskUpdateV1,
 } from '../types';
 
 export interface ContractMutationResponse {
@@ -43,7 +47,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (import.meta.env.DEV && response.status >= 500) {
       throw new ApiUnavailableError();
     }
-    throw new Error(`API request failed (${response.status})`);
+    const payload = await response.json().catch(() => null) as { error?: unknown } | null;
+    const message = typeof payload?.error === 'string' && payload.error.trim()
+      ? payload.error
+      : `API request failed (${response.status})`;
+    throw new Error(message);
   }
   return response.json() as Promise<T>;
 }
@@ -89,11 +97,37 @@ export function purgeRepository() {
   });
 }
 
-export function updateTaskStatus(id: string, status: TaskStatus) {
-  return request<{ ok: true; status: TaskStatus; updatedAt: string }>(`/api/tasks/${encodeURIComponent(id)}`, {
+export function updateTask(id: string, update: TaskUpdateV1) {
+  return request<{ ok: true }>(`/api/tasks/${encodeURIComponent(id)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(update),
   });
+}
+
+export function previewTaskGrouping(requestBody: TaskGroupingRequestV1) {
+  return request<TaskGroupingPreviewV1>('/api/task-grouping/preview', {
+    method: 'POST',
+    body: JSON.stringify(requestBody),
+  });
+}
+
+export function applyTaskGrouping(requestBody: TaskGroupingRequestV1) {
+  return request<{ ok: true; operation: TaskGroupingOperationV1 }>('/api/task-grouping', {
+    method: 'POST',
+    body: JSON.stringify(requestBody),
+  });
+}
+
+export function undoTaskGrouping(operationId: string) {
+  return request<{ ok: true; operation: TaskGroupingOperationV1 }>(`/api/task-grouping/${encodeURIComponent(operationId)}/undo`, {
+    method: 'POST',
+  });
+}
+
+export function fetchRelationshipGraph(repositoryId: string, taskId?: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ repository: repositoryId });
+  if (taskId) query.set('task', taskId);
+  return request<RelationshipGraphV1>(`/api/graph?${query.toString()}`, { signal });
 }
 
 export function createContractCandidate(candidate: RegressionCandidateDraftV1) {

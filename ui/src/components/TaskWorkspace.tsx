@@ -1,10 +1,23 @@
-import { ArrowLeft, CircleAlert, CircleCheck, LoaderCircle, MoreHorizontal } from 'lucide-react';
-import type { BootstrapData, Checkpoint, RegressionCandidateDraftV1, Task, TaskStatus } from '../types';
+import { ArrowLeft, CircleAlert, CircleCheck, LoaderCircle } from 'lucide-react';
+import type {
+  BootstrapData,
+  Checkpoint,
+  Fact,
+  RegressionCandidateDraftV1,
+  Session,
+  Task,
+  TaskGroupingOperationV1,
+  TaskGroupingPreviewV1,
+  TaskGroupingRequestV1,
+  TaskUpdateV1,
+} from '../types';
 import { CheckpointTimeline } from './CheckpointTimeline';
 import { CodebaseLineage } from './CodebaseLineage';
 import { ContextPackPreview } from './ContextPackPreview';
 import { ResumeBanner } from './ResumeBanner';
 import { RegressionContractsPanel } from './RegressionContractsPanel';
+import { TaskEditor } from './TaskEditor';
+import { TaskGroupingPanel } from './TaskGroupingPanel';
 
 interface TaskWorkspaceProps {
   task: Task;
@@ -16,11 +29,18 @@ interface TaskWorkspaceProps {
   contractCandidates: BootstrapData['contractCandidates'];
   contractEvaluation: BootstrapData['contractEvaluation'];
   contextPackExpanded: boolean;
+  tasks: Task[];
+  sessions: Session[];
+  facts: Fact[];
+  groupingOperations: TaskGroupingOperationV1[];
   onCheckpointSelect: (checkpoint: Checkpoint) => void;
   onReviewResume: () => void;
   onDismissResume: () => void;
   onToggleContextPack: () => void;
-  onTaskStatusChange: (status: TaskStatus) => void;
+  onTaskUpdate: (update: TaskUpdateV1) => Promise<boolean>;
+  onGroupingPreview: (request: TaskGroupingRequestV1) => Promise<TaskGroupingPreviewV1 | null>;
+  onGroupingApply: (request: TaskGroupingRequestV1) => Promise<boolean>;
+  onGroupingUndo: (operationId: string) => Promise<boolean>;
   onCreateContractCandidate: (candidate: RegressionCandidateDraftV1) => Promise<boolean>;
   onUpdateContractCandidate: (id: string, candidate: RegressionCandidateDraftV1) => Promise<boolean>;
   onApproveContractCandidate: (id: string) => Promise<boolean>;
@@ -40,11 +60,18 @@ export function TaskWorkspace({
   contractCandidates,
   contractEvaluation,
   contextPackExpanded,
+  tasks,
+  sessions,
+  facts,
+  groupingOperations,
   onCheckpointSelect,
   onReviewResume,
   onDismissResume,
   onToggleContextPack,
-  onTaskStatusChange,
+  onTaskUpdate,
+  onGroupingPreview,
+  onGroupingApply,
+  onGroupingUndo,
   onCreateContractCandidate,
   onUpdateContractCandidate,
   onApproveContractCandidate,
@@ -56,20 +83,30 @@ export function TaskWorkspace({
   return (
     <main className="task-workspace">
       <header className="task-header">
-        <button className="back-button" type="button" onClick={onBack}><ArrowLeft size={18} /> <span className="desktop-only">All tasks</span></button>
+        <button className="back-button" type="button" aria-label="All tasks" onClick={onBack}><ArrowLeft size={18} /> <span className="desktop-only">All tasks</span></button>
         <div>
           <h1>{task.title}</h1>
           <span className="task-meta desktop-only">
             <small>Task ID: &nbsp;{task.id}</small>
-            <select aria-label="Task status" value={task.status} disabled={mutationPending} onChange={(event) => onTaskStatusChange(event.target.value as TaskStatus)}>
-              <option value="active">Active</option>
-              <option value="completed">Completed</option>
-              <option value="abandoned">Abandoned</option>
-            </select>
+            <span className={`task-lifecycle task-lifecycle-${task.status}`}>{task.status}</span>
           </span>
         </div>
-        <button className="icon-button mobile-only" type="button" aria-label="Task options" disabled><MoreHorizontal size={21} /></button>
       </header>
+
+      <TaskEditor task={task} disabled={contractMutationsDisabled} mutationPending={mutationPending} onSave={onTaskUpdate} />
+
+      <TaskGroupingPanel
+        task={task}
+        tasks={tasks}
+        sessions={sessions}
+        facts={facts}
+        operations={groupingOperations}
+        disabled={contractMutationsDisabled}
+        mutationPending={mutationPending}
+        onPreview={onGroupingPreview}
+        onApply={onGroupingApply}
+        onUndo={onGroupingUndo}
+      />
 
       {resumeCandidate ? (
         <ResumeBanner candidate={resumeCandidate} task={task} onReview={onReviewResume} onDismiss={onDismissResume} />

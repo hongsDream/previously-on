@@ -2,8 +2,9 @@ use crate::contracts::{ContractEvaluationV1, RegressionCandidateV1};
 use crate::domain::{
     deterministic_id, CheckpointV1, ContextUsageV1, ContinuationAdviceV1, ContinuationReasonV1,
     ContinuationStateV1, CoverageV1, EventEnvelopeV1, EventKind, EvidenceV1, FactLifecycle, FactV1,
-    FileChangeV1, GitSnapshotV1, RepositoryV1, SessionLifecycle, SessionV1, TaskLifecycle,
-    TaskSuggestionV1, TaskTimelineV1, TaskV1, TestResultV1, SCHEMA_VERSION_V1,
+    FileChangeV1, GitSnapshotV1, RepositoryV1, SessionLifecycle, SessionV1,
+    TaskGroupingOperationV1, TaskLifecycle, TaskSuggestionV1, TaskTimelineV1, TaskV1, TestResultV1,
+    SCHEMA_VERSION_V1,
 };
 use crate::redaction::{redact_excerpt, redact_text, redact_value};
 use anyhow::{bail, Context, Result};
@@ -414,6 +415,128 @@ impl Store {
         )
     }
 
+    pub fn list_tasks(&self, repository_id: Option<&str>) -> Result<Vec<TaskV1>> {
+        let connection = self.connect()?;
+        if let Some(repository_id) = repository_id {
+            query_json_rows(
+                &connection,
+                "SELECT task_json FROM tasks WHERE repository_id = ?1 ORDER BY updated_at DESC, id",
+                [repository_id],
+            )
+        } else {
+            query_json_rows(
+                &connection,
+                "SELECT task_json FROM tasks ORDER BY updated_at DESC, id",
+                [],
+            )
+        }
+    }
+
+    pub fn list_sessions(&self, repository_id: Option<&str>) -> Result<Vec<SessionV1>> {
+        let connection = self.connect()?;
+        if let Some(repository_id) = repository_id {
+            query_json_rows(
+                &connection,
+                "SELECT session_json FROM sessions WHERE repository_id = ?1 ORDER BY started_at, id",
+                [repository_id],
+            )
+        } else {
+            query_json_rows(
+                &connection,
+                "SELECT session_json FROM sessions ORDER BY started_at, id",
+                [],
+            )
+        }
+    }
+
+    pub fn list_sessions_for_task(&self, task_id: &str) -> Result<Vec<SessionV1>> {
+        query_json_rows(
+            &self.connect()?,
+            "SELECT session_json FROM sessions WHERE task_id = ?1 ORDER BY started_at, id",
+            [task_id],
+        )
+    }
+
+    pub fn list_task_grouping_operations(
+        &self,
+        repository_id: Option<&str>,
+    ) -> Result<Vec<TaskGroupingOperationV1>> {
+        let mut operations = self
+            .list_events(repository_id)?
+            .into_iter()
+            .filter(|event| event.kind == EventKind::TaskGroupingChanged)
+            .filter_map(|event| payload_as::<TaskGroupingOperationV1>(&event.payload, "operation"))
+            .collect::<Vec<_>>();
+        operations.sort_by(|left, right| {
+            (left.occurred_at, &left.operation_id).cmp(&(right.occurred_at, &right.operation_id))
+        });
+        Ok(operations)
+    }
+
+    pub fn get_task_grouping_operation(
+        &self,
+        repository_id: Option<&str>,
+        operation_id: &str,
+    ) -> Result<Option<TaskGroupingOperationV1>> {
+        Ok(self
+            .list_task_grouping_operations(repository_id)?
+            .into_iter()
+            .find(|operation| operation.operation_id == operation_id))
+    }
+
+    pub fn append_task_grouping_operation(
+        &self,
+        operation: &TaskGroupingOperationV1,
+    ) -> Result<InsertOutcome> {
+        if let Some(existing) = self.get_task_grouping_operation(None, &operation.operation_id)? {
+            if existing == *operation {
+                return Ok(InsertOutcome::Duplicate);
+            }
+            bail!("operation id already belongs to a different grouping operation");
+        }
+        for movement in &operation.session_moves {
+            let session = self
+                .get_session(&movement.session_id)?
+                .with_context(|| format!("grouping session missing: {}", movement.session_id))?;
+            if session.repository_id != operation.repository_id {
+                bail!("grouping operation crossed repository boundary");
+            }
+            if session.task_id.as_deref() != Some(movement.from_task_id.as_str()) {
+                bail!(
+                    "stale session association for {}: expected {}, found {}",
+                    movement.session_id,
+                    movement.from_task_id,
+                    session.task_id.as_deref().unwrap_or("unlinked")
+                );
+            }
+        }
+        let mut event = EventEnvelopeV1::new(
+            format!("local-ui:task-grouping:{}", operation.operation_id),
+            &operation.repository_id,
+            "task-grouping",
+            EventKind::TaskGroupingChanged,
+            operation.occurred_at,
+            json!({ "operation": operation }),
+        );
+        event.event_id = deterministic_id(
+            "event",
+            &[
+                &operation.repository_id,
+                "task-grouping",
+                &operation.operation_id,
+            ],
+        );
+        event.dedupe_key = deterministic_id(
+            "dedupe",
+            &[
+                &operation.repository_id,
+                "task-grouping",
+                &operation.operation_id,
+            ],
+        );
+        self.insert_event(&event)
+    }
+
     pub fn list_session_events(
         &self,
         repository_id: &str,
@@ -440,20 +563,41 @@ impl Store {
         repository_id: &str,
         task_id: &str,
     ) -> Result<Vec<EventEnvelopeV1>> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT event_json FROM canonical_events
-             WHERE repository_id = ?1 AND task_id = ?2
-             ORDER BY occurred_at, COALESCE(sequence_no, 9223372036854775807), event_id",
-        )?;
-        let rows = statement.query_map(params![repository_id, task_id], |row| {
-            row.get::<_, String>(0)
-        })?;
-        rows.map(|row| {
-            let json = row?;
-            serde_json::from_str(&json).context("deserialize task event")
-        })
-        .collect()
+        let events = self.list_events(Some(repository_id))?;
+        let mut effective = Vec::new();
+        for event in events {
+            let belongs =
+                if event.kind == EventKind::TaskGroupingChanged {
+                    payload_as::<TaskGroupingOperationV1>(&event.payload, "operation").is_some_and(
+                        |operation| {
+                            operation.session_moves.iter().any(|item| {
+                                item.from_task_id == task_id || item.to_task_id == task_id
+                            }) || operation
+                                .task_lifecycle
+                                .iter()
+                                .any(|item| item.task_id == task_id)
+                        },
+                    )
+                } else if event.kind == EventKind::FactDeprecated {
+                    event
+                        .payload
+                        .get("fact_id")
+                        .and_then(Value::as_str)
+                        .and_then(|fact_id| self.get_fact(fact_id).ok().flatten())
+                        .is_some_and(|fact| fact.task_id == task_id)
+                } else if !matches!(event.session_id.as_str(), "local-ui" | "task-grouping") {
+                    self.get_session(&event.session_id)?
+                        .and_then(|session| session.task_id)
+                        .as_deref()
+                        == Some(task_id)
+                } else {
+                    event.task_id.as_deref() == Some(task_id)
+                };
+            if belongs {
+                effective.push(event);
+            }
+        }
+        Ok(effective)
     }
 
     pub fn session_event_count(&self, session_id: &str, kind: EventKind) -> Result<u64> {
@@ -1017,6 +1161,10 @@ impl Store {
             .iter()
             .filter(|event| {
                 event.occurred_at >= cutoff
+                    || matches!(
+                        event.kind,
+                        EventKind::TaskUpdated | EventKind::TaskGroupingChanged
+                    )
                     || pinned_source_ids.contains(&event.source_id)
                     || event
                         .payload
@@ -1362,6 +1510,15 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_task ON sessions(task_id, started_at);
+CREATE TABLE IF NOT EXISTS session_grouping_assignments (
+  session_id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_grouping_assignments_task
+  ON session_grouping_assignments(repository_id, task_id, occurred_at);
 CREATE TABLE IF NOT EXISTS checkpoints (
   id TEXT PRIMARY KEY,
   repository_id TEXT NOT NULL,
@@ -1436,6 +1593,7 @@ fn rebuild_projections_tx(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         "DELETE FROM task_fts;
          DELETE FROM fact_fts;
+         DELETE FROM session_grouping_assignments;
          DELETE FROM contract_evaluations;
          DELETE FROM regression_candidates;
          DELETE FROM test_results;
@@ -1454,8 +1612,20 @@ fn rebuild_projections_tx(transaction: &Transaction<'_>) -> Result<()> {
 
 fn apply_event_projection(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> Result<()> {
     ensure_repository_tx(transaction, event)?;
-    ensure_session_tx(transaction, event)?;
-    ensure_task_tx(transaction, event)?;
+    if event.kind == EventKind::TaskGroupingChanged {
+        let operation = payload_as::<TaskGroupingOperationV1>(&event.payload, "operation")
+            .context("task grouping event is missing operation")?;
+        return apply_task_grouping_projection(transaction, &operation);
+    }
+    if event.kind == EventKind::TaskUpdated {
+        return ensure_task_tx(transaction, event);
+    }
+    let mut event = event.clone();
+    if let Some(task_id) = effective_grouping_task_id(transaction, &event)? {
+        event.task_id = Some(task_id);
+    }
+    ensure_session_tx(transaction, &event)?;
+    ensure_task_tx(transaction, &event)?;
     match event.kind {
         EventKind::SessionStarted => {
             if let Some(session) = payload_as::<SessionV1>(&event.payload, "session") {
@@ -1480,6 +1650,16 @@ fn apply_event_projection(transaction: &Transaction<'_>, event: &EventEnvelopeV1
         }
         EventKind::Checkpoint => {
             if let Some(checkpoint) = payload_as::<CheckpointV1>(&event.payload, "checkpoint") {
+                let mut checkpoint = checkpoint;
+                if let Some(task_id) = event.task_id.as_ref() {
+                    checkpoint.task_id = task_id.clone();
+                    for change in &mut checkpoint.changed_files {
+                        change.task_id = Some(task_id.clone());
+                    }
+                    for test in &mut checkpoint.tests {
+                        test.task_id = Some(task_id.clone());
+                    }
+                }
                 upsert_checkpoint_tx(transaction, &checkpoint)?;
             }
         }
@@ -1491,10 +1671,16 @@ fn apply_event_projection(transaction: &Transaction<'_>, event: &EventEnvelopeV1
                 {
                     fact.lifecycle = FactLifecycle::Confirmed;
                 }
+                if let Some(task_id) = event.task_id.as_ref() {
+                    fact.task_id = task_id.clone();
+                }
                 upsert_fact_tx(transaction, &fact)?;
             }
             if let Some(mut evidence) = payload_as::<EvidenceV1>(&event.payload, "evidence") {
                 evidence.excerpt = redact_excerpt(&evidence.excerpt);
+                if let Some(task_id) = event.task_id.as_ref() {
+                    evidence.task_id = task_id.clone();
+                }
                 upsert_evidence_tx(transaction, &evidence)?;
             }
         }
@@ -1502,14 +1688,23 @@ fn apply_event_projection(transaction: &Transaction<'_>, event: &EventEnvelopeV1
             for mut test in payload_array::<TestResultV1>(&event.payload, "test_results") {
                 test.command = redact_text(&test.command);
                 test.summary = test.summary.map(|summary| redact_excerpt(&summary));
+                if let Some(task_id) = event.task_id.as_ref() {
+                    test.task_id = Some(task_id.clone());
+                }
                 upsert_test_result_tx(transaction, &test)?;
             }
             if let Some(mut test) = payload_as::<TestResultV1>(&event.payload, "test_result") {
                 test.command = redact_text(&test.command);
                 test.summary = test.summary.map(|summary| redact_excerpt(&summary));
+                if let Some(task_id) = event.task_id.as_ref() {
+                    test.task_id = Some(task_id.clone());
+                }
                 upsert_test_result_tx(transaction, &test)?;
             }
-            for change in payload_array::<FileChangeV1>(&event.payload, "file_changes") {
+            for mut change in payload_array::<FileChangeV1>(&event.payload, "file_changes") {
+                if let Some(task_id) = event.task_id.as_ref() {
+                    change.task_id = Some(task_id.clone());
+                }
                 upsert_file_change_tx(transaction, &change)?;
             }
         }
@@ -1518,16 +1713,176 @@ fn apply_event_projection(transaction: &Transaction<'_>, event: &EventEnvelopeV1
                 .payload
                 .get("regressionCandidate")
                 .context("regression candidate event is missing regressionCandidate")?;
-            upsert_regression_candidate_tx(transaction, event, candidate)?;
+            upsert_regression_candidate_tx(transaction, &event, candidate)?;
         }
         EventKind::ContractEvaluationRecorded => {
             let evaluation = event
                 .payload
                 .get("contractEvaluation")
                 .context("contract evaluation event is missing contractEvaluation")?;
-            upsert_contract_evaluation_tx(transaction, event, evaluation)?;
+            upsert_contract_evaluation_tx(transaction, &event, evaluation)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn effective_grouping_task_id(
+    transaction: &Transaction<'_>,
+    event: &EventEnvelopeV1,
+) -> Result<Option<String>> {
+    if event.session_id == "local-ui" || event.session_id == "task-grouping" {
+        return Ok(None);
+    }
+    transaction
+        .query_row(
+            "SELECT task_id FROM session_grouping_assignments
+             WHERE session_id = ?1 AND repository_id = ?2",
+            params![event.session_id, event.repository_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("load effective task grouping assignment")
+}
+
+fn apply_task_grouping_projection(
+    transaction: &Transaction<'_>,
+    operation: &TaskGroupingOperationV1,
+) -> Result<()> {
+    if operation.schema_version != SCHEMA_VERSION_V1 {
+        bail!("unsupported task grouping operation schema");
+    }
+    if let Some(created_task) = operation.created_task.as_ref() {
+        let should_exist = operation
+            .task_lifecycle
+            .iter()
+            .any(|snapshot| snapshot.task_id == created_task.id && snapshot.after.is_some());
+        if should_exist {
+            upsert_task_tx(transaction, created_task)?;
+        }
+    }
+    for item in &operation.session_moves {
+        let mut session: SessionV1 = query_json_optional(
+            transaction,
+            "SELECT session_json FROM sessions WHERE id = ?1",
+            [&item.session_id],
+        )?
+        .with_context(|| format!("grouping session projection missing: {}", item.session_id))?;
+        if session.repository_id != operation.repository_id {
+            bail!("grouping operation crossed repository boundary");
+        }
+        session.task_id = Some(item.to_task_id.clone());
+        upsert_session_tx(transaction, &session)?;
+        transaction.execute(
+            "INSERT INTO session_grouping_assignments
+             (session_id, repository_id, task_id, operation_id, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(session_id) DO UPDATE SET repository_id=excluded.repository_id,
+               task_id=excluded.task_id, operation_id=excluded.operation_id,
+               occurred_at=excluded.occurred_at",
+            params![
+                item.session_id,
+                operation.repository_id,
+                item.to_task_id,
+                operation.operation_id,
+                timestamp(operation.occurred_at)
+            ],
+        )?;
+        relocate_session_owned_projections(transaction, &item.session_id, &item.to_task_id)?;
+    }
+    for impact in &operation.fact_impacts {
+        if impact.mixed_provenance {
+            continue;
+        }
+        let Some(to_task_id) = impact.to_task_id.as_deref() else {
+            continue;
+        };
+        let Some(mut fact) = query_json_optional::<FactV1, _>(
+            transaction,
+            "SELECT fact_json FROM facts WHERE id = ?1",
+            [&impact.fact_id],
+        )?
+        else {
+            continue;
+        };
+        fact.task_id = to_task_id.to_string();
+        fact.updated_at = operation.occurred_at;
+        upsert_fact_tx(transaction, &fact)?;
+    }
+    for snapshot in &operation.task_lifecycle {
+        match snapshot.after {
+            Some(lifecycle) => {
+                let Some(mut task) = query_json_optional::<TaskV1, _>(
+                    transaction,
+                    "SELECT task_json FROM tasks WHERE id = ?1",
+                    [&snapshot.task_id],
+                )?
+                else {
+                    bail!("grouping lifecycle task missing: {}", snapshot.task_id);
+                };
+                task.lifecycle = lifecycle;
+                task.updated_at = operation.occurred_at;
+                upsert_task_tx(transaction, &task)?;
+            }
+            None => {
+                transaction.execute(
+                    "DELETE FROM task_fts WHERE task_id = ?1",
+                    [&snapshot.task_id],
+                )?;
+                transaction.execute("DELETE FROM tasks WHERE id = ?1", [&snapshot.task_id])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn relocate_session_owned_projections(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    task_id: &str,
+) -> Result<()> {
+    for mut checkpoint in query_json_rows::<CheckpointV1, _>(
+        transaction,
+        "SELECT checkpoint_json FROM checkpoints WHERE session_id = ?1 ORDER BY created_at, id",
+        [session_id],
+    )? {
+        checkpoint.task_id = task_id.to_string();
+        for change in &mut checkpoint.changed_files {
+            change.task_id = Some(task_id.to_string());
+        }
+        for test in &mut checkpoint.tests {
+            test.task_id = Some(task_id.to_string());
+        }
+        upsert_checkpoint_tx(transaction, &checkpoint)?;
+    }
+    for mut evidence in query_json_rows::<EvidenceV1, _>(
+        transaction,
+        "SELECT evidence_json FROM evidence WHERE session_id = ?1 ORDER BY created_at, id",
+        [session_id],
+    )? {
+        evidence.task_id = task_id.to_string();
+        upsert_evidence_tx(transaction, &evidence)?;
+    }
+    let mut changes = query_json_rows::<FileChangeV1, _>(
+        transaction,
+        "SELECT change_json FROM file_changes WHERE session_id = ?1 ORDER BY path, id",
+        [session_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM file_changes WHERE session_id = ?1",
+        [session_id],
+    )?;
+    for mut change in changes.drain(..) {
+        change.task_id = Some(task_id.to_string());
+        upsert_file_change_tx(transaction, &change)?;
+    }
+    for mut test in query_json_rows::<TestResultV1, _>(
+        transaction,
+        "SELECT test_json FROM test_results WHERE session_id = ?1 ORDER BY occurred_at, id",
+        [session_id],
+    )? {
+        test.task_id = Some(task_id.to_string());
+        upsert_test_result_tx(transaction, &test)?;
     }
     Ok(())
 }
@@ -1753,19 +2108,38 @@ fn ensure_task_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> Res
     let Some(task_id) = event.task_id.as_deref() else {
         return Ok(());
     };
-    if let Some(mut task) = payload_as::<TaskV1>(&event.payload, "task") {
-        if task.id == task_id && task.repository_id == event.repository_id {
-            if event.occurred_at > task.updated_at {
-                task.updated_at = event.occurred_at;
-            }
-            return upsert_task_tx(transaction, &task);
-        }
-    }
     let existing: Option<TaskV1> = query_json_optional(
         transaction,
         "SELECT task_json FROM tasks WHERE id = ?1",
         [task_id],
     )?;
+    if event.kind == EventKind::TaskUpdated {
+        let mut task = payload_as::<TaskV1>(&event.payload, "task")
+            .context("task update event is missing task")?;
+        if task.id != task_id || task.repository_id != event.repository_id {
+            bail!("task update identity does not match event envelope");
+        }
+        if event.occurred_at > task.updated_at {
+            task.updated_at = event.occurred_at;
+        }
+        return upsert_task_tx(transaction, &task);
+    }
+    if let Some(mut task) = payload_as::<TaskV1>(&event.payload, "task") {
+        if task.id == task_id && task.repository_id == event.repository_id {
+            let replaces_placeholder = existing
+                .as_ref()
+                .is_some_and(|current| current.title == current.id && current.goal.is_none());
+            let is_newer = existing
+                .as_ref()
+                .is_none_or(|current| task.updated_at > current.updated_at);
+            if replaces_placeholder || is_newer {
+                if event.occurred_at > task.updated_at {
+                    task.updated_at = event.occurred_at;
+                }
+                return upsert_task_tx(transaction, &task);
+            }
+        }
+    }
     if let Some(mut task) = existing {
         if event.occurred_at > task.updated_at {
             task.updated_at = event.occurred_at;
@@ -1882,7 +2256,9 @@ fn upsert_checkpoint_tx(transaction: &Transaction<'_>, checkpoint: &CheckpointV1
     transaction.execute(
         "INSERT INTO checkpoints(id, repository_id, task_id, session_id, created_at, checkpoint_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json",
+         ON CONFLICT(id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, session_id=excluded.session_id,
+           created_at=excluded.created_at, checkpoint_json=excluded.checkpoint_json",
         params![checkpoint.id, checkpoint.repository_id, checkpoint.task_id, checkpoint.session_id, timestamp(checkpoint.created_at), json],
     )?;
     for change in &checkpoint.changed_files {
@@ -1930,7 +2306,9 @@ fn upsert_evidence_tx(transaction: &Transaction<'_>, evidence: &EvidenceV1) -> R
     transaction.execute(
         "INSERT INTO evidence(id, repository_id, task_id, fact_id, session_id, created_at, evidence_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET fact_id=excluded.fact_id, evidence_json=excluded.evidence_json",
+         ON CONFLICT(id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, fact_id=excluded.fact_id, session_id=excluded.session_id,
+           created_at=excluded.created_at, evidence_json=excluded.evidence_json",
         params![evidence.id, evidence.repository_id, evidence.task_id, evidence.fact_id, evidence.session_id, timestamp(evidence.created_at), json],
     )?;
     Ok(())
@@ -1956,7 +2334,9 @@ fn upsert_file_change_tx(transaction: &Transaction<'_>, change: &FileChangeV1) -
     transaction.execute(
         "INSERT INTO file_changes(id, repository_id, task_id, session_id, path, change_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET change_json=excluded.change_json",
+         ON CONFLICT(id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, session_id=excluded.session_id, path=excluded.path,
+           change_json=excluded.change_json",
         params![
             id,
             change.repository_id,
@@ -1977,7 +2357,9 @@ fn upsert_test_result_tx(transaction: &Transaction<'_>, test: &TestResultV1) -> 
     transaction.execute(
         "INSERT INTO test_results(id, repository_id, task_id, session_id, occurred_at, test_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET test_json=excluded.test_json",
+         ON CONFLICT(id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, session_id=excluded.session_id,
+           occurred_at=excluded.occurred_at, test_json=excluded.test_json",
         params![
             test.id,
             test.repository_id,

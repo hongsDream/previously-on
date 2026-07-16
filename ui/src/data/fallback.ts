@@ -41,6 +41,10 @@ export const fallbackData: BootstrapData = {
         sourceThreadIds: ['thread_01HZX4AUTHBOUNDARY01', 'thread_01HZX4AUTHBOUNDARY02'],
         sessionCount: 3,
       },
+      titleSuggestion: {
+        value: 'Refactor authentication boundary to improve separation of concerns and testability.',
+        source: 'goal',
+      },
       rollover: {
         operationId: 'rollover-auth-boundary-01',
         status: 'started',
@@ -194,6 +198,8 @@ export const fallbackData: BootstrapData = {
       evidenceIds: ['ev_01HZX4C9Y7T2R6D8F3G1K8LMN'],
       selectionReason: 'user_confirmed_with_verified_evidence',
       relatedFiles: ['src/middleware/auth.ts', 'src/interfaces/auth-context.ts'],
+      mixedProvenance: false,
+      provenanceSessionIds: ['session-auth-2'],
     },
     {
       id: 'fact-tenant-isolation',
@@ -206,6 +212,8 @@ export const fallbackData: BootstrapData = {
       evidenceIds: ['ev_01HZX4C9Y7T2R6D8F3G1K8LMO'],
       selectionReason: 'user_confirmed_with_verified_evidence',
       relatedFiles: ['src/server/middleware/auth.ts'],
+      mixedProvenance: false,
+      provenanceSessionIds: ['session-auth-2'],
     },
   ],
   evidence: [
@@ -385,6 +393,12 @@ export const fallbackData: BootstrapData = {
     mergeBase: 'd4e5f6a7',
   },
   contractEvaluations: [],
+  taskGroupingOperations: [],
+  graphSummary: {
+    nodeCount: 0,
+    edgeCount: 0,
+    verifiedEdgeCount: 0,
+  },
   resumeCandidate: {
     id: 'resume-auth-boundary',
     taskId: 'task_01HZX3P7K2BBQW9F7D8Z1A2C3V',

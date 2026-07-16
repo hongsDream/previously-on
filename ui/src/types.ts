@@ -6,6 +6,118 @@ export type ContinuationState = 'normal' | 'eligible' | 'suggested';
 export type ContractStatus = 'active' | 'superseded';
 export type ContractReadiness = 'ready' | 'contract_blocked';
 export type RequiredTestStatus = 'passed' | 'failed' | 'missing' | 'stale';
+export type TaskGroupingAction = 'move' | 'merge' | 'split' | 'undo';
+
+export interface TaskTitleSuggestionV1 {
+  value: string;
+  source: 'goal' | 'branch' | 'touched_area';
+}
+
+export interface TaskUpdateV1 {
+  title?: string;
+  goal?: string;
+  status?: TaskStatus;
+}
+
+export interface TaskGroupingRequestV1 {
+  operationId: string;
+  action: Exclude<TaskGroupingAction, 'undo'>;
+  sessionIds: string[];
+  fromTaskId: string;
+  targetTaskId?: string;
+  newTaskTitle?: string;
+  newTaskGoal?: string;
+}
+
+export interface SessionMoveV1 {
+  sessionId: string;
+  fromTaskId: string;
+  toTaskId: string;
+}
+
+export interface TaskLifecycleSnapshotV1 {
+  taskId: string;
+  before?: TaskStatus | null;
+  after?: TaskStatus | null;
+}
+
+export interface FactGroupingImpactV1 {
+  factId: string;
+  fromTaskId: string;
+  toTaskId?: string | null;
+  mixedProvenance: boolean;
+  sessionIds: string[];
+}
+
+export interface TaskGroupingOperationV1 {
+  schemaVersion: 1;
+  operationId: string;
+  repositoryId: string;
+  action: TaskGroupingAction;
+  sessionMoves: SessionMoveV1[];
+  taskLifecycle: TaskLifecycleSnapshotV1[];
+  factImpacts: FactGroupingImpactV1[];
+  createdTask?: { id: string; title: string } | null;
+  inverseOf?: string | null;
+  requestFingerprint: string;
+  occurredAt: string;
+}
+
+export interface TaskGroupingPreviewV1 {
+  operation: TaskGroupingOperationV1;
+  affectedSessions: SessionMoveV1[];
+  affectedFacts: FactGroupingImpactV1[];
+  counts: {
+    sessions: number;
+    factsMoved: number;
+    factsMixed: number;
+  };
+}
+
+export type GraphNodeKindV1 = 'task' | 'session' | 'commit' | 'file' | 'regression_contract' | 'verified_symbol' | 'test' | 'agent';
+export type GraphEdgeKindV1 =
+  | 'task-has-session'
+  | 'session-observed-commit'
+  | 'session-changed-file'
+  | 'contract-covers-file'
+  | 'contract-declares-symbol'
+  | 'contract-requires-test'
+  | 'task-relevant-contract'
+  | 'agent-parent'
+  | 'agent-worked-on-task';
+export type GraphSourceKindV1 = 'canonical_event' | 'projection' | 'regression_contract' | 'contract_evaluation' | 'agent_observation';
+
+export interface GraphNodeV1 {
+  id: string;
+  kind: GraphNodeKindV1;
+  label: string;
+  taskId?: string | null;
+}
+
+export interface GraphEdgeV1 {
+  id: string;
+  kind: GraphEdgeKindV1;
+  from: string;
+  to: string;
+  provenanceIds: string[];
+  sourceKind: GraphSourceKindV1;
+  observedAt: string;
+  verified: boolean;
+}
+
+export interface RelationshipGraphV1 {
+  schemaVersion: 1;
+  repositoryId: string;
+  taskFilter?: string | null;
+  nodes: GraphNodeV1[];
+  edges: GraphEdgeV1[];
+}
+
+export interface RelationshipGraphSummaryV1 {
+  nodeCount: number;
+  edgeCount: number;
+  verifiedEdgeCount: number;
+}
 
 export interface ContractPathSelectorV1 {
   kind: 'exact' | 'prefix';
@@ -198,6 +310,8 @@ export interface Fact {
   selectionReason?: string;
   relatedFiles: string[];
   deprecatedAfterCommit?: string;
+  mixedProvenance: boolean;
+  provenanceSessionIds: string[];
 }
 
 export interface Session {
@@ -250,6 +364,7 @@ export interface Task {
   tests: { passing: number; failing: number; skipped: number };
   codebase: TaskCodebaseConnection;
   rollover?: AutomaticRollover;
+  titleSuggestion?: TaskTitleSuggestionV1;
 }
 
 export interface ResumeCandidate {
@@ -338,6 +453,8 @@ export interface BootstrapData {
   contractCandidates: RegressionCandidateV1[];
   contractEvaluation: ContractEvaluationV1 | null;
   contractEvaluations: ContractEvaluationV1[];
+  taskGroupingOperations: TaskGroupingOperationV1[];
+  graphSummary: RelationshipGraphSummaryV1;
   resumeCandidate?: ResumeCandidate;
   contextPacks: Record<string, ContextPack>;
 }

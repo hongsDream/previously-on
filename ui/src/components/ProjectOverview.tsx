@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { AlertCircle, ArrowRight, CheckCircle2, Clock3, Code2, GitBranch, GitCommitHorizontal, ListTodo, MessageSquareText } from 'lucide-react';
-import type { Fact, Session, Task } from '../types';
+import { AlertCircle, ArrowRight, CheckCircle2, Clock3, Code2, GitBranch, ListTodo, MessageSquareText } from 'lucide-react';
+import type { Fact, RelationshipGraphSummaryV1, Session, Task } from '../types';
+import { RelationshipGraphPanel } from './RelationshipGraphPanel';
 
 interface ProjectOverviewProps {
   tasks: Task[];
+  graphTasks: Task[];
   sessions: Session[];
   facts: Fact[];
+  repositoryId: string;
+  graphSummary: RelationshipGraphSummaryV1;
+  graphRefreshVersion: number;
+  graphDisabled: boolean;
   focus: 'tasks' | 'sessions';
   onTaskSelect: (taskId: string) => void;
 }
@@ -17,7 +23,7 @@ const dateFormatter = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
 });
 
-export function ProjectOverview({ tasks, sessions, facts, focus, onTaskSelect }: ProjectOverviewProps) {
+export function ProjectOverview({ tasks, graphTasks, sessions, facts, repositoryId, graphSummary, graphRefreshVersion, graphDisabled, focus, onTaskSelect }: ProjectOverviewProps) {
   const overviewRoot = useRef<HTMLElement>(null);
   const sessionSection = useRef<HTMLElement>(null);
   const activeTasks = tasks.filter((task) => task.status === 'active');
@@ -26,7 +32,6 @@ export function ProjectOverview({ tasks, sessions, facts, focus, onTaskSelect }:
     .slice(0, 8);
   const decisions = facts.filter((fact) => fact.kind === 'decision' && !['invalid', 'superseded'].includes(fact.status));
   const openItems = facts.filter((fact) => fact.kind === 'open_item' && !['invalid', 'superseded'].includes(fact.status));
-  const codeAreas = aggregateCodeAreas(tasks);
   const tasksById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
   useEffect(() => {
@@ -94,12 +99,13 @@ export function ProjectOverview({ tasks, sessions, facts, focus, onTaskSelect }:
         <FactSummary title="Open items" icon={<AlertCircle size={17} />} facts={openItems} empty="No unresolved items captured." />
       </div>
 
-      <section className="overview-panel overview-code-map">
-        <header><span><GitCommitHorizontal size={17} /><strong>Code map</strong></span><small>Areas touched by remembered tasks</small></header>
-        {codeAreas.length ? (
-          <ul>{codeAreas.map(([path, count]) => <li key={path}><code>{path}</code><span>{count} changes</span></li>)}</ul>
-        ) : <EmptyCopy text="Changed code areas will appear after the first verified checkpoint." />}
-      </section>
+      <RelationshipGraphPanel
+        repositoryId={repositoryId}
+        tasks={graphTasks}
+        summary={graphSummary}
+        refreshVersion={graphRefreshVersion}
+        disabled={graphDisabled}
+      />
     </main>
   );
 }
@@ -122,14 +128,6 @@ function FactSummary({ title, icon, facts, empty }: { title: string; icon: React
 
 function EmptyCopy({ text }: { text: string }) {
   return <p className="overview-empty">{text}</p>;
-}
-
-function aggregateCodeAreas(tasks: Task[]): Array<[string, number]> {
-  const counts = new Map<string, number>();
-  for (const task of tasks) {
-    for (const file of task.files) counts.set(file.path, (counts.get(file.path) ?? 0) + file.count);
-  }
-  return [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 12);
 }
 
 function rolloverLabel(status: Task['rollover'] extends infer T ? T extends { status: infer S } ? S : never : never) {

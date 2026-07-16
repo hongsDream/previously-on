@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -30,6 +30,7 @@ use crate::domain::{
     EventKind, EvidenceIntegrity, FactKind, FactLifecycle, FactV1, Freshness, TaskLifecycle,
     TemporalStatusV1, TestStatus,
 };
+use crate::grouping::TaskGroupingRequestV1;
 use crate::redaction::{redact_excerpt, redact_text, redact_value};
 use crate::store::Store;
 
@@ -81,6 +82,13 @@ impl ApiError {
             message: redact_excerpt(&message.into()),
         }
     }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: redact_excerpt(&message.into()),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -117,6 +125,13 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
         .route("/api/facts/{id}/revalidate", post(revalidate_fact))
         .route("/api/sessions/{id}", patch(update_session))
         .route("/api/tasks/{id}", patch(update_task))
+        .route("/api/task-grouping/preview", post(preview_task_grouping))
+        .route("/api/task-grouping", post(apply_task_grouping))
+        .route(
+            "/api/task-grouping/{operation_id}/undo",
+            post(undo_task_grouping),
+        )
+        .route("/api/graph", get(relationship_graph))
         .route("/api/contract-candidates", post(create_contract_candidate))
         .route(
             "/api/contract-candidates/{id}",
@@ -174,6 +189,18 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         .first()
         .cloned()
         .unwrap_or_else(|| empty_contract_evaluation(repository.map(|item| item.id.as_str())));
+    let task_grouping_operations = state
+        .store
+        .list_task_grouping_operations(repository.map(|item| item.id.as_str()))
+        .map_err(ApiError::internal)?;
+    let graph_summary = repository
+        .map(|repository| {
+            crate::graph::derive_relationship_graph(&state.store, &repository.id, None, &contracts)
+                .map(|graph| crate::graph::compact_summary(&graph))
+        })
+        .transpose()
+        .map_err(ApiError::internal)?
+        .unwrap_or_default();
     let task_hits = state
         .store
         .search_tasks("", 100)
@@ -403,11 +430,18 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
             .and_then(|checkpoint| checkpoint.git_after.branch.clone())
             .or_else(|| task.branch.clone())
             .unwrap_or_else(|| "detached".to_string());
+        let session_ids = sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        let title_suggestion =
+            crate::grouping::task_title_suggestion(&state.store, task, &session_ids);
 
         task_values.push(json!({
             "id": task.id,
             "repositoryId": task.repository_id,
             "title": task.title,
+            "titleSuggestion": title_suggestion,
             "status": task_lifecycle(task.lifecycle),
             "updatedAt": iso(task.updated_at),
             "checkpointIds": checkpoint_ids,
@@ -591,6 +625,18 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         }
 
         for fact in &facts {
+            let provenance = fact
+                .evidence_ids
+                .iter()
+                .filter_map(|id| state.store.get_evidence(id).ok().flatten())
+                .collect::<Vec<_>>();
+            let provenance_session_ids = provenance
+                .iter()
+                .map(|item| item.session_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mixed_provenance = provenance.iter().any(|item| item.task_id != fact.task_id);
             let evidence_sessions = fact
                 .evidence_ids
                 .iter()
@@ -615,6 +661,8 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
                 "selectionReason": fact_selection_reasons.get(&fact.id),
                 "relatedFiles": related_files,
                 "deprecatedAfterCommit": deprecated_facts.get(&fact.id)
+                ,"mixedProvenance": mixed_provenance
+                ,"provenanceSessionIds": provenance_session_ids
             }));
         }
 
@@ -694,6 +742,8 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "contractCandidates": contract_candidates,
         "contractEvaluation": contract_evaluation,
         "contractEvaluations": contract_evaluations,
+        "taskGroupingOperations": task_grouping_operations,
+        "graphSummary": graph_summary,
         "contextPacks": context_packs
     });
     Ok(Json(redact_value(&payload)))
@@ -1195,8 +1245,14 @@ fn empty_contract_evaluation(repository_id: Option<&str>) -> ContractEvaluationV
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TaskUpdate {
-    status: TaskLifecycle,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    goal: Option<String>,
+    #[serde(default)]
+    status: Option<TaskLifecycle>,
 }
 
 async fn update_task(
@@ -1211,7 +1267,32 @@ async fn update_task(
         .get_task(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("task not found: {id}")))?;
-    task.lifecycle = update.status;
+    if update.title.is_none() && update.goal.is_none() && update.status.is_none() {
+        return Err(ApiError::bad_request(
+            "at least one of title, goal, or status is required",
+        ));
+    }
+    if let Some(title) = update.title.as_deref() {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 120 {
+            return Err(ApiError::bad_request(
+                "task title must be between 1 and 120 characters",
+            ));
+        }
+        task.title = redact_excerpt(title);
+    }
+    if let Some(goal) = update.goal.as_deref() {
+        let goal = goal.trim();
+        if goal.chars().count() > 500 {
+            return Err(ApiError::bad_request(
+                "task goal must be at most 500 characters",
+            ));
+        }
+        task.goal = (!goal.is_empty()).then(|| redact_excerpt(goal));
+    }
+    if let Some(status) = update.status {
+        task.lifecycle = status;
+    }
     task.updated_at = Utc::now();
     let mut event = EventEnvelopeV1::new(
         format!(
@@ -1221,7 +1302,7 @@ async fn update_task(
         ),
         &task.repository_id,
         "local-ui",
-        EventKind::Unknown,
+        EventKind::TaskUpdated,
         task.updated_at,
         json!({ "task": task.clone() }),
     );
@@ -1232,9 +1313,161 @@ async fn update_task(
         .map_err(ApiError::internal)?;
     Ok(Json(json!({
         "ok": true,
-        "status": task_lifecycle(update.status),
+        "title": task.title,
+        "goal": task.goal,
+        "status": task_lifecycle(task.lifecycle),
         "updatedAt": iso(task.updated_at)
     })))
+}
+
+async fn preview_task_grouping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TaskGroupingRequestV1>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let preview = crate::grouping::preview(&state.store, &request).map_err(grouping_api_error)?;
+    Ok(Json(redact_value(
+        &serde_json::to_value(preview).map_err(ApiError::internal)?,
+    )))
+}
+
+async fn apply_task_grouping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TaskGroupingRequestV1>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let requested_fingerprint =
+        crate::grouping::request_fingerprint(&request, &request.session_ids);
+    if let Some(existing) = state
+        .store
+        .get_task_grouping_operation(None, &request.operation_id)
+        .map_err(ApiError::internal)?
+    {
+        if existing.request_fingerprint != requested_fingerprint {
+            return Err(ApiError::conflict(
+                "operationId already belongs to a different grouping request",
+            ));
+        }
+        return Ok(Json(json!({ "ok": true, "operation": existing })));
+    }
+    let preview = crate::grouping::preview(&state.store, &request).map_err(grouping_api_error)?;
+    persist_task_grouping_event(&state.store, &preview.operation).map_err(ApiError::internal)?;
+    Ok(Json(json!({ "ok": true, "operation": preview.operation })))
+}
+
+async fn undo_task_grouping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operation_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let operations = state
+        .store
+        .list_task_grouping_operations(None)
+        .map_err(ApiError::internal)?;
+    if let Some(existing) = operations
+        .iter()
+        .find(|operation| operation.inverse_of.as_deref() == Some(operation_id.as_str()))
+    {
+        return Ok(Json(json!({ "ok": true, "operation": existing })));
+    }
+    let original = operations
+        .iter()
+        .find(|operation| operation.operation_id == operation_id)
+        .ok_or_else(|| {
+            ApiError::not_found(format!("grouping operation not found: {operation_id}"))
+        })?;
+    if original.inverse_of.is_some() {
+        return Err(ApiError::bad_request(
+            "an undo operation cannot be undone directly",
+        ));
+    }
+    let inverse = crate::grouping::inverse(original);
+    for movement in &inverse.session_moves {
+        let session = state
+            .store
+            .get_session(&movement.session_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::conflict("session required for undo is missing"))?;
+        if session.task_id.as_deref() != Some(movement.from_task_id.as_str()) {
+            return Err(ApiError::conflict(format!(
+                "stale session association prevents undo: {}",
+                movement.session_id
+            )));
+        }
+    }
+    persist_task_grouping_event(&state.store, &inverse).map_err(ApiError::internal)?;
+    Ok(Json(json!({ "ok": true, "operation": inverse })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQuery {
+    repository: String,
+    #[serde(default)]
+    task: Option<String>,
+}
+
+async fn relationship_graph(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GraphQuery>,
+) -> ApiResult<Json<Value>> {
+    authorize_api_read(&state, &headers)?;
+    let repository = state
+        .store
+        .list_repositories()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|item| item.id == query.repository)
+        .ok_or_else(|| ApiError::not_found("repository not found"))?;
+    let contracts = if std::path::Path::new(&repository.path).exists() {
+        crate::contracts::load_contracts(&repository.path).map_err(ApiError::internal)?
+    } else {
+        Vec::new()
+    };
+    let graph = crate::graph::derive_relationship_graph(
+        &state.store,
+        &repository.id,
+        query.task.as_deref(),
+        &contracts,
+    )
+    .map_err(graph_api_error)?;
+    Ok(Json(redact_value(
+        &serde_json::to_value(graph).map_err(ApiError::internal)?,
+    )))
+}
+
+fn persist_task_grouping_event(
+    store: &Store,
+    operation: &crate::domain::TaskGroupingOperationV1,
+) -> Result<()> {
+    store.append_task_grouping_operation(operation)?;
+    Ok(())
+}
+
+fn grouping_api_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("stale session association") {
+        ApiError::conflict(message)
+    } else if message.contains("not found") {
+        ApiError::not_found(message)
+    } else {
+        ApiError::bad_request(message)
+    }
+}
+
+fn graph_api_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("not found") {
+        ApiError::not_found(message)
+    } else if message.contains("does not belong") {
+        ApiError::bad_request(message)
+    } else {
+        ApiError::internal(message)
+    }
 }
 
 fn persist_fact_event(store: &Store, fact: &FactV1) -> Result<()> {
@@ -1496,7 +1729,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         ChangeAttribution, CheckpointV1, CoverageV1, EvidenceV1, FactKind, FileChangeV1,
-        RepositoryV1, TaskV1, SCHEMA_VERSION_V1,
+        RepositoryV1, SessionLifecycle, SessionV1, TaskGroupingActionV1, TaskV1, SCHEMA_VERSION_V1,
     };
     use tempfile::TempDir;
 
@@ -1655,7 +1888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_lifecycle_changes_survive_projection_rebuild() {
+    async fn task_edits_use_explicit_events_and_survive_projection_rebuild() {
         let temp = TempDir::new().unwrap();
         let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
         let at = Utc::now();
@@ -1683,19 +1916,152 @@ mod tests {
             authorized_headers(),
             Path("task-1".to_string()),
             Json(TaskUpdate {
-                status: TaskLifecycle::Completed,
+                title: Some("Finish the verified graph".to_string()),
+                goal: Some("Keep grouping replay deterministic".to_string()),
+                status: Some(TaskLifecycle::Completed),
             }),
         )
         .await
         .unwrap();
+        let updated = store.get_task("task-1").unwrap().unwrap();
+        assert_eq!(updated.lifecycle, TaskLifecycle::Completed);
+        assert_eq!(updated.title, "Finish the verified graph");
         assert_eq!(
-            store.get_task("task-1").unwrap().unwrap().lifecycle,
-            TaskLifecycle::Completed
+            updated.goal.as_deref(),
+            Some("Keep grouping replay deterministic")
         );
+        assert!(store
+            .list_events(Some("repo-1"))
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == EventKind::TaskUpdated));
         store.rebuild_projections().unwrap();
+        let rebuilt = store.get_task("task-1").unwrap().unwrap();
+        assert_eq!(rebuilt.lifecycle, TaskLifecycle::Completed);
+        assert_eq!(rebuilt.title, "Finish the verified graph");
         assert_eq!(
-            store.get_task("task-1").unwrap().unwrap().lifecycle,
-            TaskLifecycle::Completed
+            rebuilt.goal.as_deref(),
+            Some("Keep grouping replay deterministic")
+        );
+    }
+
+    #[tokio::test]
+    async fn grouping_api_requires_csrf_and_apply_undo_are_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let now = Utc::now();
+        for id in ["source", "target"] {
+            store
+                .upsert_task(&TaskV1 {
+                    schema_version: SCHEMA_VERSION_V1,
+                    id: id.to_string(),
+                    repository_id: "repo-1".to_string(),
+                    title: id.to_string(),
+                    goal: None,
+                    lifecycle: TaskLifecycle::Active,
+                    branch: Some("main".to_string()),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        store
+            .upsert_session(&SessionV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: "session-1".to_string(),
+                repository_id: "repo-1".to_string(),
+                task_id: Some("source".to_string()),
+                lifecycle: SessionLifecycle::Active,
+                started_at: now,
+                ended_at: None,
+                branch: Some("main".to_string()),
+                head: None,
+                source_thread_id: None,
+                last_activity_at: Some(now),
+                turn_count: 1,
+                compaction_count: 0,
+                context_usage: None,
+                continuation_state: Default::default(),
+                coverage: CoverageV1::default(),
+            })
+            .unwrap();
+        let state = AppState {
+            store: store.clone(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+        let request = TaskGroupingRequestV1 {
+            operation_id: "api-move-1".to_string(),
+            action: TaskGroupingActionV1::Move,
+            session_ids: vec!["session-1".to_string()],
+            from_task_id: "source".to_string(),
+            target_task_id: Some("target".to_string()),
+            new_task_title: None,
+            new_task_goal: None,
+        };
+        let mut cross_origin = authorized_headers();
+        cross_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.test"),
+        );
+        let error =
+            preview_task_grouping(State(state.clone()), cross_origin, Json(request.clone()))
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+        let _ = preview_task_grouping(
+            State(state.clone()),
+            authorized_headers(),
+            Json(request.clone()),
+        )
+        .await
+        .unwrap();
+        let _ = apply_task_grouping(
+            State(state.clone()),
+            authorized_headers(),
+            Json(request.clone()),
+        )
+        .await
+        .unwrap();
+        let _ = apply_task_grouping(State(state.clone()), authorized_headers(), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(store.health().unwrap().canonical_event_count, 1);
+        assert_eq!(
+            store
+                .get_session("session-1")
+                .unwrap()
+                .unwrap()
+                .task_id
+                .as_deref(),
+            Some("target")
+        );
+
+        let first_undo = undo_task_grouping(
+            State(state.clone()),
+            authorized_headers(),
+            Path("api-move-1".to_string()),
+        )
+        .await
+        .unwrap();
+        let second_undo = undo_task_grouping(
+            State(state),
+            authorized_headers(),
+            Path("api-move-1".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_undo.0["operation"], second_undo.0["operation"]);
+        assert_eq!(store.health().unwrap().canonical_event_count, 2);
+        assert_eq!(
+            store
+                .get_session("session-1")
+                .unwrap()
+                .unwrap()
+                .task_id
+                .as_deref(),
+            Some("source")
         );
     }
 

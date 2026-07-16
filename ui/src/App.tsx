@@ -12,7 +12,9 @@ import {
   fetchBootstrap,
   ApiUnavailableError,
   approveContractCandidate,
+  applyTaskGrouping,
   createContractCandidate,
+  previewTaskGrouping,
   purgeRepository,
   revalidateFact,
   supersedeRegressionContract,
@@ -20,10 +22,20 @@ import {
   updateFactStatus,
   updateFact,
   updateSession,
-  updateTaskStatus,
+  undoTaskGrouping,
+  updateTask,
 } from './lib/api';
 import type { ContractMutationResponse } from './lib/api';
-import type { BootstrapData, Checkpoint, FactStatus, RegressionCandidateDraftV1, TaskStatus } from './types';
+import type {
+  BootstrapData,
+  Checkpoint,
+  FactStatus,
+  RegressionCandidateDraftV1,
+  TaskGroupingPreviewV1,
+  TaskGroupingRequestV1,
+  TaskStatus,
+  TaskUpdateV1,
+} from './types';
 
 export function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
@@ -42,6 +54,7 @@ export function App() {
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(true);
   const [mutationPending, setMutationPending] = useState(false);
   const [actionError, setActionError] = useState('');
+  const [graphRefreshVersion, setGraphRefreshVersion] = useState(0);
   const deferredQuery = useDeferredValue(query);
 
   useEffect(() => {
@@ -49,12 +62,11 @@ export function App() {
     fetchBootstrap(controller.signal)
       .then((bootstrap) => {
         const normalized = normalizeBootstrap(bootstrap);
+        const selection = resolveTaskSelection(normalized);
         setData(normalized);
-        const task = normalized.tasks[0];
-        const checkpointId = task?.checkpointIds[1] ?? task?.checkpointIds[0] ?? '';
-        setSelectedTaskId(task?.id ?? '');
-        setSelectedCheckpointId(checkpointId);
-        setSelectedEvidenceId(normalized.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? normalized.evidence[0]?.id ?? '');
+        setSelectedTaskId(selection.taskId);
+        setSelectedCheckpointId(selection.checkpointId);
+        setSelectedEvidenceId(selection.evidenceId);
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -62,13 +74,12 @@ export function App() {
           setFatalError(error instanceof Error ? error.message : 'The local API returned an invalid response.');
           return;
         }
-        const task = fallbackData.tasks[0];
-        const checkpointId = task.checkpointIds[1];
+        const selection = resolveTaskSelection(fallbackData);
         setOfflineFallback(true);
         setData(fallbackData);
-        setSelectedTaskId(task.id);
-        setSelectedCheckpointId(checkpointId);
-        setSelectedEvidenceId(fallbackData.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? fallbackData.evidence[0].id);
+        setSelectedTaskId(selection.taskId);
+        setSelectedCheckpointId(selection.checkpointId);
+        setSelectedEvidenceId(selection.evidenceId);
       });
     return () => controller.abort();
   }, []);
@@ -133,6 +144,8 @@ export function App() {
         facts: [],
         evidence: [],
         sessions: [],
+        taskGroupingOperations: [],
+        graphSummary: { nodeCount: 0, edgeCount: 0, verifiedEdgeCount: 0 },
         contractCandidates: [],
         contractEvaluation: null,
         resumeCandidate: undefined,
@@ -258,23 +271,23 @@ export function App() {
   const selectedCheckpoint = taskCheckpoints.find((checkpoint) => checkpoint.id === selectedCheckpointId) ?? taskCheckpoints[0];
   const explicitlySelectedEvidence = data.evidence.find((evidence) => evidence.id === selectedEvidenceId);
   const selectedEvidence = selectedCheckpoint
-    ? (explicitlySelectedEvidence?.checkpointId === selectedCheckpoint.id
+    ? (explicitlySelectedEvidence?.checkpointId === selectedCheckpoint.id && selectedTask.checkpointIds.includes(explicitlySelectedEvidence.checkpointId)
         ? explicitlySelectedEvidence
         : data.evidence.find((evidence) => evidence.checkpointId === selectedCheckpoint.id))
     : undefined;
-  const selectedFact = data.facts.find((fact) => fact.id === selectedEvidence?.factId) ?? data.facts[0];
+  const selectedFact = data.facts.find((fact) => fact.id === selectedEvidence?.factId && fact.taskId === selectedTask.id)
+    ?? data.facts.find((fact) => fact.taskId === selectedTask.id);
   const resumeCandidate = data.resumeCandidate?.taskId === selectedTask.id ? data.resumeCandidate : undefined;
   const selectedContractEvaluation = data.contractEvaluations.find(
     (evaluation) => evaluation.taskId === selectedTask.id,
   ) ?? (data.contractEvaluation?.taskId === selectedTask.id ? data.contractEvaluation : null);
 
   const selectTask = (taskId: string) => {
-    const task = data.tasks.find((item) => item.id === taskId);
-    if (!task) return;
-    const checkpointId = task.checkpointIds[0] ?? '';
-    setSelectedTaskId(taskId);
-    setSelectedCheckpointId(checkpointId);
-    setSelectedEvidenceId(data.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? data.evidence[0]?.id ?? '');
+    const selection = resolveTaskSelection(data, taskId, data.tasks.find((item) => item.id === taskId)?.checkpointIds[0]);
+    if (!selection.taskId) return;
+    setSelectedTaskId(selection.taskId);
+    setSelectedCheckpointId(selection.checkpointId);
+    setSelectedEvidenceId(selection.evidenceId);
     setWorkspaceView('task');
   };
 
@@ -293,7 +306,7 @@ export function App() {
 
   const selectEvidence = (evidenceId: string) => {
     const evidence = data.evidence.find((item) => item.id === evidenceId);
-    if (!evidence) return;
+    if (!evidence || !selectedTask.checkpointIds.includes(evidence.checkpointId)) return;
     setSelectedEvidenceId(evidence.id);
     if (evidence.checkpointId) setSelectedCheckpointId(evidence.checkpointId);
     setMobileInspectorOpen(true);
@@ -381,21 +394,46 @@ export function App() {
     } : current);
   };
 
-  const handleTaskStatus = async (nextStatus: TaskStatus) => {
-    if (offlineFallback || mutationPending) return;
-    const previousStatus = selectedTask.status;
-    setData((current) => current ? {
-      ...current,
-      tasks: current.tasks.map((task) => task.id === selectedTask.id ? { ...task, status: nextStatus } : task),
-    } : current);
-    const saved = await performMutation(() => updateTaskStatus(selectedTask.id, nextStatus));
-    if (saved === null) {
-      setData((current) => current ? {
-        ...current,
-        tasks: current.tasks.map((task) => task.id === selectedTask.id ? { ...task, status: previousStatus } : task),
-      } : current);
-    }
+  const installRefreshedBootstrap = (next: BootstrapData, preferredTaskId = selectedTask.id) => {
+    const normalized = normalizeBootstrap(next);
+    const selection = resolveTaskSelection(normalized, preferredTaskId, selectedCheckpointId, selectedEvidenceId);
+    setData(normalized);
+    setSelectedTaskId(selection.taskId);
+    setSelectedCheckpointId(selection.checkpointId);
+    setSelectedEvidenceId(selection.evidenceId);
+    setGraphRefreshVersion((version) => version + 1);
   };
+
+  const mutateAndRefresh = async (mutation: () => Promise<unknown>, preferredTaskId = selectedTask.id) => {
+    if (offlineFallback || mutationPending) return false;
+    const refreshed = await performMutation(async () => {
+      await mutation();
+      return fetchBootstrap();
+    });
+    if (!refreshed) return false;
+    installRefreshedBootstrap(refreshed, preferredTaskId);
+    return true;
+  };
+
+  const handleTaskUpdate = (update: TaskUpdateV1) => mutateAndRefresh(
+    () => updateTask(selectedTask.id, update),
+    selectedTask.id,
+  );
+
+  const handleGroupingPreview = async (request: TaskGroupingRequestV1): Promise<TaskGroupingPreviewV1 | null> => {
+    if (offlineFallback || mutationPending) return null;
+    return performMutation(() => previewTaskGrouping(request));
+  };
+
+  const handleGroupingApply = (request: TaskGroupingRequestV1) => mutateAndRefresh(
+    () => applyTaskGrouping(request),
+    request.fromTaskId,
+  );
+
+  const handleGroupingUndo = (operationId: string) => mutateAndRefresh(
+    () => undoTaskGrouping(operationId),
+    selectedTask.id,
+  );
 
   return (
     <div className="app-shell">
@@ -424,13 +462,22 @@ export function App() {
         {workspaceView === 'overview' ? (
           <ProjectOverview
             tasks={filteredTasks}
+            graphTasks={data.tasks}
             sessions={data.sessions}
             facts={data.facts}
+            repositoryId={data.tasks[0]?.repositoryId ?? ''}
+            graphSummary={data.graphSummary}
+            graphRefreshVersion={graphRefreshVersion}
+            graphDisabled={offlineFallback}
             focus={overviewFocus}
             onTaskSelect={selectTask}
           />
         ) : <TaskWorkspace
           task={selectedTask}
+          tasks={data.tasks}
+          sessions={data.sessions}
+          facts={data.facts}
+          groupingOperations={data.taskGroupingOperations}
           checkpoints={taskCheckpoints}
           selectedCheckpoint={selectedCheckpoint}
           resumeCandidate={resumeCandidate}
@@ -443,7 +490,10 @@ export function App() {
           onReviewResume={reviewCandidate}
           onDismissResume={dismissCandidate}
           onToggleContextPack={() => setContextPackExpanded((expanded) => !expanded)}
-          onTaskStatusChange={(nextStatus) => void handleTaskStatus(nextStatus)}
+          onTaskUpdate={handleTaskUpdate}
+          onGroupingPreview={handleGroupingPreview}
+          onGroupingApply={handleGroupingApply}
+          onGroupingUndo={handleGroupingUndo}
           onCreateContractCandidate={handleCreateContractCandidate}
           onUpdateContractCandidate={handleUpdateContractCandidate}
           onApproveContractCandidate={handleApproveContractCandidate}
@@ -457,7 +507,7 @@ export function App() {
             evidence={selectedEvidence}
             availableEvidence={data.evidence.filter((evidence) => selectedTask.checkpointIds.includes(evidence.checkpointId))}
             fact={selectedFact}
-            replacementFacts={data.facts.filter((fact) => fact.id !== selectedFact.id && !['invalid', 'superseded'].includes(fact.status))}
+            replacementFacts={data.facts.filter((fact) => fact.taskId === selectedTask.id && fact.id !== selectedFact.id && !['invalid', 'superseded'].includes(fact.status))}
             mutationPending={mutationPending}
             mobileOpen={mobileInspectorOpen}
             onClose={() => setMobileInspectorOpen(false)}
@@ -521,12 +571,16 @@ function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
     contractCandidates: bootstrap.contractCandidates ?? [],
     contractEvaluation: bootstrap.contractEvaluation ?? null,
     contractEvaluations: bootstrap.contractEvaluations ?? [],
+    taskGroupingOperations: bootstrap.taskGroupingOperations ?? [],
+    graphSummary: bootstrap.graphSummary ?? { nodeCount: 0, edgeCount: 0, verifiedEdgeCount: 0 },
     sessions: bootstrap.sessions ?? [],
     facts: (bootstrap.facts ?? []).map((fact) => ({
       ...fact,
       taskId: fact.taskId ?? bootstrap.tasks[0]?.id ?? '',
       kind: fact.kind ?? 'note',
       relatedFiles: fact.relatedFiles ?? [],
+      mixedProvenance: fact.mixedProvenance ?? false,
+      provenanceSessionIds: fact.provenanceSessionIds ?? [],
     })),
     evidence: (bootstrap.evidence ?? []).map((evidence) => ({
       ...evidence,
@@ -534,6 +588,26 @@ function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
       excludedSession: evidence.excludedSession ?? false,
     })),
   };
+}
+
+function resolveTaskSelection(
+  data: BootstrapData,
+  preferredTaskId?: string,
+  preferredCheckpointId?: string,
+  preferredEvidenceId?: string,
+) {
+  const task = data.tasks.find((candidate) => candidate.id === preferredTaskId) ?? data.tasks[0];
+  if (!task) return { taskId: '', checkpointId: '', evidenceId: '' };
+  const checkpointId = preferredCheckpointId && task.checkpointIds.includes(preferredCheckpointId)
+    ? preferredCheckpointId
+    : task.checkpointIds[1] ?? task.checkpointIds[0] ?? '';
+  const taskCheckpointIds = new Set(task.checkpointIds);
+  const preferredEvidence = data.evidence.find((evidence) => evidence.id === preferredEvidenceId);
+  const evidence = preferredEvidence && taskCheckpointIds.has(preferredEvidence.checkpointId)
+    ? preferredEvidence
+    : data.evidence.find((candidate) => candidate.checkpointId === checkpointId)
+      ?? data.evidence.find((candidate) => taskCheckpointIds.has(candidate.checkpointId));
+  return { taskId: task.id, checkpointId, evidenceId: evidence?.id ?? '' };
 }
 
 function mergeContractMutation(current: BootstrapData, response: ContractMutationResponse): BootstrapData {
