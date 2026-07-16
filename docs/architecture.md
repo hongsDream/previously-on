@@ -31,6 +31,7 @@ Git regression contracts ──────────────────�
                                                   ▼
                                       SQLite deterministic projections
                                       tasks / sessions / checkpoints / facts
+                                      grouping / AI candidates / local agents
                                       contract candidates / evaluations / FTS
                                                   │
                                ┌──────────────────┴──────────────────┐
@@ -47,6 +48,21 @@ live as one file per contract under `.previously-on/contracts/`, become active f
 working tree immediately, and are shared by ordinary Git workflows. Local candidate and readiness
 projections remain canonical-event-backed so rebuild, export, retention, and repository purge are
 deterministic. Purging local repository data never deletes Git-owned contract files.
+
+## Append-only task grouping
+
+Task title, goal, and status edits are explicit canonical events. Session move, merge, split, and
+undo use one `TaskGroupingChanged` event per operation, including session moves, before/after task
+lifecycle snapshots, a stable operation ID, and an inverse link. Preview validates repository and
+current associations without mutation; apply rejects missing or duplicate sessions, stale state,
+invalid targets, and cross-repository changes. Replaying the canonical event atomically moves the
+session-owned checkpoint, evidence, file, and test projections.
+
+A fact moves only when every supporting provenance item belongs to moved sessions. Evidence that
+spans moved and unmoved sessions stays on the original task, is marked mixed provenance, and is
+never duplicated or guessed. A merge may complete an emptied source task while preserving its
+previous lifecycle for undo; a split creates a new active task. Undo appends an inverse canonical
+event instead of deleting history. Request and replay IDs make all paths idempotent.
 
 ## Regression contract evaluation
 
@@ -65,7 +81,10 @@ and nonzero exits as failures.
 The PreToolUse hook is advisory and never blocks editing. The Stop hook may issue one continuation
 with the exact required argv when readiness is blocked; persisted evaluation state and Codex's
 `stop_hook_active` flag prevent an automatic loop. GitHub Actions remains the enforcement boundary.
-No dependency graph is part of v1.
+The relationship graph is a deterministic view over canonical events, projections, and approved
+contracts. It carries provenance for task/session, observed commit, changed file, contract,
+literal symbol, required test, and confirmed agent-parent edges. It does not store a second truth
+or infer dependencies from path co-occurrence, imports, or name similarity.
 
 ## Session timeline and automatic continuation
 
@@ -110,7 +129,9 @@ stopped before the ID was recorded, PreviouslyOn refuses to create a possible du
 Server or validation failure records `failed` and leaves the source request unblocked.
 
 The public App Server interface creates a persisted task but does not expose a way for PreviouslyOn
-to force the Codex desktop UI to focus it. The new ID and rollover state are shown in the review UI.
+to force the Codex desktop UI to focus or open it. The new ID and rollover state are shown in the
+review UI. Local agent rows likewise provide Copy ID and Find in Codex guidance only; no private
+deep link or synthetic Open button is generated.
 
 ## Attribution
 
@@ -138,19 +159,54 @@ Ordinary user-approved resume remains behind the read-only MCP call. The only au
 delivery is the boundary-triggered fresh-task flow above; it uses the same verified builder and
 labels the pack as data-only untrusted history.
 
-## AI fact refresh is deferred
+## Opt-in AI fact refresh
 
-v0.1 does not invoke Codex from the review UI. A read-only tool sandbox still permits filesystem
-reads, so it is not a sufficient boundary when untrusted historical evidence may contain prompt
-injection. AI-assisted candidate generation is deferred to v0.1.1 until it can run with a verified
-deny-read profile or an equivalently isolated input-only execution path. Model output will remain
-candidate-only and will never count as evidence when that feature is introduced.
+AI fact refresh is a beta, explicit user action. Setup installs the managed named profile
+`previously-input-only` only with `--enable-ai-refresh`. It denies `:root`, `:tmpdir`, and
+`:slash_tmp`, permits `:minimal` read, disables network, and uses approval `never`. Existing
+unowned profiles are never replaced. Uninstall removes the profile only when PreviouslyOn still
+owns the unchanged entry.
+
+Before enabling Refresh, the experimental App Server client calls `permissionProfile/list` and
+verifies that the named profile is allowed. `thread/start` receives named `permissions` without a
+legacy `sandbox` field. The ephemeral thread starts in a fresh empty `0700` directory and receives
+only a bounded, redacted verified pack: goal, current facts, open items, file paths/status, tests,
+and contracts. Repository cwd, source contents, raw prompts, tool output, credentials, and network
+access are excluded. `turn/start` uses a strict output schema for add, update, or deprecate
+candidates, inherits the configured default model, and requests medium reasoning.
+
+The experimental App Server process receives a cleared environment rebuilt from a minimal
+allowlist (`PATH`, `HOME`, `CODEX_HOME`, `TMPDIR`, locale, and terminal values). Execution uses one
+initialized client for profile listing, allowed-state verification, `thread/start`, and
+`turn/start`; the profile ownership hash is checked before and after verification. Operation and
+candidate claims are transactional so concurrent identical requests reuse one result while
+conflicting request content fails instead of starting another model call.
+
+The durable operation state is `pending`, `thread_created`, `completed`, or `failed`; deterministic
+IDs make retries and restart recovery idempotent. Malformed, oversized, timed-out, or
+capability-unverified runs fail closed. Model output lives in a separate candidate projection and
+never counts as Evidence. Only explicit user accept/edit creates a Fact Candidate. Model ID,
+token, and latency fields remain unavailable unless the App Server exposes them.
+
+## Same-device local agent lineage
+
+When the experimental App Server supports it, import/list/read collects paginated interactive,
+subAgent, subAgentReview, subAgentCompact, subAgentThreadSpawn, and subAgentOther thread metadata.
+Only threads from the same logical repository are projected. A parent/child edge is emitted only
+from an explicit `parentThreadId`; missing parents remain unlinked/degraded and fork/name/path
+similarity is not used as a substitute. Both list and read results must agree on thread ID and
+logical repository, and unsafe, absolute, traversal, or sensitive file paths are discarded.
+Bounded redacted summaries, observed files, and tests are read-only local observations. There is
+no cloud sync, team account, orchestration, or write-back.
 
 ## Local surfaces
 
 - Hook commands send bounded JSON over a permission-restricted Unix domain socket inside the
   `0700` data directory. The hook starts the daemon on demand and queues an already-redacted
   event if startup or delivery fails.
+- Every runtime surface requires current-user ownership and private permissions before opening
+  the data directory, SQLite database/sidecars, locks, recovery files, or fallback queues; it
+  rejects symlinks and opens SQLite with no-follow semantics.
 - The MCP server uses JSON-RPC over stdio and has no write tools.
 - The review server binds only to loopback and requires a per-launch bearer/CSRF token for
   state-changing requests.

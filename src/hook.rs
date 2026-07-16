@@ -144,6 +144,7 @@ pub fn run_hook(
         output.write_all(b"\n")?;
         return Ok(());
     }
+    validate_hook_storage(config)?;
     let delivery = send_to_daemon(&envelope, &config.socket_path).or_else(|first_error| {
         start_daemon(config).with_context(|| format!("{first_error}; daemon restart failed"))?;
         wait_for_daemon(&envelope, &config.socket_path)
@@ -538,6 +539,17 @@ fn attempt_automatic_rollover(
 }
 
 fn send_to_daemon(envelope: &EventEnvelopeV1, socket_path: &Path) -> Result<HookAckV1> {
+    let data_dir = socket_path
+        .parent()
+        .context("PreviouslyOn socket has no data directory")?;
+    crate::store::ensure_private_directory(data_dir, "PreviouslyOn data directory")?;
+    if !crate::store::validate_private_socket(socket_path, "PreviouslyOn daemon socket")? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "PreviouslyOn daemon socket is unavailable",
+        )
+        .into());
+    }
     let mut stream = StdUnixStream::connect(socket_path)
         .with_context(|| format!("connect daemon socket {}", socket_path.display()))?;
     // Contract matching and content fingerprints deliberately complete before a Stop ACK so the
@@ -589,11 +601,61 @@ fn is_registered_repository(event: &EventEnvelopeV1, registered: Option<&Path>) 
         .unwrap_or(false)
 }
 
+fn validate_hook_storage(config: &HookIngressConfig) -> Result<()> {
+    let data_dir = config
+        .queue_path
+        .parent()
+        .and_then(Path::parent)
+        .context("PreviouslyOn queue path is outside the data directory")?;
+    if config.socket_path.parent() != Some(data_dir) {
+        bail!("PreviouslyOn socket and queue must share one data directory");
+    }
+    crate::store::ensure_private_directory(data_dir, "PreviouslyOn data directory")?;
+    validate_queue_storage(&config.queue_path)?;
+    crate::store::validate_private_socket(&config.socket_path, "PreviouslyOn daemon socket")?;
+    Ok(())
+}
+
+fn validate_queue_storage(queue_path: &Path) -> Result<()> {
+    let queue_dir = queue_path
+        .parent()
+        .context("fallback queue has no parent directory")?;
+    let data_dir = queue_dir
+        .parent()
+        .context("fallback queue is outside the data directory")?;
+    crate::store::ensure_private_directory(data_dir, "PreviouslyOn data directory")?;
+    match fs::symlink_metadata(queue_dir) {
+        Ok(_) => crate::store::ensure_private_directory(queue_dir, "fallback queue directory")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for (path, label) in [
+        (queue_path.to_path_buf(), "fallback queue"),
+        (
+            queue_path.with_extension("replay.jsonl"),
+            "fallback replay queue",
+        ),
+        (
+            queue_path.with_extension("corrupt.jsonl"),
+            "corrupt queue marker",
+        ),
+        (reserve_path(queue_path)?, "disk reserve"),
+        (
+            data_dir.join("previously.sqlite3.lock"),
+            "database maintenance lock",
+        ),
+    ] {
+        crate::store::validate_private_regular_file(&path, label)?;
+    }
+    Ok(())
+}
+
 fn start_daemon(config: &HookIngressConfig) -> Result<()> {
     let data_dir = config
         .socket_path
         .parent()
         .context("PreviouslyOn socket has no data directory")?;
+    crate::store::ensure_private_directory(data_dir, "PreviouslyOn data directory")?;
     let executable = std::env::current_exe().context("resolve PreviouslyOn executable")?;
     Command::new(executable)
         .arg("--data-dir")
@@ -623,16 +685,16 @@ pub async fn run_daemon(data_dir: PathBuf) -> Result<()> {
     use tokio::io::{AsyncWriteExt, BufReader as AsyncBufReader};
     use tokio::net::UnixListener;
 
-    fs::create_dir_all(&data_dir)?;
-    set_private_directory(&data_dir)?;
+    crate::store::ensure_private_directory(&data_dir, "PreviouslyOn data directory")?;
     let database_path = data_dir.join("previously.sqlite3");
     let queue_path = data_dir.join("queue/events.jsonl");
     let socket_path = data_dir.join("previously.sock");
     let store = Store::open(database_path)?;
+    validate_queue_storage(&queue_path)?;
     replay_fallback(&store, &queue_path)?;
     store.apply_retention(Utc::now(), 90)?;
 
-    if socket_path.exists() {
+    if crate::store::validate_private_socket(&socket_path, "PreviouslyOn daemon socket")? {
         if StdUnixStream::connect(&socket_path).is_ok() {
             bail!("PreviouslyOn daemon is already running");
         }
@@ -641,6 +703,7 @@ pub async fn run_daemon(data_dir: PathBuf) -> Result<()> {
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("bind daemon socket {}", socket_path.display()))?;
     set_private_file(&socket_path)?;
+    crate::store::validate_private_socket(&socket_path, "PreviouslyOn daemon socket")?;
     loop {
         let (stream, _) = listener.accept().await?;
         let (read_half, mut write_half) = stream.into_split();
@@ -744,6 +807,17 @@ async fn write_daemon_ack(
 }
 
 pub fn stop_daemon(socket_path: &Path) -> Result<bool> {
+    let data_dir = socket_path
+        .parent()
+        .context("PreviouslyOn socket has no data directory")?;
+    match fs::symlink_metadata(data_dir) {
+        Ok(_) => crate::store::ensure_private_directory(data_dir, "PreviouslyOn data directory")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    if !crate::store::validate_private_socket(socket_path, "PreviouslyOn daemon socket")? {
+        return Ok(false);
+    }
     let mut stream = match StdUnixStream::connect(socket_path) {
         Ok(stream) => stream,
         Err(error)
@@ -2229,12 +2303,13 @@ fn stop_block_reason(evaluation: &ContractEvaluationV1) -> String {
 }
 
 pub fn replay_fallback(store: &Store, queue_path: &Path) -> Result<()> {
+    validate_queue_storage(queue_path)?;
     let replay_path = queue_path.with_extension("replay.jsonl");
     let corrupt_path = queue_path.with_extension("corrupt.jsonl");
-    if replay_path.exists() {
+    if crate::store::validate_private_regular_file(&replay_path, "fallback replay queue")? {
         replay_queue_file(store, &replay_path, &corrupt_path)?;
     }
-    if !queue_path.exists() {
+    if !crate::store::validate_private_regular_file(queue_path, "fallback queue")? {
         return ensure_reserve_file(queue_path);
     }
     if let Some(parent) = replay_path.parent() {
@@ -2242,12 +2317,12 @@ pub fn replay_fallback(store: &Store, queue_path: &Path) -> Result<()> {
     }
     {
         let _lock = acquire_ingestion_lock(queue_path)?;
-        if queue_path.exists() {
+        if crate::store::validate_private_regular_file(queue_path, "fallback queue")? {
             fs::rename(queue_path, &replay_path).context("checkpoint fallback queue for replay")?;
             sync_parent_directory(&replay_path)?;
         }
     }
-    if !replay_path.exists() {
+    if !crate::store::validate_private_regular_file(&replay_path, "fallback replay queue")? {
         return ensure_reserve_file(queue_path);
     }
     replay_queue_file(store, &replay_path, &corrupt_path)?;
@@ -2255,10 +2330,12 @@ pub fn replay_fallback(store: &Store, queue_path: &Path) -> Result<()> {
 }
 
 fn replay_queue_file(store: &Store, replay_path: &Path, corrupt_path: &Path) -> Result<()> {
-    let file = fs::File::open(replay_path)
-        .with_context(|| format!("read fallback replay file {}", replay_path.display()))?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    let file = crate::store::open_private_file(replay_path, "fallback replay queue", &mut options)?;
     let mut reader = BufReader::new(file);
-    let corrupt_existed = corrupt_path.exists();
+    let corrupt_existed =
+        crate::store::validate_private_regular_file(corrupt_path, "corrupt queue marker")?;
     let mut corrupt_file = None;
     let mut line_number = 0usize;
     loop {
@@ -2318,12 +2395,11 @@ fn write_corrupt_queue_marker(
     if file.is_none() {
         let mut options = OpenOptions::new();
         options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        *file = Some(options.open(corrupt_path)?);
+        *file = Some(crate::store::open_private_file(
+            corrupt_path,
+            "corrupt queue marker",
+            &mut options,
+        )?);
     }
     writeln!(
         file.as_mut()
@@ -2626,6 +2702,7 @@ fn rearm_continuation_after_discarded_ack(
 }
 
 pub fn append_fallback(path: &Path, envelope: &EventEnvelopeV1) -> Result<()> {
+    validate_queue_storage(path)?;
     let _lock = acquire_ingestion_lock(path)?;
     let data_dir = path
         .parent()
@@ -2635,17 +2712,10 @@ pub fn append_fallback(path: &Path, envelope: &EventEnvelopeV1) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_private_directory_durable(parent)?;
     }
-    let existed = path.exists();
+    let existed = crate::store::validate_private_regular_file(path, "fallback queue")?;
     let mut options = OpenOptions::new();
     options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("open crash queue {}", path.display()))?;
+    let mut file = crate::store::open_private_file(path, "fallback queue", &mut options)?;
     let mut record = serde_json::to_vec(envelope)?;
     record.push(b'\n');
     file.write_all(&record)?;
@@ -2680,6 +2750,7 @@ fn reserve_path(queue_path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn ensure_reserve_file(queue_path: &Path) -> Result<()> {
+    validate_queue_storage(queue_path)?;
     let path = reserve_path(queue_path)?;
     if reserve_is_allocated(&path)? {
         return Ok(());
@@ -2687,15 +2758,10 @@ pub(crate) fn ensure_reserve_file(queue_path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_private_directory_durable(parent)?;
     }
-    let existed = path.exists();
+    let existed = crate::store::validate_private_regular_file(&path, "disk reserve")?;
     let mut options = OpenOptions::new();
     options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&path)?;
+    let mut file = crate::store::open_private_file(&path, "disk reserve", &mut options)?;
     let allocation = (|| -> Result<()> {
         write_reserve_bytes(&mut file)?;
         file.sync_all()?;
@@ -2736,11 +2802,13 @@ fn write_reserve_bytes(file: &mut fs::File) -> Result<()> {
 }
 
 fn reserve_is_allocated(path: &Path) -> Result<bool> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
+    if !crate::store::validate_private_regular_file(path, "disk reserve")? {
+        return Ok(false);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    let file = crate::store::open_private_file(path, "disk reserve", &mut options)?;
+    let metadata = file.metadata()?;
     if metadata.len() != DISK_RESERVE_BYTES {
         return Ok(false);
     }
@@ -2757,6 +2825,11 @@ fn reserve_is_allocated(path: &Path) -> Result<bool> {
 
 fn release_reserve_file(queue_path: &Path) {
     if let Ok(path) = reserve_path(queue_path) {
+        if let Err(error) = crate::store::validate_private_regular_file(&path, "disk reserve") {
+            let diagnostic = crate::redaction::redact_excerpt(&error.to_string());
+            tracing::warn!(%diagnostic, "refused to release an untrusted disk reserve");
+            return;
+        }
         if let Err(error) = fs::remove_file(&path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 let diagnostic = crate::redaction::redact_excerpt(&error.to_string());
@@ -2770,9 +2843,8 @@ fn release_reserve_file(queue_path: &Path) {
 }
 
 fn ensure_private_directory_durable(path: &Path) -> Result<()> {
-    let existed = path.exists();
-    fs::create_dir_all(path)?;
-    set_private_directory(path)?;
+    let existed = fs::symlink_metadata(path).is_ok();
+    crate::store::ensure_private_directory(path, "private queue directory")?;
     if !existed {
         sync_parent_directory(path)?;
         fs::File::open(path)?.sync_all()?;
@@ -2793,19 +2865,13 @@ fn acquire_ingestion_lock(queue_path: &Path) -> Result<fs::File> {
         .parent()
         .and_then(Path::parent)
         .context("fallback queue is not inside a data directory")?;
-    fs::create_dir_all(data_dir)?;
-    set_private_directory(data_dir)?;
+    crate::store::ensure_private_directory(data_dir, "PreviouslyOn data directory")?;
     let lock_path = data_dir.join("previously.sqlite3.lock");
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(&lock_path)?;
+    let file =
+        crate::store::open_private_file(&lock_path, "database maintenance lock", &mut options)?;
     file.lock()?;
-    set_private_file(&lock_path)?;
     Ok(file)
 }
 
@@ -2890,18 +2956,6 @@ fn numeric_suffix(value: &str) -> Option<i64> {
         .rsplit(|character: char| !character.is_ascii_digit())
         .find(|segment| !segment.is_empty())
         .and_then(|segment| segment.parse().ok())
-}
-
-#[cfg(unix)]
-fn set_private_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_directory(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -3063,6 +3117,156 @@ mod durability_tests {
         }
         release_reserve_file(&queue);
         assert!(!reserve.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_files_reject_symlink_preplacement_without_outside_mutation() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let event = EventEnvelopeV1::new(
+            "source-security",
+            "repo-security",
+            "session-security",
+            EventKind::Unknown,
+            Utc::now(),
+            json!({}),
+        );
+
+        {
+            let temp = TempDir::new().unwrap();
+            let data = temp.path().join("data");
+            let queue_dir = data.join("queue");
+            fs::create_dir_all(&queue_dir).unwrap();
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&queue_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let external = temp.path().join("outside-queue");
+            fs::write(&external, b"outside-safe").unwrap();
+            fs::set_permissions(&external, fs::Permissions::from_mode(0o600)).unwrap();
+            let queue = queue_dir.join("events.jsonl");
+            symlink(&external, &queue).unwrap();
+
+            let error = append_fallback(&queue, &event).unwrap_err();
+
+            assert!(error.to_string().contains("regular file"));
+            assert_eq!(fs::read(&external).unwrap(), b"outside-safe");
+            assert!(!data.join("previously.sqlite3.lock").exists());
+        }
+
+        for file in ["replay", "corrupt", "reserve", "lock"] {
+            let temp = TempDir::new().unwrap();
+            let data = temp.path().join("data");
+            let queue = data.join("queue/events.jsonl");
+            let store = Store::open(data.join("previously.sqlite3")).unwrap();
+            fs::create_dir_all(queue.parent().unwrap()).unwrap();
+            fs::set_permissions(queue.parent().unwrap(), fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let target = match file {
+                "replay" => queue.with_extension("replay.jsonl"),
+                "corrupt" => queue.with_extension("corrupt.jsonl"),
+                "reserve" => reserve_path(&queue).unwrap(),
+                "lock" => data.join("previously.sqlite3.lock"),
+                _ => unreachable!(),
+            };
+            let external = temp.path().join(format!("outside-{file}"));
+            fs::write(&external, b"outside-safe").unwrap();
+            fs::set_permissions(&external, fs::Permissions::from_mode(0o600)).unwrap();
+            symlink(&external, &target).unwrap();
+
+            let error = replay_fallback(&store, &queue).unwrap_err();
+
+            assert!(
+                error.to_string().contains("regular file"),
+                "{file}: unexpected error: {error:#}"
+            );
+            assert_eq!(fs::read(&external).unwrap(), b"outside-safe");
+            assert!(fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_rejects_overpermissive_queue_directory_without_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let queue_dir = data.join("queue");
+        fs::create_dir_all(&queue_dir).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&queue_dir, fs::Permissions::from_mode(0o770)).unwrap();
+        fs::write(queue_dir.join("marker"), b"safe").unwrap();
+        let queue = queue_dir.join("events.jsonl");
+        let event = EventEnvelopeV1::new(
+            "source-permissions",
+            "repo-permissions",
+            "session-permissions",
+            EventKind::Unknown,
+            Utc::now(),
+            json!({}),
+        );
+
+        let error = append_fallback(&queue, &event).unwrap_err();
+
+        assert!(error.to_string().contains("group/world writable"));
+        assert_eq!(fs::read(queue_dir.join("marker")).unwrap(), b"safe");
+        assert!(!queue.exists());
+        assert!(!data.join("previously.sqlite3.lock").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_socket_rejects_symlink_wrong_type_and_unsafe_mode_before_connect() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::net::UnixListener;
+
+        let event = EventEnvelopeV1::new(
+            "source-socket",
+            "repo-socket",
+            "session-socket",
+            EventKind::Unknown,
+            Utc::now(),
+            json!({}),
+        );
+
+        {
+            let temp = TempDir::new().unwrap();
+            let external = temp.path().join("outside-socket-target");
+            fs::write(&external, b"outside-safe").unwrap();
+            fs::set_permissions(&external, fs::Permissions::from_mode(0o600)).unwrap();
+            let socket = temp.path().join("previously.sock");
+            symlink(&external, &socket).unwrap();
+
+            let error = send_to_daemon(&event, &socket).unwrap_err();
+
+            assert!(error.to_string().contains("Unix socket"));
+            assert_eq!(fs::read(&external).unwrap(), b"outside-safe");
+        }
+
+        {
+            let temp = TempDir::new().unwrap();
+            let socket = temp.path().join("previously.sock");
+            fs::write(&socket, b"not-a-socket").unwrap();
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+
+            let error = send_to_daemon(&event, &socket).unwrap_err();
+
+            assert!(error.to_string().contains("Unix socket"));
+        }
+
+        {
+            let temp = TempDir::new().unwrap();
+            let socket = temp.path().join("previously.sock");
+            let _listener = UnixListener::bind(&socket).unwrap();
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+
+            let error = send_to_daemon(&event, &socket).unwrap_err();
+
+            assert!(error.to_string().contains("private 0600 boundary"));
+        }
     }
 
     #[test]

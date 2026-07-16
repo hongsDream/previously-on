@@ -1,7 +1,7 @@
 # Third-party licenses
 
 This inventory covers production Rust dependencies and packages embedded in the production UI for
-PreviouslyOn 0.1.0-alpha.2. It is generated from locked dependency metadata by
+PreviouslyOn 0.1.0-alpha.3. It is generated from locked dependency metadata by
 `scripts/generate-release-metadata.mjs`. A declared `UNKNOWN` value blocks release review.
 
 | Ecosystem | Package | Version | Declared license |

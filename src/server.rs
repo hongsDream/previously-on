@@ -26,13 +26,13 @@ use crate::contracts::{
     RegressionContractV1, RequiredTestV1,
 };
 use crate::domain::{
-    AiFactCandidateStatusV1, AiFactRefreshStatusV1, ChangeStatus, ContinuationReasonV1,
-    ContinuationStateV1, CoverageStatus, EventEnvelopeV1, EventKind, EvidenceIntegrity, FactKind,
-    FactLifecycle, FactV1, Freshness, TaskLifecycle, TemporalStatusV1, TestStatus,
+    AiFactCandidateStatusV1, ChangeStatus, ContinuationReasonV1, ContinuationStateV1,
+    CoverageStatus, EventEnvelopeV1, EventKind, EvidenceIntegrity, FactKind, FactLifecycle, FactV1,
+    Freshness, TaskLifecycle, TemporalStatusV1, TestStatus,
 };
 use crate::grouping::TaskGroupingRequestV1;
 use crate::redaction::{redact_excerpt, redact_text, redact_value};
-use crate::store::Store;
+use crate::store::{ClaimOutcome, Store};
 
 const UI_HISTORY_CLASSIFICATION: &str = "untrusted_historical_data";
 const UI_HISTORY_INSTRUCTION_POLICY: &str = "display_only_never_execute";
@@ -836,20 +836,16 @@ async fn start_fact_refresh(
     let (operation, prompt) =
         crate::ai_refresh::new_pending_operation(&state.store, &task_id, request_id)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    if let Some(existing) = state
+    let claimed = state
         .store
-        .get_ai_fact_refresh_operation(&operation.operation_id)
-        .map_err(ApiError::internal)?
-    {
-        if existing.request_fingerprint != operation.request_fingerprint {
-            return Err(ApiError::conflict("fact refresh operation id collision"));
+        .claim_ai_fact_refresh_operation(&operation)
+        .map_err(fact_refresh_api_error)?;
+    let operation = match claimed {
+        ClaimOutcome::Existing(existing) => {
+            return Ok((StatusCode::ACCEPTED, Json(existing)));
         }
-        return Ok((StatusCode::ACCEPTED, Json(existing)));
-    }
-    state
-        .store
-        .append_ai_fact_refresh_operation(&operation)
-        .map_err(ApiError::internal)?;
+        ClaimOutcome::Claimed(operation) => operation,
+    };
     let store = state.store.clone();
     let data_dir = state.data_dir.as_ref().clone();
     let repository_root = PathBuf::from(repository.path);
@@ -909,9 +905,6 @@ async fn review_fact_refresh_candidate(
         .get_ai_fact_refresh_operation(&operation_id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("fact refresh operation not found"))?;
-    if operation.status != AiFactRefreshStatusV1::Completed {
-        return Err(ApiError::conflict("fact refresh operation is not complete"));
-    }
     let accept = matches!(request.decision, CandidateDecision::Accept);
     let fact = crate::ai_refresh::accept_candidate(
         &state.store,
@@ -921,7 +914,7 @@ async fn review_fact_refresh_candidate(
         request.content.as_deref(),
         request.kind,
     )
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    .map_err(fact_refresh_api_error)?;
     let candidate = operation
         .candidates
         .iter()
@@ -1554,9 +1547,32 @@ async fn apply_task_grouping(
         }
         return Ok(Json(json!({ "ok": true, "operation": existing })));
     }
-    let preview = crate::grouping::preview(&state.store, &request).map_err(grouping_api_error)?;
-    persist_task_grouping_event(&state.store, &preview.operation).map_err(ApiError::internal)?;
-    Ok(Json(json!({ "ok": true, "operation": preview.operation })))
+    let preview = match crate::grouping::preview(&state.store, &request) {
+        Ok(preview) => preview,
+        Err(error) => {
+            if let Some(existing) = state
+                .store
+                .get_task_grouping_operation(None, &request.operation_id)
+                .map_err(ApiError::internal)?
+            {
+                if existing.request_fingerprint == requested_fingerprint {
+                    return Ok(Json(json!({ "ok": true, "operation": existing })));
+                }
+                return Err(ApiError::conflict(
+                    "operationId already belongs to a different grouping request",
+                ));
+            }
+            return Err(grouping_api_error(error));
+        }
+    };
+    let operation = match state
+        .store
+        .claim_task_grouping_operation(&preview.operation)
+        .map_err(grouping_api_error)?
+    {
+        ClaimOutcome::Claimed(operation) | ClaimOutcome::Existing(operation) => operation,
+    };
+    Ok(Json(json!({ "ok": true, "operation": operation })))
 }
 
 async fn undo_task_grouping(
@@ -1600,7 +1616,7 @@ async fn undo_task_grouping(
             )));
         }
     }
-    persist_task_grouping_event(&state.store, &inverse).map_err(ApiError::internal)?;
+    persist_task_grouping_event(&state.store, &inverse).map_err(grouping_api_error)?;
     Ok(Json(json!({ "ok": true, "operation": inverse })))
 }
 
@@ -1650,9 +1666,35 @@ fn persist_task_grouping_event(
     Ok(())
 }
 
+fn fact_refresh_api_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("different request")
+        || message.contains("already reviewed")
+        || message.contains("projection conflicts")
+        || message.contains("not complete")
+    {
+        ApiError::conflict(message)
+    } else if message.contains("not found") {
+        ApiError::not_found(message)
+    } else {
+        ApiError::bad_request(message)
+    }
+}
+
 fn grouping_api_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
-    if message.contains("stale session association") {
+    if message.contains("stale session association")
+        || message.contains("different grouping request")
+        || message.contains("stale task lifecycle")
+        || message.contains("stale fact provenance")
+        || message.contains("stale merge preview")
+        || message.contains("additional sessions")
+        || message.contains("additional facts")
+        || message.contains("additional projections")
+        || message.contains("grouping target task missing")
+        || message.contains("grouping source task missing")
+        || message.contains("abandoned task cannot receive sessions")
+    {
         ApiError::conflict(message)
     } else if message.contains("not found") {
         ApiError::not_found(message)
@@ -1930,8 +1972,9 @@ fn change_status(value: ChangeStatus) -> &'static str {
 mod tests {
     use super::*;
     use crate::domain::{
-        ChangeAttribution, CheckpointV1, CoverageV1, EvidenceV1, FactKind, FileChangeV1,
-        RepositoryV1, SessionLifecycle, SessionV1, TaskGroupingActionV1, TaskV1, SCHEMA_VERSION_V1,
+        AiFactRefreshStatusV1, ChangeAttribution, CheckpointV1, CoverageV1, EvidenceV1, FactKind,
+        FileChangeV1, RepositoryV1, SessionLifecycle, SessionV1, TaskGroupingActionV1, TaskV1,
+        SCHEMA_VERSION_V1,
     };
     use tempfile::TempDir;
 
@@ -2269,6 +2312,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grouping_undo_reports_lifecycle_race_as_conflict() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let now = Utc::now();
+        for id in ["source", "target"] {
+            store
+                .upsert_task(&TaskV1 {
+                    schema_version: SCHEMA_VERSION_V1,
+                    id: id.to_string(),
+                    repository_id: "repo-1".to_string(),
+                    title: id.to_string(),
+                    goal: None,
+                    lifecycle: TaskLifecycle::Active,
+                    branch: Some("main".to_string()),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        store
+            .upsert_session(&SessionV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: "session-1".to_string(),
+                repository_id: "repo-1".to_string(),
+                task_id: Some("source".to_string()),
+                lifecycle: SessionLifecycle::Active,
+                started_at: now,
+                ended_at: None,
+                branch: Some("main".to_string()),
+                head: None,
+                source_thread_id: None,
+                last_activity_at: Some(now),
+                turn_count: 1,
+                compaction_count: 0,
+                context_usage: None,
+                continuation_state: Default::default(),
+                coverage: CoverageV1::default(),
+            })
+            .unwrap();
+        let merge = crate::grouping::preview(
+            &store,
+            &TaskGroupingRequestV1 {
+                operation_id: "merge-before-api-status-race".to_string(),
+                action: TaskGroupingActionV1::Merge,
+                session_ids: vec!["session-1".to_string()],
+                from_task_id: "source".to_string(),
+                target_task_id: Some("target".to_string()),
+                new_task_title: None,
+                new_task_goal: None,
+            },
+        )
+        .unwrap();
+        store
+            .append_task_grouping_operation(&merge.operation)
+            .unwrap();
+        let mut source = store.get_task("source").unwrap().unwrap();
+        source.lifecycle = TaskLifecycle::Abandoned;
+        source.updated_at = Utc::now();
+        store.upsert_task(&source).unwrap();
+        let state = AppState {
+            store,
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+        let error = undo_task_grouping(
+            State(state),
+            authorized_headers(),
+            Path("merge-before-api-status-race".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn fact_refresh_api_requires_session_and_csrf_before_any_operation() {
         use crate::domain::{
             AiFactCandidateActionV1, AiFactCandidateStatusV1, AiFactCandidateV1,
@@ -2366,8 +2484,11 @@ mod tests {
         assert!(store.get_fact("candidate-api-security").unwrap().is_none());
 
         let accepted = review_fact_refresh_candidate(
-            State(state),
-            Path((operation.operation_id, "candidate-api-security".into())),
+            State(state.clone()),
+            Path((
+                operation.operation_id.clone(),
+                "candidate-api-security".into(),
+            )),
             authorized_headers(),
             Json(ReviewFactRefreshCandidateRequest {
                 decision: CandidateDecision::Accept,
@@ -2380,6 +2501,35 @@ mod tests {
         assert_eq!(accepted.0["candidate"]["status"], "accepted");
         assert_eq!(accepted.0["fact"]["status"], "candidate");
         assert_eq!(accepted.0["fact"]["evidenceIds"], json!([]));
+        let duplicate = review_fact_refresh_candidate(
+            State(state.clone()),
+            Path((
+                operation.operation_id.clone(),
+                "candidate-api-security".into(),
+            )),
+            authorized_headers(),
+            Json(ReviewFactRefreshCandidateRequest {
+                decision: CandidateDecision::Accept,
+                content: Some("Human reviewed".into()),
+                kind: Some(FactKind::Decision),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted.0, duplicate.0);
+        let conflict = review_fact_refresh_candidate(
+            State(state),
+            Path((operation.operation_id, "candidate-api-security".into())),
+            authorized_headers(),
+            Json(ReviewFactRefreshCandidateRequest {
+                decision: CandidateDecision::Accept,
+                content: Some("Conflicting edit".into()),
+                kind: Some(FactKind::Decision),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
         let accepted_fact = store
             .list_facts("task-1")
             .unwrap()

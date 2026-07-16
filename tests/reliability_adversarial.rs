@@ -21,6 +21,12 @@ const SECRETS: [&str; 10] = [
     "--token opaque-cli-token",
 ];
 
+#[cfg(unix)]
+fn set_private_file(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 #[test]
 fn one_secret_corpus_is_absent_from_queue_database_export_rebuild_and_retention() {
     let temp = TempDir::new().unwrap();
@@ -115,6 +121,8 @@ fn one_secret_corpus_is_absent_from_queue_database_export_rebuild_and_retention(
     // Malformed queue data is untrusted and must be redacted before quarantine too.
     std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
     std::fs::write(&queue, format!("not-json {}\n", SECRETS.join(" "))).unwrap();
+    #[cfg(unix)]
+    set_private_file(&queue);
     let store = Store::open(&database).unwrap();
     replay_fallback(&store, &queue).unwrap();
     assert_no_secrets(&data);
@@ -223,7 +231,12 @@ fn purge_removes_legacy_secret_bytes_from_db_sidecars_queue_and_cache() {
         format!("{}\n", serde_json::to_string(&target).unwrap()),
     )
     .unwrap();
-    std::fs::write(queue.with_extension("corrupt.jsonl"), SECRETS.join(" ")).unwrap();
+    #[cfg(unix)]
+    set_private_file(&queue);
+    let corrupt = queue.with_extension("corrupt.jsonl");
+    std::fs::write(&corrupt, SECRETS.join(" ")).unwrap();
+    #[cfg(unix)]
+    set_private_file(&corrupt);
     std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
     std::fs::write(&cache, SECRETS.join(" ")).unwrap();
     assert!(tree_contains_marker(&data, "opaque-"));

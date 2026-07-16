@@ -61,7 +61,7 @@ try {
     clientInfo: {
       name: "previously-on-compatibility",
       title: "PreviouslyOn Compatibility Probe",
-      version: "0.1.0-alpha.2",
+      version: "0.1.0-alpha.3",
     },
     capabilities: { experimentalApi: false, requestAttestation: false },
   });

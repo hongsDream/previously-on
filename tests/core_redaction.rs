@@ -28,8 +28,13 @@ fn redacts_prefixed_environment_keys_cli_flags_and_private_material() {
         "AWS_SECRET_ACCESS_KEY: aws-prefixed-secret",
         "NPM_TOKEN='npm-prefixed-secret'",
         "MY_SERVICE_CLIENT_SECRET=service-client-secret",
+        "CODEX_AUTH=codex-auth-secret",
+        "SESSION_COOKIE: session-cookie-secret",
+        "CREDENTIALS=credential-secret",
+        "DATABASE_URL=postgres://db-user:db-password@example.test/db",
+        "SERVICE_DSN=opaque-dsn-secret",
         "token=bare-token-secret",
-        "command --api-key cli-api-secret --access-token=cli-access-secret --token cli-bare-token-secret",
+        "command --api-key cli-api-secret --access-token=cli-access-secret --token cli-bare-token-secret --cookie cli-cookie-secret --connection-string cli-connection-secret",
         "Authorization: Basic authorization-secret",
         "https://alice:url-password@example.test/private",
         "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-key-body\n-----END OPENSSH PRIVATE KEY-----",
@@ -43,10 +48,17 @@ fn redacts_prefixed_environment_keys_cli_flags_and_private_material() {
         "aws-prefixed-secret",
         "npm-prefixed-secret",
         "service-client-secret",
+        "codex-auth-secret",
+        "session-cookie-secret",
+        "credential-secret",
+        "db-password",
+        "opaque-dsn-secret",
         "bare-token-secret",
         "cli-api-secret",
         "cli-access-secret",
         "cli-bare-token-secret",
+        "cli-cookie-secret",
+        "cli-connection-secret",
         "authorization-secret",
         "url-password",
         "private-key-body",
@@ -56,7 +68,7 @@ fn redacts_prefixed_environment_keys_cli_flags_and_private_material() {
     ] {
         assert!(!output.contains(secret), "secret leaked: {secret}");
     }
-    assert!(output.matches(REDACTED).count() >= 12);
+    assert!(output.matches(REDACTED).count() >= 20);
 }
 
 #[test]
@@ -67,6 +79,8 @@ fn recursively_redacts_json_and_caps_unicode_excerpt() {
         "privateKey": "opaque-private-material",
         "AWS_SECRET_ACCESS_KEY": "aws-secret-material",
         "nestedToken": "generic-token-material",
+        "databaseUrl": "postgres://db-user:db-password@example.test/db",
+        "codexAuth": "opaque-codex-auth",
         "nested": {"excerpt": format!("{} api_key=also-secret", "가".repeat(600))},
         "safe": "keep me"
     });
@@ -76,6 +90,8 @@ fn recursively_redacts_json_and_caps_unicode_excerpt() {
     assert_eq!(output["privateKey"], REDACTED);
     assert_eq!(output["AWS_SECRET_ACCESS_KEY"], REDACTED);
     assert_eq!(output["nestedToken"], REDACTED);
+    assert_eq!(output["databaseUrl"], REDACTED);
+    assert_eq!(output["codexAuth"], REDACTED);
     assert_eq!(output["safe"], "keep me");
     assert!(!output.to_string().contains("also-secret"));
     assert!(

@@ -3,7 +3,8 @@
 PreviouslyOn is local-first and requires no PreviouslyOn API key. It has no telemetry, cloud
 storage, or independent network integration. Automatic continuation asks the user's already
 configured local Codex App Server to start a model turn; Codex's own provider connection and
-credentials remain under Codex configuration.
+credentials remain under Codex configuration. Beta AI fact refresh uses that same configured App
+Server only after explicit setup opt-in and an explicit Refresh action; it is never automatic.
 
 ## Before persistence
 
@@ -48,12 +49,48 @@ uninstall can preserve later user edits. Those backups can contain the same sens
 the original Codex configuration and are deleted only when the user removes the local
 PreviouslyOn data directory.
 
-## AI fact refresh is not included in v0.1
+## Beta AI fact refresh
 
-The review UI does not invoke Codex or another model. This avoids giving untrusted historical
-evidence to an agent that can read repository or credential files. An AI-assisted candidate path
-is deferred until a deny-read boundary and adversarial prompt-injection tests are available; model
-output will not count as evidence when that path is introduced.
+AI refresh is disabled by default. `previously setup codex --enable-ai-refresh` installs a managed
+`previously-input-only` profile with root and temporary-directory access denied, minimal read
+only, network disabled, and approval `never`. PreviouslyOn refuses to run unless the App Server's
+experimental permission-profile API verifies the profile and effective requirements. It never
+sends both legacy sandbox and named permissions.
+
+Each user-triggered operation starts from an isolated empty `0700` directory. The input is limited
+to a bounded, redacted verified pack containing goal, current facts, open items, file paths/status,
+tests, and contracts. Repository cwd, source contents, raw prompts, raw tool output, and secret
+environment variables are not forwarded. Output must match a strict add/update/deprecate schema;
+malformed, oversized, timed-out, or interrupted runs fail closed. Model output is stored only as
+an AI candidate. It is not Evidence and becomes a Fact Candidate only after explicit user accept
+or edit. Model ID, token, and latency values remain `unavailable` when the App Server does not
+expose them.
+
+The experimental App Server child begins with an empty environment and receives only `PATH`,
+`HOME`, `CODEX_HOME`, `TMPDIR`, locale, and terminal variables. Database URLs, auth values,
+passwords, cookies, credentials, API keys, secrets, and tokens are neither inherited nor accepted
+unredacted in the verified pack. Profile verification and execution use the same initialized App
+Server client.
+
+The setup ownership journal covers the managed profile. Uninstall removes it only when the entry
+is still owned and unchanged; a user-modified or unowned profile is preserved.
+All PreviouslyOn data and backup directories, including an alternate
+`PREVIOUSLY_ON_DATA_DIR`, must be under a trusted parent, current-user-owned, and not writable by
+group or others. Runtime safely tightens read/execute-only excess permissions to `0700` before
+access. Databases, sidecars, queues, locks, the recovery journal, manifest, and backup files must
+be regular, current-user-owned files no broader than `0600`. Setup, normal runtime, and uninstall
+reject symlinks, foreign ownership, group/world-writable directories, unexpected journal targets,
+and hash mismatches before mutating managed files.
+
+## Local agent observation
+
+Agent lineage is a read-only projection of same-device Codex App Server metadata. PreviouslyOn
+stores bounded redacted output summaries plus observed file/test metadata, includes only threads
+from the same logical repository, and links parents only from an explicit `parentThreadId`.
+The ID and logical repository returned by `thread/read` are checked again, and unsafe or sensitive
+file paths are discarded. Missing parentage is shown as unlinked/degraded rather than guessed.
+Nothing is synced to a cloud or team account, and PreviouslyOn does not orchestrate or write back
+to an agent.
 
 ## Prompt injection
 

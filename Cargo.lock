@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "previously-on"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -965,6 +965,7 @@ dependencies = [
  "directories",
  "hex",
  "http",
+ "libc",
  "mime_guess",
  "once_cell",
  "predicates",
