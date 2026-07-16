@@ -1,8 +1,12 @@
 import { ArrowLeft, CircleAlert, CircleCheck, LoaderCircle } from 'lucide-react';
 import type {
+  AiFactRefreshOperationV1,
+  AiRefreshCapabilityV1,
+  AgentV1,
   BootstrapData,
   Checkpoint,
   Fact,
+  FactKind,
   RegressionCandidateDraftV1,
   Session,
   Task,
@@ -11,9 +15,12 @@ import type {
   TaskGroupingRequestV1,
   TaskUpdateV1,
 } from '../types';
+import type { FactCandidateReviewResponse } from '../lib/api';
+import { AgentsTree } from './AgentsTree';
 import { CheckpointTimeline } from './CheckpointTimeline';
 import { CodebaseLineage } from './CodebaseLineage';
 import { ContextPackPreview } from './ContextPackPreview';
+import { FactRefreshPanel } from './FactRefreshPanel';
 import { ResumeBanner } from './ResumeBanner';
 import { RegressionContractsPanel } from './RegressionContractsPanel';
 import { TaskEditor } from './TaskEditor';
@@ -33,6 +40,9 @@ interface TaskWorkspaceProps {
   sessions: Session[];
   facts: Fact[];
   groupingOperations: TaskGroupingOperationV1[];
+  aiRefreshCapability: AiRefreshCapabilityV1;
+  factRefreshOperation?: AiFactRefreshOperationV1;
+  agents: AgentV1[];
   onCheckpointSelect: (checkpoint: Checkpoint) => void;
   onReviewResume: () => void;
   onDismissResume: () => void;
@@ -41,6 +51,9 @@ interface TaskWorkspaceProps {
   onGroupingPreview: (request: TaskGroupingRequestV1) => Promise<TaskGroupingPreviewV1 | null>;
   onGroupingApply: (request: TaskGroupingRequestV1) => Promise<boolean>;
   onGroupingUndo: (operationId: string) => Promise<boolean>;
+  onFactRefreshStart: (requestId: string) => Promise<AiFactRefreshOperationV1 | null>;
+  onFactRefreshPoll: (operationId: string, signal: AbortSignal) => Promise<AiFactRefreshOperationV1 | null>;
+  onFactRefreshReview: (operationId: string, candidateId: string, decision: 'accept' | 'reject', content?: string, kind?: FactKind) => Promise<FactCandidateReviewResponse | null>;
   onCreateContractCandidate: (candidate: RegressionCandidateDraftV1) => Promise<boolean>;
   onUpdateContractCandidate: (id: string, candidate: RegressionCandidateDraftV1) => Promise<boolean>;
   onApproveContractCandidate: (id: string) => Promise<boolean>;
@@ -64,6 +77,9 @@ export function TaskWorkspace({
   sessions,
   facts,
   groupingOperations,
+  aiRefreshCapability,
+  factRefreshOperation,
+  agents,
   onCheckpointSelect,
   onReviewResume,
   onDismissResume,
@@ -72,6 +88,9 @@ export function TaskWorkspace({
   onGroupingPreview,
   onGroupingApply,
   onGroupingUndo,
+  onFactRefreshStart,
+  onFactRefreshPoll,
+  onFactRefreshReview,
   onCreateContractCandidate,
   onUpdateContractCandidate,
   onApproveContractCandidate,
@@ -108,6 +127,17 @@ export function TaskWorkspace({
         onUndo={onGroupingUndo}
       />
 
+      <FactRefreshPanel
+        task={task}
+        capability={aiRefreshCapability}
+        initialOperation={factRefreshOperation}
+        disabled={contractMutationsDisabled}
+        mutationPending={mutationPending}
+        onStart={onFactRefreshStart}
+        onPoll={onFactRefreshPoll}
+        onReview={onFactRefreshReview}
+      />
+
       {resumeCandidate ? (
         <ResumeBanner candidate={resumeCandidate} task={task} onReview={onReviewResume} onDismiss={onDismissResume} />
       ) : null}
@@ -115,6 +145,8 @@ export function TaskWorkspace({
       {task.rollover ? <AutomaticRolloverBanner task={task} /> : null}
 
       <CodebaseLineage task={task} />
+
+      <AgentsTree task={task} agents={agents} />
 
       <RegressionContractsPanel
         contracts={contracts}

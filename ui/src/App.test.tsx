@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { fallbackData } from './data/fallback';
-import type { BootstrapData, RelationshipGraphV1, TaskGroupingOperationV1 } from './types';
+import type { AiFactCandidateV1, AiFactRefreshOperationV1, AgentV1, BootstrapData, RelationshipGraphV1, TaskGroupingOperationV1 } from './types';
 
 function liveWorkspace() {
   const data = structuredClone(fallbackData);
@@ -144,9 +144,11 @@ describe('PreviouslyOn review workspace', () => {
     await screen.findByRole('heading', { name: 'Refactor authentication boundary' });
     const taskButtons = screen.getAllByRole('button', { name: 'Tasks' });
     const sessionButtons = screen.getAllByRole('button', { name: 'Sessions' });
+    const settingsButtons = screen.getAllByRole('button', { name: 'Settings' });
     expect(taskButtons).toHaveLength(2);
     expect(sessionButtons).toHaveLength(2);
     expect(sessionButtons[1]).toBeEnabled();
+    expect(settingsButtons[1]).toBeEnabled();
 
     await user.click(sessionButtons[1]);
     expect(screen.getByRole('main', { name: 'Project overview' })).toBeInTheDocument();
@@ -155,6 +157,193 @@ describe('PreviouslyOn review workspace', () => {
     await user.click(taskButtons[1]);
     expect(taskButtons[1]).toHaveClass('active');
     expect(screen.getByText('Verified relationship graph')).toBeInTheDocument();
+
+    await user.click(settingsButtons[1]);
+    expect(settingsButtons[1]).toHaveClass('active');
+    expect(screen.getByRole('heading', { name: 'AI-assisted fact refresh' })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['ready', 'Ready for explicit refresh'],
+    ['needs_setup', 'Setup required'],
+    ['unsupported', 'App Server unsupported'],
+    ['blocked', 'Refresh blocked'],
+  ] as const)('shows %s AI refresh capability in Settings', async (status, title) => {
+    const data = liveWorkspace();
+    data.aiRefreshCapability = {
+      status,
+      profileName: 'previously-input-only',
+      reason: null,
+      checkedAt: status === 'ready' ? '2025-05-21T00:00:00Z' : null,
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click((await screen.findAllByRole('button', { name: 'Settings' }))[0]);
+    expect(screen.getByRole('main', { name: 'Settings' })).toBeInTheDocument();
+    expect(screen.getByText(status.replace('_', ' '))).toBeInTheDocument();
+    expect(screen.getByText(title)).toBeInTheDocument();
+    expect(screen.getByText('previously-input-only')).toBeInTheDocument();
+    expect(screen.getByText(/Candidate-only output/)).toBeInTheDocument();
+    if (status === 'ready') {
+      expect(screen.getByText('Disabled')).toBeInTheDocument();
+      expect(screen.getByText('Never')).toBeInTheDocument();
+    } else {
+      expect(screen.getAllByText('Not verified')).toHaveLength(2);
+      expect(screen.queryByText('Never')).not.toBeInTheDocument();
+    }
+  });
+
+  it.each(['needs_setup', 'unsupported', 'blocked'] as const)('keeps Refresh facts disabled when capability is %s', async (status) => {
+    const data = liveWorkspace();
+    data.aiRefreshCapability = { status, profileName: 'previously-input-only', reason: `${status} reason` };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: 'Refresh facts' })).toBeDisabled();
+    expect(screen.getByText(`${status} reason`)).toBeInTheDocument();
+  });
+
+  it('polls a user-started fact refresh and supports edit, accept, and reject review without creating Evidence', async () => {
+    const data = liveWorkspace();
+    data.aiRefreshCapability = { status: 'ready', profileName: 'previously-input-only', reason: null };
+    data.factRefreshOperations = [];
+    const pending = factRefreshOperation(data.tasks[0].id, 'pending');
+    const completed = factRefreshOperation(data.tasks[0].id, 'completed');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') return { ok: true, json: async () => data };
+      if (path.endsWith(`/tasks/${data.tasks[0].id}/fact-refresh`)) return { ok: true, status: 202, json: async () => pending };
+      if (path === `/api/fact-refresh/${pending.operationId}`) return { ok: true, json: async () => completed };
+      if (path.includes('/candidates/')) {
+        const body = JSON.parse(String(init?.body)) as { decision: 'accept' | 'reject'; content?: string; kind?: string };
+        const candidate = completed.candidates.find((item) => path.endsWith(item.id))!;
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            candidate: { ...candidate, content: body.content ?? candidate.content, kind: body.kind ?? candidate.kind, status: body.decision === 'accept' ? 'accepted' : 'rejected' },
+            ...(body.decision === 'accept' ? {
+              fact: {
+                id: `fact-from-${candidate.id}`,
+                taskId: data.tasks[0].id,
+                kind: body.kind ?? candidate.kind,
+                content: body.content ?? candidate.content,
+                lifecycle: 'candidate',
+                updatedAt: '2025-05-21T00:01:00Z',
+                evidenceIds: [],
+                relatedFiles: [],
+                mixedProvenance: false,
+                provenanceSessionIds: [],
+              },
+            } : {}),
+          }),
+        };
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Refresh facts' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === `/api/fact-refresh/${pending.operationId}`)).toBe(true), { timeout: 3_000 });
+    expect(await screen.findByRole('heading', { name: 'Fact candidates' })).toBeInTheDocument();
+    expect(screen.getAllByText('Unavailable', { selector: 'dd' })).toHaveLength(4);
+    expect(screen.getByText(`Existing fact ${completed.candidates[0].factId}`)).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+    const candidateText = screen.getByLabelText('Candidate text');
+    await user.clear(candidateText);
+    await user.type(candidateText, 'Edited candidate text for review.');
+    await user.selectOptions(screen.getByLabelText('Fact kind'), 'constraint');
+    await user.click(screen.getByRole('button', { name: 'Accept as Fact Candidate' }));
+    await waitFor(() => {
+      const reviewCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith(completed.candidates[0].id));
+      expect(JSON.parse(String(reviewCall?.[1]?.body))).toEqual({ decision: 'accept', content: 'Edited candidate text for review.', kind: 'constraint' });
+    });
+    expect(await screen.findByText('Fact Candidate')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith(completed.candidates[1].id) && JSON.parse(String(init?.body)).decision === 'reject')).toBe(true));
+    expect(screen.queryByText(/model output.*Evidence/i)).not.toBeInTheDocument();
+  });
+
+  it('aborts an in-flight fact refresh poll when the task surface unmounts', async () => {
+    const data = liveWorkspace();
+    data.aiRefreshCapability = { status: 'ready', profileName: 'previously-input-only', reason: null };
+    data.factRefreshOperations = [factRefreshOperation(data.tasks[0].id, 'pending')];
+    let pollSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') return Promise.resolve({ ok: true, json: async () => data });
+      if (path.startsWith('/api/fact-refresh/')) {
+        pollSignal = init?.signal ?? undefined;
+        return new Promise(() => undefined);
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: 'Refreshing…' })).toBeDisabled();
+    await waitFor(() => expect(pollSignal).toBeDefined(), { timeout: 3_000 });
+    await user.click((await screen.findAllByRole('button', { name: 'Settings' }))[0]);
+    await waitFor(() => expect(pollSignal?.aborted).toBe(true));
+  });
+
+  it('renders task-local agent ancestry with explicit degraded states and Copy ID guidance only', async () => {
+    const data = liveWorkspace();
+    data.agents = agentLineage(data.tasks[0].id);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    render(<App />);
+
+    const tree = await screen.findByRole('tree', { name: /Agents observed for Refactor authentication boundary/ });
+    expect(within(tree).getByText('Primary implementation')).toBeInTheDocument();
+    expect(within(tree).getByText('UI verification')).toBeInTheDocument();
+    expect(within(tree).getByText('degraded')).toBeInTheDocument();
+    expect(within(tree).getByText('unlinked')).toBeInTheDocument();
+    expect(within(tree).getByText('Parent task was not returned by the local App Server.')).toBeInTheDocument();
+    expect(screen.getByText('Find in Codex')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Open/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+
+    await user.click(within(tree).getByRole('button', { name: `Copy Codex task ID ${data.agents[1].threadId}` }));
+    expect(writeText).toHaveBeenCalledWith(data.agents[1].threadId);
+    expect(within(tree).getByRole('button', { name: `Copy Codex task ID ${data.agents[1].threadId}` })).toHaveTextContent('Copied');
+  });
+
+  it('shows explicit agent graph nodes and parent/task relationships in the semantic list fallback', async () => {
+    const data = liveWorkspace();
+    const graph = relationshipGraph(data.tasks[0].id);
+    graph.nodes.push({ id: 'agent-ui', kind: 'agent', label: 'UI verification', taskId: data.tasks[0].id });
+    graph.edges.push({
+      id: 'edge-agent-task',
+      kind: 'agent-worked-on-task',
+      from: 'agent-ui',
+      to: data.tasks[0].id,
+      provenanceIds: ['agent-observation-ui'],
+      sourceKind: 'agent_observation',
+      observedAt: '2025-05-21T00:00:00Z',
+      verified: true,
+    });
+    data.graphSummary = { nodeCount: graph.nodes.length, edgeCount: graph.edges.length, verifiedEdgeCount: graph.edges.length };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input) === '/api/bootstrap'
+      ? { ok: true, json: async () => data }
+      : { ok: true, json: async () => graph }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click((await screen.findAllByRole('button', { name: 'Tasks' }))[0]);
+    await user.click(await screen.findByRole('button', { name: 'List' }));
+    const table = await screen.findByRole('table', { name: 'Explicit relationship edges and provenance' });
+    expect(within(table).getByText('agent-worked-on-task')).toBeInTheDocument();
+    expect(within(table).getByText('agent_observation')).toBeInTheDocument();
+    expect(screen.getAllByText('UI verification').length).toBeGreaterThan(0);
   });
 
   it('edits task title, goal, and lifecycle with the deterministic suggestion contract', async () => {
@@ -665,4 +854,99 @@ function relationshipGraph(taskId: string): RelationshipGraphV1 {
       },
     ],
   };
+}
+
+function factRefreshOperation(taskId: string, status: AiFactRefreshOperationV1['status']): AiFactRefreshOperationV1 {
+  const candidates: AiFactCandidateV1[] = [
+    {
+      schemaVersion: 1,
+      id: 'ai-candidate-update-auth',
+      operationId: 'fact-refresh-operation-1',
+      action: 'update',
+      factId: 'fact-auth-boundary',
+      kind: 'decision',
+      content: 'Authentication handlers should continue to depend on AuthContext only.',
+      reason: 'The verified pack shows a newer passing middleware test.',
+      status: 'pending',
+    },
+    {
+      schemaVersion: 1,
+      id: 'ai-candidate-deprecate-tenant',
+      operationId: 'fact-refresh-operation-1',
+      action: 'deprecate',
+      factId: 'fact-tenant-isolation',
+      kind: 'constraint',
+      content: 'Review whether the captured tenant constraint is stale after the verified rename.',
+      reason: 'The verified file status changed after capture.',
+      status: 'pending',
+    },
+  ];
+  return {
+    schemaVersion: 1,
+    operationId: 'fact-refresh-operation-1',
+    repositoryId: 'acme/api',
+    taskId,
+    status,
+    requestFingerprint: 'fact-refresh-fingerprint-1',
+    candidates: status === 'completed' ? candidates : [],
+    createdAt: '2025-05-21T00:00:00Z',
+    updatedAt: status === 'completed' ? '2025-05-21T00:01:00Z' : '2025-05-21T00:00:00Z',
+  };
+}
+
+function agentLineage(taskId: string): AgentV1[] {
+  return [
+    {
+      schemaVersion: 1,
+      id: 'agent-primary',
+      repositoryId: 'acme/api',
+      threadId: 'thread-primary-01HZX4AUTH',
+      sessionId: 'session-auth-2',
+      taskId,
+      sourceKind: 'interactive',
+      role: 'primary',
+      status: 'completed',
+      name: 'Primary implementation',
+      outputSummary: 'Implemented the verified authentication boundary.',
+      files: ['src/middleware/auth.ts'],
+      tests: ['auth middleware suite'],
+      observedAt: '2025-05-21T00:00:00Z',
+      associationState: 'linked',
+    },
+    {
+      schemaVersion: 1,
+      id: 'agent-ui',
+      repositoryId: 'acme/api',
+      threadId: 'thread-agent-ui-01HZX4AUTH',
+      parentThreadId: 'thread-primary-01HZX4AUTH',
+      taskId,
+      sourceKind: 'subAgent',
+      role: 'ui_verification',
+      status: 'completed',
+      name: 'UI verification',
+      outputSummary: 'Verified responsive UI behavior.',
+      files: ['ui/src/App.tsx'],
+      tests: ['npm test'],
+      observedAt: '2025-05-21T00:00:01Z',
+      associationState: 'degraded',
+      degradedReason: 'Some bounded output fields were unavailable.',
+    },
+    {
+      schemaVersion: 1,
+      id: 'agent-orphan',
+      repositoryId: 'acme/api',
+      threadId: 'thread-agent-orphan-01HZX4AUTH',
+      parentThreadId: 'thread-missing-parent',
+      taskId,
+      sourceKind: 'subAgentReview',
+      role: 'reviewer',
+      status: 'unknown',
+      name: 'Orphaned review observation',
+      files: [],
+      tests: [],
+      observedAt: '2025-05-21T00:00:02Z',
+      associationState: 'unlinked',
+      degradedReason: 'Parent task was not returned by the local App Server.',
+    },
+  ];
 }

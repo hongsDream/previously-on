@@ -225,6 +225,8 @@ pub enum EventKind {
     ContractEvaluationRecorded,
     TaskUpdated,
     TaskGroupingChanged,
+    AiFactRefreshOperationRecorded,
+    AgentObserved,
     #[default]
     SessionStopped,
     Unknown,
@@ -324,6 +326,134 @@ pub enum GraphSourceKindV1 {
     RegressionContract,
     ContractEvaluation,
     AgentObservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FactOriginV1 {
+    #[default]
+    Captured,
+    Manual,
+    AiAssisted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiFactRefreshStatusV1 {
+    Pending,
+    ThreadCreated,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiFactCandidateActionV1 {
+    Add,
+    Update,
+    Deprecate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AiFactCandidateStatusV1 {
+    #[default]
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiFactCandidateV1 {
+    pub schema_version: u16,
+    pub id: String,
+    pub operation_id: String,
+    pub action: AiFactCandidateActionV1,
+    #[serde(default)]
+    pub fact_id: Option<String>,
+    pub kind: FactKind,
+    pub content: String,
+    pub reason: String,
+    #[serde(default)]
+    pub status: AiFactCandidateStatusV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiFactRefreshOperationV1 {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub repository_id: String,
+    pub task_id: String,
+    pub status: AiFactRefreshStatusV1,
+    pub request_fingerprint: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub candidates: Vec<AiFactCandidateV1>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub latency_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentSourceKindV1 {
+    Interactive,
+    SubAgent,
+    SubAgentReview,
+    SubAgentCompact,
+    SubAgentThreadSpawn,
+    SubAgentOther,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAssociationStateV1 {
+    Linked,
+    Unlinked,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentV1 {
+    pub schema_version: u16,
+    pub id: String,
+    pub repository_id: String,
+    pub thread_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub parent_thread_id: Option<String>,
+    #[serde(default)]
+    pub forked_from_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    pub name: String,
+    pub source_kind: AgentSourceKindV1,
+    pub role: String,
+    pub status: String,
+    pub association_state: AgentAssociationStateV1,
+    #[serde(default)]
+    pub output_summary: Option<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub tests: Vec<String>,
+    pub observed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub degraded_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +818,8 @@ pub struct FactV1 {
     pub kind: FactKind,
     pub lifecycle: FactLifecycle,
     pub freshness: Freshness,
+    #[serde(default)]
+    pub origin: FactOriginV1,
     pub content: String,
     #[serde(default)]
     pub evidence_ids: Vec<String>,

@@ -111,6 +111,295 @@ printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-fresh","
 
 #[cfg(unix)]
 #[tokio::test]
+async fn experimental_permission_profile_and_structured_turn_use_exact_fail_closed_fields() {
+    use previously_on::app_server::AppServerClient;
+    use serde_json::json;
+
+    let (_temp, fake) = fake_codex(
+        r#"#!/bin/sh
+IFS= read -r initialize
+case "$initialize" in *'"experimentalApi":true'*) ;; *) exit 10 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
+IFS= read -r initialized
+IFS= read -r profiles
+case "$profiles" in *'"method":"permissionProfile/list"'*'"cwd":"/tmp/empty"'*'"limit":100'*) ;; *) exit 11 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"id":"previously-input-only","allowed":true}],"nextCursor":null}}'
+IFS= read -r start
+case "$start" in *'"method":"thread/start"'*) ;; *) exit 12 ;; esac
+case "$start" in *'"permissions":"previously-input-only"'*) ;; *) exit 16 ;; esac
+case "$start" in *'"approvalPolicy":"never"'*) ;; *) exit 17 ;; esac
+case "$start" in *'"ephemeral":true'*) ;; *) exit 18 ;; esac
+case "$start" in *'"sandbox"'*|*'"model"'*) exit 13 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"refresh-thread","sessionId":"refresh-thread"}}}'
+IFS= read -r turn
+case "$turn" in *'"method":"turn/start"'*) ;; *) exit 14 ;; esac
+case "$turn" in *'"effort":"medium"'*) ;; *) exit 19 ;; esac
+case "$turn" in *'"outputSchema"'*) ;; *) exit 20 ;; esac
+case "$turn" in *'"clientUserMessageId":"request-1"'*) ;; *) exit 21 ;; esac
+case "$turn" in *'"sandbox"'*|*'"permissions"'*|*'"model"'*) exit 15 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn-1"}}}'
+"#,
+    );
+    let mut client = AppServerClient::connect_with_program_experimental(&fake)
+        .await
+        .unwrap();
+    let profiles = client
+        .list_permission_profiles(std::path::Path::new("/tmp/empty"))
+        .await
+        .unwrap();
+    assert_eq!(profiles.profiles[0].id, "previously-input-only");
+    assert!(profiles.profiles[0].allowed);
+    let thread = client
+        .start_ephemeral_thread_with_permissions(
+            std::path::Path::new("/tmp/empty"),
+            "previously-input-only",
+        )
+        .await
+        .unwrap();
+    client
+        .start_structured_fact_refresh_turn(
+            &thread.id,
+            std::path::Path::new("/tmp/empty"),
+            "bounded input",
+            "request-1",
+            json!({"type":"object"}),
+        )
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agent_lineage_paginates_skips_cross_repo_and_replays_new_observations() {
+    use chrono::Utc;
+    use previously_on::app_server::{collect_agent_lineage, AppServerClient};
+    use previously_on::domain::{
+        AgentAssociationStateV1, EventKind, GraphEdgeKindV1, RepositoryV1, SessionLifecycle,
+        SessionV1, TaskLifecycle, TaskV1, SCHEMA_VERSION_V1,
+    };
+    use previously_on::store::{InsertOutcome, Store};
+    use serde_json::json;
+    use std::process::Command;
+
+    fn git_init(path: &std::path::Path) {
+        std::fs::create_dir_all(path).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn summary(
+        id: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+        source: &str,
+        parent: Option<&str>,
+        updated_at: i64,
+    ) -> serde_json::Value {
+        json!({
+            "id": id,
+            "sessionId": session_id,
+            "cwd": cwd,
+            "cliVersion": "test",
+            "createdAt": updated_at - 1,
+            "updatedAt": updated_at,
+            "ephemeral": false,
+            "modelProvider": "openai",
+            "preview": format!("preview {id}"),
+            "name": format!("name {id}"),
+            "source": source,
+            "parentThreadId": parent,
+            "forkedFromId": null,
+            "status": {"type":"idle"},
+            "turns": []
+        })
+    }
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let repository = temp.path().join("repo");
+    let foreign = temp.path().join("foreign");
+    git_init(&repository);
+    git_init(&foreign);
+    let identity = previously_on::git::repository_identity(&repository).unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    let now = Utc::now();
+    store
+        .upsert_repository(&RepositoryV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: identity.id.clone(),
+            path: repository.to_string_lossy().into_owned(),
+            remote_url: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_task(&TaskV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "task-lineage".into(),
+            repository_id: identity.id.clone(),
+            title: "Observe agents".into(),
+            goal: None,
+            lifecycle: TaskLifecycle::Active,
+            branch: Some("main".into()),
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_session(&SessionV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "session-parent".into(),
+            repository_id: identity.id.clone(),
+            task_id: Some("task-lineage".into()),
+            lifecycle: SessionLifecycle::Active,
+            started_at: now,
+            ended_at: None,
+            branch: Some("main".into()),
+            head: None,
+            source_thread_id: Some("thread-parent".into()),
+            last_activity_at: Some(now),
+            turn_count: 1,
+            compaction_count: 0,
+            context_usage: None,
+            continuation_state: Default::default(),
+            coverage: Default::default(),
+        })
+        .unwrap();
+
+    let first_page = json!({
+        "data": [
+            summary("thread-parent", "session-parent", &repository, "appServer", None, 101),
+            summary("thread-child", "session-parent", &repository, "subAgent", Some("thread-parent"), 102)
+        ],
+        "nextCursor": "page-2"
+    });
+    let second_page = json!({
+        "data": [
+            summary("thread-orphan", "session-orphan", &repository, "subAgentReview", Some("thread-missing"), 103),
+            summary("thread-foreign", "session-foreign", &foreign, "subAgentOther", None, 104)
+        ],
+        "nextCursor": null
+    });
+    let read_response = |id: &str| {
+        json!({"thread": {
+            "id": id,
+            "status": {"type":"idle"},
+            "turns": [{"items":[{"type":"agentMessage","text":format!("summary {id}")}]}]
+        }})
+    };
+    let script = format!(
+        r#"#!/bin/sh
+IFS= read -r initialize
+case "$initialize" in *'"experimentalApi":true'*) ;; *) exit 10 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"userAgent":"codex-cli/test"}}}}'
+IFS= read -r initialized
+IFS= read -r first
+case "$first" in *'"method":"thread/list"'*) ;; *) exit 11 ;; esac
+case "$first" in *'"cli"'*'"vscode"'*'"exec"'*'"appServer"'*'"subAgent"'*'"subAgentReview"'*'"subAgentCompact"'*'"subAgentThreadSpawn"'*'"subAgentOther"'*) ;; *) exit 12 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{first_page}}}'
+IFS= read -r second
+case "$second" in *'"cursor":"page-2"'*) ;; *) exit 13 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{second_page}}}'
+IFS= read -r read_parent
+case "$read_parent" in *'"threadId":"thread-parent"'*) ;; *) exit 14 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{read_parent}}}'
+IFS= read -r read_child
+case "$read_child" in *'"threadId":"thread-child"'*) ;; *) exit 15 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{read_child}}}'
+IFS= read -r read_orphan
+case "$read_orphan" in *'"threadId":"thread-orphan"'*) ;; *) exit 16 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":6,"result":{read_orphan}}}'
+"#,
+        first_page = first_page,
+        second_page = second_page,
+        read_parent = read_response("thread-parent"),
+        read_child = read_response("thread-child"),
+        read_orphan = read_response("thread-orphan"),
+    );
+    let (_fake_temp, fake) = fake_codex(&script);
+    let mut client = AppServerClient::connect_with_program_experimental(&fake)
+        .await
+        .unwrap();
+    let agents = collect_agent_lineage(&mut client, &store, &repository, &identity.id)
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+
+    assert_eq!(agents.len(), 3);
+    assert!(!agents
+        .iter()
+        .any(|agent| agent.thread_id == "thread-foreign"));
+    let parent = agents
+        .iter()
+        .find(|agent| agent.thread_id == "thread-parent")
+        .unwrap();
+    let child = agents
+        .iter()
+        .find(|agent| agent.thread_id == "thread-child")
+        .unwrap();
+    let orphan = agents
+        .iter()
+        .find(|agent| agent.thread_id == "thread-orphan")
+        .unwrap();
+    assert_eq!(parent.task_id.as_deref(), Some("task-lineage"));
+    assert_eq!(child.task_id.as_deref(), Some("task-lineage"));
+    assert_eq!(child.parent_thread_id.as_deref(), Some("thread-parent"));
+    assert_eq!(orphan.task_id, None);
+    assert_eq!(orphan.association_state, AgentAssociationStateV1::Unlinked);
+
+    let mut updated_parent = parent.clone();
+    updated_parent.status = "completed".into();
+    updated_parent.observed_at += chrono::Duration::seconds(10);
+    assert_eq!(
+        store.append_agent_observation(&updated_parent).unwrap(),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        store.append_agent_observation(&updated_parent).unwrap(),
+        InsertOutcome::Duplicate
+    );
+    store.rebuild_projections().unwrap();
+    assert_eq!(
+        store.get_agent(&updated_parent.id).unwrap().unwrap().status,
+        "completed"
+    );
+    assert!(
+        store
+            .list_events(Some(&identity.id))
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::AgentObserved)
+            .count()
+            >= 4
+    );
+    let graph =
+        previously_on::graph::derive_relationship_graph(&store, &identity.id, None, &[]).unwrap();
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == GraphEdgeKindV1::AgentWorkedOnTask)
+            .count(),
+        2
+    );
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == GraphEdgeKindV1::AgentParent)
+            .count(),
+        1
+    );
+    assert!(graph.edges.iter().all(|edge| edge.verified));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn rejects_an_oversized_unterminated_app_server_frame() {
     use previously_on::app_server::{AppServerClient, MAX_APP_SERVER_RPC_BYTES};
 

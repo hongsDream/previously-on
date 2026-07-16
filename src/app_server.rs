@@ -13,10 +13,12 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use uuid::Uuid;
 
 use crate::domain::{
-    ChangeAttribution, ChangeStatus, CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind,
-    FileChangeV1, SCHEMA_VERSION_V1,
+    deterministic_id, AgentAssociationStateV1, AgentSourceKindV1, AgentV1, ChangeAttribution,
+    ChangeStatus, CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind, FileChangeV1,
+    SCHEMA_VERSION_V1,
 };
 use crate::git::{repository_identity, RepositoryIdentity};
+use crate::store::Store;
 use crate::APP_VERSION;
 
 pub const TESTED_CODEX_VERSION: &str = "0.144.3";
@@ -70,8 +72,27 @@ pub struct AppServerThreadSummary {
     pub created_at: i64,
     pub updated_at: i64,
     pub preview: String,
+    pub name: Option<String>,
+    pub source_kind: Option<String>,
+    pub parent_thread_id: Option<String>,
+    pub forked_from_id: Option<String>,
+    pub status: Option<String>,
     pub coverage: CoverageV1,
     pub raw: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionProfileV1 {
+    pub id: String,
+    pub allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionProfileListV1 {
+    pub schema_version: u16,
+    pub profiles: Vec<PermissionProfileV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -860,6 +881,7 @@ pub struct AppServerClient {
     initialize_result: Value,
     token_usage_notifications: BTreeMap<String, AppServerTokenUsageNotificationV1>,
     collector_warnings: Vec<String>,
+    experimental_api: bool,
 }
 
 impl AppServerClient {
@@ -868,13 +890,37 @@ impl AppServerClient {
     }
 
     pub async fn connect_with_program(program: impl AsRef<Path>) -> Result<Self> {
-        let mut child = Command::new(program.as_ref())
+        Self::connect_with_program_and_experimental(program, false).await
+    }
+
+    pub async fn connect_experimental() -> Result<Self> {
+        Self::connect_with_program_and_experimental("codex", true).await
+    }
+
+    pub async fn connect_with_program_experimental(program: impl AsRef<Path>) -> Result<Self> {
+        Self::connect_with_program_and_experimental(program, true).await
+    }
+
+    async fn connect_with_program_and_experimental(
+        program: impl AsRef<Path>,
+        experimental_api: bool,
+    ) -> Result<Self> {
+        let mut command = Command::new(program.as_ref());
+        command
             .arg("app-server")
             .arg("--stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        if experimental_api {
+            for (name, _) in std::env::vars_os() {
+                if is_sensitive_environment_name(&name) {
+                    command.env_remove(name);
+                }
+            }
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("start {} app-server", program.as_ref().display()))?;
         let stdin = child
@@ -893,6 +939,7 @@ impl AppServerClient {
             initialize_result: Value::Null,
             token_usage_notifications: BTreeMap::new(),
             collector_warnings: Vec::new(),
+            experimental_api,
         };
         let initialized = client
             .request_timed(
@@ -904,7 +951,7 @@ impl AppServerClient {
                         "version": APP_VERSION
                     },
                     "capabilities": {
-                        "experimentalApi": false,
+                        "experimentalApi": experimental_api,
                         "requestAttestation": false
                     }
                 }),
@@ -914,6 +961,10 @@ impl AppServerClient {
         client.initialize_result = initialized;
         client.notify("initialized", json!({})).await?;
         Ok(client)
+    }
+
+    pub fn experimental_api(&self) -> bool {
+        self.experimental_api
     }
 
     pub fn initialize_result(&self) -> &Value {
@@ -977,6 +1028,38 @@ impl AppServerClient {
     /// summaries already validated remain usable. This prevents one bad page from contaminating
     /// or discarding the rest of an import.
     pub async fn list_threads_report(&mut self, cwd: Option<&Path>) -> Result<ThreadListReportV1> {
+        self.list_threads_report_with_sources(cwd, None).await
+    }
+
+    pub async fn list_lineage_threads_report(
+        &mut self,
+        cwd: Option<&Path>,
+    ) -> Result<ThreadListReportV1> {
+        if !self.experimental_api {
+            bail!("agent lineage requires experimentalApi capability");
+        }
+        self.list_threads_report_with_sources(
+            cwd,
+            Some(&[
+                "cli",
+                "vscode",
+                "exec",
+                "appServer",
+                "subAgent",
+                "subAgentReview",
+                "subAgentCompact",
+                "subAgentThreadSpawn",
+                "subAgentOther",
+            ]),
+        )
+        .await
+    }
+
+    async fn list_threads_report_with_sources(
+        &mut self,
+        cwd: Option<&Path>,
+        source_kinds: Option<&[&str]>,
+    ) -> Result<ThreadListReportV1> {
         let mut cursor: Option<String> = None;
         let mut seen_cursors = HashSet::new();
         let mut threads = Vec::new();
@@ -993,6 +1076,9 @@ impl AppServerClient {
             }
             if let Some(cwd) = cwd {
                 params["cwd"] = json!(cwd.to_string_lossy());
+            }
+            if let Some(source_kinds) = source_kinds {
+                params["sourceKinds"] = json!(source_kinds);
             }
             let response = match self.request_timed("thread/list", params).await {
                 Ok(response) => response,
@@ -1061,6 +1147,61 @@ impl AppServerClient {
         })
     }
 
+    pub async fn list_permission_profiles(
+        &mut self,
+        cwd: &Path,
+    ) -> Result<PermissionProfileListV1> {
+        if !self.experimental_api {
+            bail!("permissionProfile/list requires experimentalApi capability");
+        }
+        if !cwd.is_absolute() {
+            bail!("permissionProfile/list requires an absolute cwd");
+        }
+        let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
+        let mut profiles = Vec::new();
+        for _ in 0..MAX_PAGES {
+            let mut params = json!({ "cwd": cwd.to_string_lossy(), "limit": 100 });
+            if let Some(value) = cursor.as_ref() {
+                params["cursor"] = json!(value);
+            }
+            let result = self.request_timed("permissionProfile/list", params).await?;
+            let page: ThreadPage = serde_json::from_value(result)
+                .context("invalid permissionProfile/list response")?;
+            for raw in page.data {
+                let id = raw
+                    .get("id")
+                    .or_else(|| raw.get("name"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .context("permission profile omitted id")?
+                    .to_string();
+                let allowed = raw
+                    .get("allowed")
+                    .or_else(|| raw.get("allowedByRequirements"))
+                    .or_else(|| raw.get("isAllowed"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                profiles.push(PermissionProfileV1 { id, allowed });
+            }
+            match page.next_cursor {
+                None => {
+                    profiles.sort_by(|left, right| left.id.cmp(&right.id));
+                    profiles.dedup_by(|left, right| left.id == right.id);
+                    return Ok(PermissionProfileListV1 {
+                        schema_version: SCHEMA_VERSION_V1,
+                        profiles,
+                    });
+                }
+                Some(next) if !seen.insert(next.clone()) => {
+                    bail!("permissionProfile/list repeated cursor `{next}`")
+                }
+                Some(next) => cursor = Some(next),
+            }
+        }
+        bail!("permissionProfile/list exceeded {MAX_PAGES} pages")
+    }
+
     pub async fn read_thread(&mut self, thread_id: &str) -> Result<Value> {
         let result = self
             .request_timed(
@@ -1099,6 +1240,50 @@ impl AppServerClient {
             .request_timed("thread/start", params)
             .await
             .context("Codex thread/start failed")?;
+        let thread = result
+            .get("thread")
+            .context("Codex thread/start response omitted `thread`")?;
+        let id = thread
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .context("Codex thread/start response omitted `thread.id`")?
+            .to_string();
+        let session_id = thread
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        Ok(AppServerStartedThreadV1 { id, session_id })
+    }
+
+    /// Starts the user-triggered AI fact refresh in an isolated cwd with the verified named
+    /// permission profile. The legacy `sandbox` field is deliberately never present.
+    pub async fn start_ephemeral_thread_with_permissions(
+        &mut self,
+        cwd: &Path,
+        permission_profile: &str,
+    ) -> Result<AppServerStartedThreadV1> {
+        if !self.experimental_api {
+            bail!("named permissions require experimentalApi capability");
+        }
+        if !cwd.is_absolute() || permission_profile.trim().is_empty() {
+            bail!("named-permission thread/start requires absolute cwd and profile id");
+        }
+        let result = self
+            .request_timed(
+                "thread/start",
+                json!({
+                    "cwd": cwd.to_string_lossy(),
+                    "ephemeral": true,
+                    "serviceName": "previously-on-fact-refresh",
+                    "permissions": permission_profile,
+                    "approvalPolicy": "never"
+                }),
+            )
+            .await
+            .context("Codex named-permission thread/start failed")?;
         let thread = result
             .get("thread")
             .context("Codex thread/start response omitted `thread`")?;
@@ -1187,6 +1372,47 @@ impl AppServerClient {
             .request_timed("turn/start", params)
             .await
             .context("Codex turn/start failed")?;
+        let id = result
+            .get("turn")
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .context("Codex turn/start response omitted `turn.id`")?
+            .to_string();
+        Ok(AppServerStartedTurnV1 { id })
+    }
+
+    pub async fn start_structured_fact_refresh_turn(
+        &mut self,
+        thread_id: &str,
+        cwd: &Path,
+        prompt: &str,
+        client_user_message_id: &str,
+        output_schema: Value,
+    ) -> Result<AppServerStartedTurnV1> {
+        if !self.experimental_api {
+            bail!("structured fact refresh requires experimentalApi capability");
+        }
+        if thread_id.is_empty() || client_user_message_id.is_empty() || !cwd.is_absolute() {
+            bail!("structured turn/start requires stable ids and absolute cwd");
+        }
+        if prompt.trim().is_empty() {
+            bail!("structured turn/start requires non-empty input");
+        }
+        let result = self
+            .request_timed(
+                "turn/start",
+                json!({
+                    "threadId": thread_id,
+                    "cwd": cwd.to_string_lossy(),
+                    "clientUserMessageId": client_user_message_id,
+                    "input": [{ "type": "text", "text": prompt }],
+                    "effort": "medium",
+                    "outputSchema": output_schema
+                }),
+            )
+            .await
+            .context("Codex structured turn/start failed")?;
         let id = result
             .get("turn")
             .and_then(|turn| turn.get("id"))
@@ -1415,6 +1641,13 @@ impl AppServerClient {
     }
 }
 
+fn is_sensitive_environment_name(name: &std::ffi::OsStr) -> bool {
+    let upper = name.to_string_lossy().to_ascii_uppercase();
+    ["KEY", "SECRET", "TOKEN"]
+        .iter()
+        .any(|marker| upper.contains(marker))
+}
+
 fn validate_thread_repository(cwd: &Path, registered: &RepositoryIdentity) -> Result<()> {
     if !cwd.is_absolute() {
         bail!("Codex thread/list returned a non-absolute cwd; thread skipped")
@@ -1438,6 +1671,183 @@ pub async fn inspect_capabilities() -> AppServerCapabilityReport {
         }
         Err(error) => AppServerCapabilityReport::unsupported(error.to_string()),
     }
+}
+
+/// Read-only, same-device observation of interactive and sub-agent thread lineage.
+///
+/// Parent/task association is made only from an already observed parent or an existing session's
+/// explicit `source_thread_id`. Cross-repository and missing-parent rows are never guessed.
+pub async fn collect_agent_lineage(
+    client: &mut AppServerClient,
+    store: &Store,
+    repository_root: &Path,
+    repository_id: &str,
+) -> Result<Vec<AgentV1>> {
+    let registered = repository_identity(repository_root)?;
+    let report = client.list_lineage_threads_report(None).await?;
+    let session_tasks = store
+        .list_sessions(Some(repository_id))?
+        .into_iter()
+        .filter_map(|session| Some((session.source_thread_id?, session.task_id?)))
+        .collect::<BTreeMap<_, _>>();
+    let mut observed = Vec::new();
+    for summary in report.threads {
+        if validate_thread_repository(&summary.cwd, &registered).is_err() {
+            continue;
+        }
+        let source_kind = match summary.source_kind.as_deref() {
+            Some("subAgent") => AgentSourceKindV1::SubAgent,
+            Some("subAgentReview") => AgentSourceKindV1::SubAgentReview,
+            Some("subAgentCompact") => AgentSourceKindV1::SubAgentCompact,
+            Some("subAgentThreadSpawn") => AgentSourceKindV1::SubAgentThreadSpawn,
+            Some("subAgentOther") => AgentSourceKindV1::SubAgentOther,
+            Some("cli" | "vscode" | "exec" | "appServer") => AgentSourceKindV1::Interactive,
+            None => continue,
+            Some(_) => continue,
+        };
+        let thread = client.read_thread(&summary.id).await.ok();
+        let (output_summary, files, tests) = thread
+            .as_ref()
+            .map(extract_agent_observation)
+            .unwrap_or_default();
+        let task_id = session_tasks.get(&summary.id).cloned();
+        let association_state = if task_id.is_some() {
+            AgentAssociationStateV1::Linked
+        } else if summary.parent_thread_id.is_some() {
+            AgentAssociationStateV1::Unlinked
+        } else {
+            AgentAssociationStateV1::Degraded
+        };
+        let degraded_reason = match association_state {
+            AgentAssociationStateV1::Linked => None,
+            AgentAssociationStateV1::Unlinked => {
+                Some("parent observed but task association not yet resolved".to_string())
+            }
+            AgentAssociationStateV1::Degraded => {
+                Some("no verified session or parent association".to_string())
+            }
+        };
+        let role = match source_kind {
+            AgentSourceKindV1::Interactive => "interactive",
+            AgentSourceKindV1::SubAgentReview => "review",
+            AgentSourceKindV1::SubAgentCompact => "compact",
+            AgentSourceKindV1::SubAgentThreadSpawn => "thread_spawn",
+            AgentSourceKindV1::SubAgent | AgentSourceKindV1::SubAgentOther => "subagent",
+        };
+        observed.push(AgentV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: deterministic_id("agent", &[repository_id, &summary.id]),
+            repository_id: repository_id.to_string(),
+            thread_id: summary.id.clone(),
+            session_id: Some(summary.session_id.clone()),
+            parent_thread_id: summary.parent_thread_id.clone(),
+            forked_from_id: summary.forked_from_id.clone(),
+            task_id,
+            name: crate::redaction::redact_excerpt(
+                summary.name.as_deref().unwrap_or(summary.preview.as_str()),
+            ),
+            source_kind,
+            role: role.to_string(),
+            status: crate::redaction::redact_excerpt(
+                summary.status.as_deref().unwrap_or("unknown"),
+            ),
+            association_state,
+            output_summary,
+            files,
+            tests,
+            observed_at: timestamp_seconds(summary.updated_at),
+            degraded_reason,
+        });
+    }
+
+    // Resolve children only through a parent that was itself observed and explicitly linked.
+    for _ in 0..observed.len() {
+        let linked = observed
+            .iter()
+            .filter_map(|agent| Some((agent.thread_id.clone(), agent.task_id.clone()?)))
+            .collect::<BTreeMap<_, _>>();
+        let mut changed = false;
+        for agent in &mut observed {
+            if agent.task_id.is_some() {
+                continue;
+            }
+            let parent = agent.parent_thread_id.as_deref();
+            if let Some(task_id) = parent.and_then(|parent| linked.get(parent)).cloned() {
+                agent.task_id = Some(task_id);
+                agent.association_state = AgentAssociationStateV1::Linked;
+                agent.degraded_reason = None;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    observed.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    for agent in &observed {
+        store.append_agent_observation(agent)?;
+    }
+    Ok(observed)
+}
+
+fn extract_agent_observation(thread: &Value) -> (Option<String>, Vec<String>, Vec<String>) {
+    let mut output_summary = None;
+    let mut files = BTreeMap::<String, ()>::new();
+    let mut tests = BTreeMap::<String, ()>::new();
+    for turn in thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for item in turn
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            match item.get("type").and_then(Value::as_str) {
+                Some("agentMessage") => {
+                    let text = item
+                        .get("text")
+                        .or_else(|| item.get("content"))
+                        .and_then(Value::as_str);
+                    if let Some(text) = text {
+                        output_summary = Some(crate::redaction::redact_excerpt(text));
+                    }
+                }
+                Some("fileChange") => {
+                    for change in item
+                        .get("changes")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(path) = change.get("path").and_then(Value::as_str) {
+                            files.insert(crate::redaction::redact_excerpt(path), ());
+                        }
+                    }
+                }
+                Some("commandExecution") => {
+                    if let Some(command) = item.get("command").and_then(Value::as_str) {
+                        let lower = command.to_ascii_lowercase();
+                        if [" test", "pytest", "cargo test", "npm test", "vitest"]
+                            .iter()
+                            .any(|marker| lower.contains(marker))
+                        {
+                            tests.insert(crate::redaction::redact_excerpt(command), ());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (
+        output_summary,
+        files.into_keys().take(32).collect(),
+        tests.into_keys().take(16).collect(),
+    )
 }
 
 fn parse_thread_summary(raw: Value) -> Result<AppServerThreadSummary> {
@@ -1468,6 +1878,19 @@ fn parse_thread_summary(raw: Value) -> Result<AppServerThreadSummary> {
             generated
         }
     };
+    let optional_string = |key: &str| {
+        raw.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let status = raw.get("status").and_then(|status| {
+        status
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| status.as_str())
+            .map(str::to_string)
+    });
     Ok(AppServerThreadSummary {
         id: required_string("id")?,
         session_id,
@@ -1475,7 +1898,12 @@ fn parse_thread_summary(raw: Value) -> Result<AppServerThreadSummary> {
         cli_version: required_string("cliVersion")?,
         created_at: required_i64("createdAt")?,
         updated_at: required_i64("updatedAt")?,
-        preview: required_string("preview")?,
+        preview: optional_string("preview").unwrap_or_default(),
+        name: optional_string("name"),
+        source_kind: optional_string("sourceKind").or_else(|| optional_string("source")),
+        parent_thread_id: optional_string("parentThreadId"),
+        forked_from_id: optional_string("forkedFromId"),
+        status,
         coverage,
         raw,
     })
@@ -1663,4 +2091,25 @@ pub async fn codex_version() -> Result<String> {
         .last()
         .map(str::to_string)
         .context("codex --version returned no version")
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::is_sensitive_environment_name;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn experimental_app_server_removes_key_secret_and_token_environment_names() {
+        for name in [
+            "OPENAI_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "PRIVATE_SECRET_VALUE",
+            "api_key_lowercase",
+        ] {
+            assert!(is_sensitive_environment_name(OsStr::new(name)), "{name}");
+        }
+        for name in ["PATH", "HOME", "CODEX_HOME", "TMPDIR"] {
+            assert!(!is_sensitive_environment_name(OsStr::new(name)), "{name}");
+        }
+    }
 }

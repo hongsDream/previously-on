@@ -36,6 +36,7 @@ fn fact(id: &str, lifecycle: FactLifecycle, freshness: Freshness, second: i64) -
         kind: FactKind::Decision,
         lifecycle,
         freshness,
+        origin: previously_on::domain::FactOriginV1::Captured,
         content: format!("Decision {id}: {}", "details ".repeat(80)),
         evidence_ids: vec![id.replace("fact", "evidence")],
         superseded_by: None,

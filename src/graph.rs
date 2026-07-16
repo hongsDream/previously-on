@@ -161,6 +161,64 @@ pub fn derive_relationship_graph(
         }
     }
 
+    let agents = store
+        .list_agents(Some(repository_id))?
+        .into_iter()
+        .filter(|agent| {
+            task_filter.is_none()
+                || agent
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|task_id| task_ids.contains(task_id))
+        })
+        .collect::<Vec<_>>();
+    let observed_threads = agents
+        .iter()
+        .map(|agent| agent.thread_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for agent in &agents {
+        let agent_node = node_id("agent", &agent.thread_id);
+        insert_node(
+            &mut nodes,
+            GraphNodeV1 {
+                id: agent_node.clone(),
+                kind: GraphNodeKindV1::Agent,
+                label: redact_excerpt(&agent.name),
+                task_id: agent.task_id.clone(),
+            },
+        );
+        if let Some(task_id) = agent
+            .task_id
+            .as_deref()
+            .filter(|task_id| task_ids.contains(*task_id))
+        {
+            insert_edge(
+                &mut edges,
+                GraphEdgeKindV1::AgentWorkedOnTask,
+                agent_node.clone(),
+                node_id("task", task_id),
+                vec![agent.id.clone(), agent.thread_id.clone()],
+                GraphSourceKindV1::AgentObservation,
+                agent.observed_at,
+            );
+        }
+        if let Some(parent) = agent
+            .parent_thread_id
+            .as_deref()
+            .filter(|parent| observed_threads.contains(*parent))
+        {
+            insert_edge(
+                &mut edges,
+                GraphEdgeKindV1::AgentParent,
+                node_id("agent", parent),
+                agent_node,
+                vec![agent.id.clone(), parent.to_string()],
+                GraphSourceKindV1::AgentObservation,
+                agent.observed_at,
+            );
+        }
+    }
+
     let mut latest_evaluations = BTreeMap::new();
     for evaluation in store.list_contract_evaluations(Some(repository_id))? {
         let Some(task_id) = evaluation.task_id.as_deref() else {

@@ -1,10 +1,10 @@
 use crate::contracts::{ContractEvaluationV1, RegressionCandidateV1};
 use crate::domain::{
-    deterministic_id, CheckpointV1, ContextUsageV1, ContinuationAdviceV1, ContinuationReasonV1,
-    ContinuationStateV1, CoverageV1, EventEnvelopeV1, EventKind, EvidenceV1, FactLifecycle, FactV1,
-    FileChangeV1, GitSnapshotV1, RepositoryV1, SessionLifecycle, SessionV1,
-    TaskGroupingOperationV1, TaskLifecycle, TaskSuggestionV1, TaskTimelineV1, TaskV1, TestResultV1,
-    SCHEMA_VERSION_V1,
+    deterministic_id, AgentV1, AiFactRefreshOperationV1, CheckpointV1, ContextUsageV1,
+    ContinuationAdviceV1, ContinuationReasonV1, ContinuationStateV1, CoverageV1, EventEnvelopeV1,
+    EventKind, EvidenceV1, FactLifecycle, FactV1, FileChangeV1, GitSnapshotV1, RepositoryV1,
+    SessionLifecycle, SessionV1, TaskGroupingOperationV1, TaskLifecycle, TaskSuggestionV1,
+    TaskTimelineV1, TaskV1, TestResultV1, SCHEMA_VERSION_V1,
 };
 use crate::redaction::{redact_excerpt, redact_text, redact_value};
 use anyhow::{bail, Context, Result};
@@ -471,6 +471,122 @@ impl Store {
             (left.occurred_at, &left.operation_id).cmp(&(right.occurred_at, &right.operation_id))
         });
         Ok(operations)
+    }
+
+    pub fn get_ai_fact_refresh_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<AiFactRefreshOperationV1>> {
+        query_json_optional(
+            &self.connect()?,
+            "SELECT operation_json FROM ai_fact_refresh_operations WHERE operation_id = ?1",
+            [operation_id],
+        )
+    }
+
+    pub fn list_ai_fact_refresh_operations(
+        &self,
+        repository_id: Option<&str>,
+    ) -> Result<Vec<AiFactRefreshOperationV1>> {
+        let connection = self.connect()?;
+        if let Some(repository_id) = repository_id {
+            query_json_rows(
+                &connection,
+                "SELECT operation_json FROM ai_fact_refresh_operations
+                 WHERE repository_id = ?1 ORDER BY updated_at DESC, operation_id",
+                [repository_id],
+            )
+        } else {
+            query_json_rows(
+                &connection,
+                "SELECT operation_json FROM ai_fact_refresh_operations
+                 ORDER BY updated_at DESC, operation_id",
+                [],
+            )
+        }
+    }
+
+    pub fn append_ai_fact_refresh_operation(
+        &self,
+        operation: &AiFactRefreshOperationV1,
+    ) -> Result<InsertOutcome> {
+        let mut event = EventEnvelopeV1::new(
+            format!(
+                "local-ui:ai-fact-refresh:{}:{}",
+                operation.operation_id,
+                operation.updated_at.timestamp_micros()
+            ),
+            &operation.repository_id,
+            "ai-fact-refresh",
+            EventKind::AiFactRefreshOperationRecorded,
+            operation.updated_at,
+            json!({ "operation": operation }),
+        );
+        event.task_id = Some(operation.task_id.clone());
+        event.event_id = deterministic_id(
+            "event",
+            &[
+                &operation.repository_id,
+                "ai-fact-refresh",
+                &operation.operation_id,
+                &operation.updated_at.timestamp_micros().to_string(),
+            ],
+        );
+        event.dedupe_key = event.event_id.clone();
+        self.insert_event(&event)
+    }
+
+    pub fn get_agent(&self, agent_id: &str) -> Result<Option<AgentV1>> {
+        query_json_optional(
+            &self.connect()?,
+            "SELECT agent_json FROM agents WHERE id = ?1",
+            [agent_id],
+        )
+    }
+
+    pub fn list_agents(&self, repository_id: Option<&str>) -> Result<Vec<AgentV1>> {
+        let connection = self.connect()?;
+        if let Some(repository_id) = repository_id {
+            query_json_rows(
+                &connection,
+                "SELECT agent_json FROM agents WHERE repository_id = ?1
+                 ORDER BY observed_at, thread_id",
+                [repository_id],
+            )
+        } else {
+            query_json_rows(
+                &connection,
+                "SELECT agent_json FROM agents ORDER BY observed_at, thread_id",
+                [],
+            )
+        }
+    }
+
+    pub fn append_agent_observation(&self, agent: &AgentV1) -> Result<InsertOutcome> {
+        let observed_at = agent.observed_at.timestamp_micros().to_string();
+        let payload_fingerprint =
+            hex::encode(sha2::Sha256::digest(serde_json::to_vec(agent)?.as_slice()));
+        let mut event = EventEnvelopeV1::new(
+            format!("codex-app-server:agent:{}", agent.thread_id),
+            &agent.repository_id,
+            agent.session_id.as_deref().unwrap_or(&agent.thread_id),
+            EventKind::AgentObserved,
+            agent.observed_at,
+            json!({ "agent": agent }),
+        );
+        event.task_id = agent.task_id.clone();
+        event.event_id = deterministic_id(
+            "event",
+            &[
+                &agent.repository_id,
+                "agent",
+                &agent.thread_id,
+                &observed_at,
+                &payload_fingerprint,
+            ],
+        );
+        event.dedupe_key = event.event_id.clone();
+        self.insert_event(&event)
     }
 
     pub fn get_task_grouping_operation(
@@ -982,6 +1098,8 @@ impl Store {
         }
         let regression_candidates = self.list_regression_candidates(repository_id)?;
         let contract_evaluations = self.list_contract_evaluations(repository_id)?;
+        let fact_refresh_operations = self.list_ai_fact_refresh_operations(repository_id)?;
+        let agents = self.list_agents(repository_id)?;
         Ok(json!({
             "schema_version": SCHEMA_VERSION_V1,
             "exported_at": timestamp(Utc::now()),
@@ -996,6 +1114,8 @@ impl Store {
             "test_results": test_results,
             "regressionCandidates": regression_candidates,
             "contractEvaluations": contract_evaluations,
+            "factRefreshOperations": fact_refresh_operations,
+            "agents": agents,
         }))
     }
 
@@ -1093,6 +1213,8 @@ impl Store {
         let mut latest_evaluation_events = std::collections::BTreeMap::new();
         let mut latest_passing_test_events = std::collections::BTreeMap::new();
         let mut latest_continuation_guard_events = std::collections::BTreeMap::new();
+        let mut latest_fact_refresh_events = std::collections::BTreeMap::new();
+        let mut latest_agent_events = std::collections::BTreeMap::new();
         for event in &events {
             match event.kind {
                 EventKind::RegressionCandidateRecorded => {
@@ -1147,6 +1269,20 @@ impl Store {
                         }
                     }
                 }
+                EventKind::AiFactRefreshOperationRecorded => {
+                    if let Some(id) = event
+                        .payload
+                        .pointer("/operation/operationId")
+                        .and_then(Value::as_str)
+                    {
+                        latest_fact_refresh_events.insert(id.to_string(), event.event_id.clone());
+                    }
+                }
+                EventKind::AgentObserved => {
+                    if let Some(id) = event.payload.pointer("/agent/id").and_then(Value::as_str) {
+                        latest_agent_events.insert(id.to_string(), event.event_id.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -1155,6 +1291,8 @@ impl Store {
             .chain(latest_evaluation_events.into_values())
             .chain(latest_passing_test_events.into_values())
             .chain(latest_continuation_guard_events.into_values())
+            .chain(latest_fact_refresh_events.into_values())
+            .chain(latest_agent_events.into_values())
             .collect::<std::collections::BTreeSet<_>>();
 
         let retained = events
@@ -1584,6 +1722,26 @@ CREATE TABLE IF NOT EXISTS contract_evaluations (
 );
 CREATE INDEX IF NOT EXISTS contract_evaluations_repository
   ON contract_evaluations(repository_id, evaluated_at);
+CREATE TABLE IF NOT EXISTS ai_fact_refresh_operations (
+  operation_id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  operation_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ai_fact_refresh_operations_repository
+  ON ai_fact_refresh_operations(repository_id, updated_at);
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  task_id TEXT,
+  thread_id TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  agent_json TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS agents_repository_thread
+  ON agents(repository_id, thread_id);
+CREATE INDEX IF NOT EXISTS agents_task ON agents(task_id, observed_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS task_fts USING fts5(task_id UNINDEXED, title, goal, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS fact_fts USING fts5(fact_id UNINDEXED, content, tokenize='unicode61');
 "#;
@@ -1593,6 +1751,8 @@ fn rebuild_projections_tx(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         "DELETE FROM task_fts;
          DELETE FROM fact_fts;
+         DELETE FROM agents;
+         DELETE FROM ai_fact_refresh_operations;
          DELETE FROM session_grouping_assignments;
          DELETE FROM contract_evaluations;
          DELETE FROM regression_candidates;
@@ -1721,6 +1881,16 @@ fn apply_event_projection(transaction: &Transaction<'_>, event: &EventEnvelopeV1
                 .get("contractEvaluation")
                 .context("contract evaluation event is missing contractEvaluation")?;
             upsert_contract_evaluation_tx(transaction, &event, evaluation)?;
+        }
+        EventKind::AiFactRefreshOperationRecorded => {
+            let operation = payload_as::<AiFactRefreshOperationV1>(&event.payload, "operation")
+                .context("AI fact refresh event is missing operation")?;
+            upsert_ai_fact_refresh_operation_tx(transaction, &operation)?;
+        }
+        EventKind::AgentObserved => {
+            let agent = payload_as::<AgentV1>(&event.payload, "agent")
+                .context("agent observation event is missing agent")?;
+            upsert_agent_tx(transaction, &agent)?;
         }
         _ => {}
     }
@@ -2366,6 +2536,57 @@ fn upsert_test_result_tx(transaction: &Transaction<'_>, test: &TestResultV1) -> 
             test.task_id,
             test.session_id,
             timestamp(test.occurred_at),
+            json
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_ai_fact_refresh_operation_tx(
+    transaction: &Transaction<'_>,
+    operation: &AiFactRefreshOperationV1,
+) -> Result<()> {
+    let operation: AiFactRefreshOperationV1 = serde_json::from_value(redact_value(
+        &serde_json::to_value(operation).context("serialize AI fact refresh operation")?,
+    ))
+    .context("deserialize redacted AI fact refresh operation")?;
+    let json = serde_json::to_string(&operation)?;
+    transaction.execute(
+        "INSERT INTO ai_fact_refresh_operations
+         (operation_id, repository_id, task_id, updated_at, operation_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(operation_id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, updated_at=excluded.updated_at,
+           operation_json=excluded.operation_json",
+        params![
+            operation.operation_id,
+            operation.repository_id,
+            operation.task_id,
+            timestamp(operation.updated_at),
+            json
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_agent_tx(transaction: &Transaction<'_>, agent: &AgentV1) -> Result<()> {
+    let agent: AgentV1 = serde_json::from_value(redact_value(
+        &serde_json::to_value(agent).context("serialize agent observation")?,
+    ))
+    .context("deserialize redacted agent observation")?;
+    let json = serde_json::to_string(&agent)?;
+    transaction.execute(
+        "INSERT INTO agents(id, repository_id, task_id, thread_id, observed_at, agent_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET repository_id=excluded.repository_id,
+           task_id=excluded.task_id, thread_id=excluded.thread_id,
+           observed_at=excluded.observed_at, agent_json=excluded.agent_json",
+        params![
+            agent.id,
+            agent.repository_id,
+            agent.task_id,
+            agent.thread_id,
+            timestamp(agent.observed_at),
             json
         ],
     )?;

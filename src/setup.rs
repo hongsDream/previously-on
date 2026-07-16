@@ -68,6 +68,10 @@ pub struct SetupManifestV1 {
     pub hooks_feature_before: Option<bool>,
     #[serde(default)]
     pub hooks_feature_managed: bool,
+    #[serde(default)]
+    pub ai_refresh_enabled: bool,
+    #[serde(default)]
+    pub ai_refresh_profile_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +117,14 @@ pub struct UninstallResult {
 }
 
 pub fn install_codex(paths: &SetupPaths, repository: &Path) -> Result<SetupManifestV1> {
+    install_codex_with_options(paths, repository, false)
+}
+
+pub fn install_codex_with_options(
+    paths: &SetupPaths,
+    repository: &Path,
+    enable_ai_refresh: bool,
+) -> Result<SetupManifestV1> {
     let repository = repository
         .canonicalize()
         .with_context(|| format!("repository does not exist: {}", repository.display()))?;
@@ -131,6 +143,16 @@ pub fn install_codex(paths: &SetupPaths, repository: &Path) -> Result<SetupManif
     if let Some(manifest) = validated_manifest.as_ref() {
         validate_manifest_for_install(manifest, paths, &repository)?;
     }
+    let initial_config = read_optional_string(&paths.config_path())?.unwrap_or_default();
+    let effective_ai_refresh = enable_ai_refresh
+        || validated_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.ai_refresh_enabled);
+    validate_ai_profile_collision(
+        &initial_config,
+        effective_ai_refresh,
+        validated_manifest.as_ref(),
+    )?;
     let repository_identity = crate::git::repository_identity(&repository).ok();
 
     fs::create_dir_all(&paths.codex_home)
@@ -178,12 +200,26 @@ pub fn install_codex(paths: &SetupPaths, repository: &Path) -> Result<SetupManif
             (before, before != Some(true))
         }
     };
-    let config = merge_config(
+    let config = merge_config_with_ai_refresh(
         &config_source,
         &paths.executable,
         &paths.data_dir,
         &repository,
+        effective_ai_refresh,
+        existing_manifest.as_ref(),
     )?;
+    let ai_refresh_profile_sha256 = if effective_ai_refresh {
+        let current_before = profile_hash_from_source(&config_source)?;
+        let previous_owned = existing_manifest
+            .as_ref()
+            .and_then(|manifest| manifest.ai_refresh_profile_sha256.clone());
+        match (current_before, previous_owned) {
+            (Some(current), Some(previous)) if current != previous => Some(previous),
+            _ => profile_hash_from_source(&config)?,
+        }
+    } else {
+        None
+    };
 
     let manifest = SetupManifestV1 {
         version: MANIFEST_VERSION,
@@ -199,6 +235,8 @@ pub fn install_codex(paths: &SetupPaths, repository: &Path) -> Result<SetupManif
         installed_config_sha256: digest(config.as_bytes()),
         hooks_feature_before,
         hooks_feature_managed,
+        ai_refresh_enabled: effective_ai_refresh,
+        ai_refresh_profile_sha256,
     };
     let journal = SetupJournalV1 {
         version: JOURNAL_VERSION,
@@ -264,7 +302,7 @@ pub fn uninstall_codex_detailed(paths: &SetupPaths) -> Result<UninstallResult> {
         &manifest.installed_config_sha256,
         || {
             let source = fs::read_to_string(paths.config_path())?;
-            let mut config = remove_managed_config(&source)?;
+            let mut config = remove_managed_config_with_profile(&source, &manifest)?;
             if manifest.hooks_feature_managed {
                 config = restore_hooks_feature(&config, manifest.hooks_feature_before)?;
             }
@@ -312,6 +350,15 @@ pub fn read_manifest(path: &Path) -> Result<SetupManifestV1> {
         .with_context(|| format!("parse setup manifest {}", path.display()))?;
     ensure_manifest_matches(&manifest)?;
     Ok(manifest)
+}
+
+pub fn ai_refresh_profile_matches(paths: &SetupPaths, manifest: &SetupManifestV1) -> Result<bool> {
+    if !manifest.ai_refresh_enabled {
+        return Ok(false);
+    }
+    let source = read_optional_string(&paths.config_path())?.unwrap_or_default();
+    Ok(profile_hash_from_source(&source)?.as_deref()
+        == manifest.ai_refresh_profile_sha256.as_deref())
 }
 
 fn read_optional_manifest(path: &Path) -> Result<Option<SetupManifestV1>> {
@@ -453,6 +500,14 @@ fn validate_manifest_for_install(
     {
         bail!("setup manifest contains an invalid installed file hash");
     }
+    if manifest.ai_refresh_enabled
+        && !manifest
+            .ai_refresh_profile_sha256
+            .as_deref()
+            .is_some_and(is_sha256)
+    {
+        bail!("setup manifest contains an invalid AI refresh profile hash");
+    }
     chrono::DateTime::parse_from_rfc3339(&manifest.installed_at)
         .context("setup manifest contains an invalid installation timestamp")?;
     Ok(())
@@ -576,6 +631,17 @@ pub fn merge_config(
     data_dir: &Path,
     repository: &Path,
 ) -> Result<String> {
+    merge_config_with_ai_refresh(source, executable, data_dir, repository, false, None)
+}
+
+fn merge_config_with_ai_refresh(
+    source: &str,
+    executable: &Path,
+    data_dir: &Path,
+    repository: &Path,
+    enable_ai_refresh: bool,
+    existing_manifest: Option<&SetupManifestV1>,
+) -> Result<String> {
     let mut document = parse_toml(source)?;
     let features = ensure_table(&mut document, "features")?;
     features["hooks"] = value(true);
@@ -609,8 +675,75 @@ pub fn merge_config(
     env["PREVIOUSLY_ON_DATA_DIR"] = value(data_dir.to_string_lossy().to_string());
     server["env"] = Item::Table(env);
     servers["previously_on"] = Item::Table(server);
+    if enable_ai_refresh {
+        let current_hash = profile_hash(&document);
+        let owned_unchanged = existing_manifest
+            .and_then(|manifest| manifest.ai_refresh_profile_sha256.as_deref())
+            .is_some_and(|expected| current_hash.as_deref() == Some(expected));
+        if current_hash.is_none() || owned_unchanged {
+            install_ai_refresh_profile(&mut document)?;
+        }
+        // A profile modified after setup is user-owned from this point forward. Keep it exactly as
+        // found; capability verification will fail closed if it no longer meets the requirements.
+    }
     let _ = repository; // The single-repository allowlist is recorded in the setup manifest.
     Ok(document.to_string())
+}
+
+fn validate_ai_profile_collision(
+    source: &str,
+    enable_ai_refresh: bool,
+    manifest: Option<&SetupManifestV1>,
+) -> Result<()> {
+    if !enable_ai_refresh {
+        return Ok(());
+    }
+    let document = parse_toml(source)?;
+    let Some(current_hash) = profile_hash(&document) else {
+        return Ok(());
+    };
+    let manifest_owned = manifest
+        .filter(|manifest| manifest.ai_refresh_enabled)
+        .and_then(|manifest| manifest.ai_refresh_profile_sha256.as_deref());
+    if manifest_owned.is_none() {
+        bail!(
+            "Codex permission profile `previously-input-only` already exists and is not managed by {}",
+            MANAGED_ID
+        );
+    }
+    // An existing owned profile may have been edited by the user. Reinstall preserves it instead
+    // of overwriting, so both the unchanged and changed cases are valid here.
+    let _ = current_hash;
+    Ok(())
+}
+
+fn install_ai_refresh_profile(document: &mut DocumentMut) -> Result<()> {
+    let permissions = ensure_table(document, "permissions")?;
+    permissions.remove("previously-input-only");
+    let mut profile = Table::new();
+    let mut filesystem = Table::new();
+    filesystem[":root"] = value("deny");
+    filesystem[":minimal"] = value("read");
+    filesystem[":tmpdir"] = value("deny");
+    filesystem[":slash_tmp"] = value("deny");
+    profile["filesystem"] = Item::Table(filesystem);
+    let mut network = Table::new();
+    network["enabled"] = value(false);
+    profile["network"] = Item::Table(network);
+    permissions["previously-input-only"] = Item::Table(profile);
+    Ok(())
+}
+
+fn profile_hash(document: &DocumentMut) -> Option<String> {
+    document
+        .get("permissions")
+        .and_then(Item::as_table)
+        .and_then(|permissions| permissions.get("previously-input-only"))
+        .map(|profile| digest(format!("{profile:?}").as_bytes()))
+}
+
+fn profile_hash_from_source(source: &str) -> Result<Option<String>> {
+    Ok(profile_hash(&parse_toml(source)?))
 }
 
 fn read_hooks_feature(source: &str) -> Result<Option<bool>> {
@@ -671,6 +804,28 @@ pub fn remove_managed_config(source: &str) -> Result<String> {
             == Some(MANAGED_ID);
         if managed {
             servers.remove("previously_on");
+        }
+    }
+    Ok(document.to_string())
+}
+
+fn remove_managed_config_with_profile(source: &str, manifest: &SetupManifestV1) -> Result<String> {
+    let source = remove_managed_config(source)?;
+    let mut document = parse_toml(&source)?;
+    if manifest.ai_refresh_enabled {
+        let expected = manifest.ai_refresh_profile_sha256.as_deref();
+        if profile_hash(&document).as_deref() == expected {
+            let remove_permissions = if let Some(permissions) =
+                document.get_mut("permissions").and_then(Item::as_table_mut)
+            {
+                permissions.remove("previously-input-only");
+                permissions.is_empty()
+            } else {
+                false
+            };
+            if remove_permissions {
+                document.remove("permissions");
+            }
         }
     }
     Ok(document.to_string())

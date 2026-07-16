@@ -26,9 +26,9 @@ use crate::contracts::{
     RegressionContractV1, RequiredTestV1,
 };
 use crate::domain::{
-    ChangeStatus, ContinuationReasonV1, ContinuationStateV1, CoverageStatus, EventEnvelopeV1,
-    EventKind, EvidenceIntegrity, FactKind, FactLifecycle, FactV1, Freshness, TaskLifecycle,
-    TemporalStatusV1, TestStatus,
+    AiFactCandidateStatusV1, AiFactRefreshStatusV1, ChangeStatus, ContinuationReasonV1,
+    ContinuationStateV1, CoverageStatus, EventEnvelopeV1, EventKind, EvidenceIntegrity, FactKind,
+    FactLifecycle, FactV1, Freshness, TaskLifecycle, TemporalStatusV1, TestStatus,
 };
 use crate::grouping::TaskGroupingRequestV1;
 use crate::redaction::{redact_excerpt, redact_text, redact_value};
@@ -46,6 +46,19 @@ struct AppState {
     store: Store,
     session_token: Arc<str>,
     data_dir: Arc<PathBuf>,
+}
+
+fn server_setup_paths(state: &AppState) -> ApiResult<crate::setup::SetupPaths> {
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|base| base.home_dir().join(".codex")))
+        .ok_or_else(|| ApiError::internal("home directory is unavailable"))?;
+    let executable = std::env::current_exe().map_err(ApiError::internal)?;
+    Ok(crate::setup::SetupPaths {
+        codex_home,
+        data_dir: state.data_dir.as_ref().clone(),
+        executable,
+    })
 }
 
 #[derive(Debug)]
@@ -109,6 +122,7 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
     }
     let database_path = data_dir.join("previously.sqlite3");
     let store = Store::open(&database_path)?;
+    crate::ai_refresh::recover_interrupted_operations(&store)?;
     store.apply_retention(Utc::now(), 90)?;
     let session_token = Alphanumeric.sample_string(&mut rand::rng(), 48);
     let state = AppState {
@@ -125,6 +139,12 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
         .route("/api/facts/{id}/revalidate", post(revalidate_fact))
         .route("/api/sessions/{id}", patch(update_session))
         .route("/api/tasks/{id}", patch(update_task))
+        .route("/api/tasks/{id}/fact-refresh", post(start_fact_refresh))
+        .route("/api/fact-refresh/{operation_id}", get(get_fact_refresh))
+        .route(
+            "/api/fact-refresh/{operation_id}/candidates/{candidate_id}",
+            patch(review_fact_refresh_candidate),
+        )
         .route("/api/task-grouping/preview", post(preview_task_grouping))
         .route("/api/task-grouping", post(apply_task_grouping))
         .route(
@@ -201,6 +221,28 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         .transpose()
         .map_err(ApiError::internal)?
         .unwrap_or_default();
+    let fact_refresh_operations = state
+        .store
+        .list_ai_fact_refresh_operations(repository.map(|item| item.id.as_str()))
+        .map_err(ApiError::internal)?;
+    let agents = state
+        .store
+        .list_agents(repository.map(|item| item.id.as_str()))
+        .map_err(ApiError::internal)?;
+    let ai_refresh_capability = if let Some(repository) = repository {
+        crate::ai_refresh::inspect_capability(
+            &server_setup_paths(&state)?,
+            std::path::Path::new(&repository.path),
+        )
+        .await
+    } else {
+        crate::ai_refresh::AiRefreshCapabilityV1 {
+            status: crate::ai_refresh::AiRefreshCapabilityStatusV1::Blocked,
+            profile_name: crate::ai_refresh::AI_REFRESH_PROFILE.to_string(),
+            reason: Some("no registered repository".to_string()),
+            checked_at: Utc::now(),
+        }
+    };
     let task_hits = state
         .store
         .search_tasks("", 100)
@@ -744,9 +786,168 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "contractEvaluations": contract_evaluations,
         "taskGroupingOperations": task_grouping_operations,
         "graphSummary": graph_summary,
+        "aiRefreshCapability": ai_refresh_capability,
+        "factRefreshOperations": fact_refresh_operations,
+        "agents": agents,
         "contextPacks": context_packs
     });
     Ok(Json(redact_value(&payload)))
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StartFactRefreshRequest {
+    request_id: Option<String>,
+}
+
+async fn start_fact_refresh(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+    request: Option<Json<StartFactRefreshRequest>>,
+) -> ApiResult<impl IntoResponse> {
+    authorize_mutation(&state, &headers)?;
+    let task = state
+        .store
+        .get_task(&task_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("task not found"))?;
+    let repository = state
+        .store
+        .list_repositories()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .find(|repository| repository.id == task.repository_id)
+        .ok_or_else(|| ApiError::conflict("task repository is not registered"))?;
+    let setup_paths = server_setup_paths(&state)?;
+    let capability =
+        crate::ai_refresh::inspect_capability(&setup_paths, std::path::Path::new(&repository.path))
+            .await;
+    if capability.status != crate::ai_refresh::AiRefreshCapabilityStatusV1::Ready {
+        return Err(ApiError::conflict(
+            capability
+                .reason
+                .unwrap_or_else(|| "AI fact refresh is unavailable".to_string()),
+        ));
+    }
+    let request_id = request
+        .as_ref()
+        .and_then(|Json(request)| request.request_id.as_deref());
+    let (operation, prompt) =
+        crate::ai_refresh::new_pending_operation(&state.store, &task_id, request_id)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if let Some(existing) = state
+        .store
+        .get_ai_fact_refresh_operation(&operation.operation_id)
+        .map_err(ApiError::internal)?
+    {
+        if existing.request_fingerprint != operation.request_fingerprint {
+            return Err(ApiError::conflict("fact refresh operation id collision"));
+        }
+        return Ok((StatusCode::ACCEPTED, Json(existing)));
+    }
+    state
+        .store
+        .append_ai_fact_refresh_operation(&operation)
+        .map_err(ApiError::internal)?;
+    let store = state.store.clone();
+    let data_dir = state.data_dir.as_ref().clone();
+    let repository_root = PathBuf::from(repository.path);
+    let background_operation = operation.clone();
+    tokio::spawn(async move {
+        let _ = crate::ai_refresh::execute_operation(
+            store,
+            data_dir,
+            setup_paths,
+            repository_root,
+            background_operation,
+            prompt,
+        )
+        .await;
+    });
+    Ok((StatusCode::ACCEPTED, Json(operation)))
+}
+
+async fn get_fact_refresh(
+    State(state): State<AppState>,
+    Path(operation_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<crate::domain::AiFactRefreshOperationV1>> {
+    authorize_api_read(&state, &headers)?;
+    let operation = state
+        .store
+        .get_ai_fact_refresh_operation(&operation_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("fact refresh operation not found"))?;
+    Ok(Json(operation))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CandidateDecision {
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReviewFactRefreshCandidateRequest {
+    decision: CandidateDecision,
+    content: Option<String>,
+    kind: Option<FactKind>,
+}
+
+async fn review_fact_refresh_candidate(
+    State(state): State<AppState>,
+    Path((operation_id, candidate_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewFactRefreshCandidateRequest>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let mut operation = state
+        .store
+        .get_ai_fact_refresh_operation(&operation_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("fact refresh operation not found"))?;
+    if operation.status != AiFactRefreshStatusV1::Completed {
+        return Err(ApiError::conflict("fact refresh operation is not complete"));
+    }
+    let accept = matches!(request.decision, CandidateDecision::Accept);
+    let fact = crate::ai_refresh::accept_candidate(
+        &state.store,
+        &mut operation,
+        &candidate_id,
+        accept,
+        request.content.as_deref(),
+        request.kind,
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let candidate = operation
+        .candidates
+        .iter()
+        .find(|candidate| candidate.id == candidate_id)
+        .filter(|candidate| candidate.status != AiFactCandidateStatusV1::Pending)
+        .cloned()
+        .ok_or_else(|| ApiError::internal("reviewed candidate projection missing"))?;
+    let fact = fact.map(|fact| {
+        json!({
+            "id": fact.id,
+            "taskId": fact.task_id,
+            "kind": fact_kind_name(fact.kind),
+            "text": fact.content,
+            "status": fact_lifecycle(fact.lifecycle),
+            "updatedAt": iso(fact.updated_at),
+            "evidenceIds": fact.evidence_ids,
+            "relatedFiles": [],
+            "mixedProvenance": false,
+            "provenanceSessionIds": []
+        })
+    });
+    Ok(Json(redact_value(&json!({
+        "ok": true,
+        "candidate": candidate,
+        "fact": fact
+    }))))
 }
 
 async fn export_repository(
@@ -848,6 +1049,7 @@ async fn update_fact(
         }
         fact.content = redact_text(content);
     }
+    fact.origin = crate::domain::FactOriginV1::Manual;
     fact.lifecycle = update.status;
     fact.updated_at = Utc::now();
     if fact.lifecycle == FactLifecycle::Superseded {
@@ -1854,6 +2056,7 @@ mod tests {
                     kind: FactKind::Decision,
                     lifecycle: FactLifecycle::Confirmed,
                     freshness: Freshness::Fresh,
+                    origin: crate::domain::FactOriginV1::Captured,
                     content: content.to_string(),
                     evidence_ids: vec![format!("evidence-{id}")],
                     superseded_by: None,
@@ -2063,6 +2266,128 @@ mod tests {
                 .as_deref(),
             Some("source")
         );
+    }
+
+    #[tokio::test]
+    async fn fact_refresh_api_requires_session_and_csrf_before_any_operation() {
+        use crate::domain::{
+            AiFactCandidateActionV1, AiFactCandidateStatusV1, AiFactCandidateV1,
+            AiFactRefreshOperationV1,
+        };
+
+        let temp = TempDir::new().unwrap();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let state = AppState {
+            store: store.clone(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+
+        let unauthenticated_start = match start_fact_refresh(
+            State(state.clone()),
+            Path("missing-task".into()),
+            HeaderMap::new(),
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("unauthenticated fact refresh start was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(unauthenticated_start.status, StatusCode::FORBIDDEN);
+
+        let now = Utc::now();
+        let operation = AiFactRefreshOperationV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            operation_id: "operation-api-security".into(),
+            repository_id: "repo-1".into(),
+            task_id: "task-1".into(),
+            status: AiFactRefreshStatusV1::Completed,
+            request_fingerprint: "request-api-security".into(),
+            thread_id: Some("thread-1".into()),
+            candidates: vec![AiFactCandidateV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: "candidate-api-security".into(),
+                operation_id: "operation-api-security".into(),
+                action: AiFactCandidateActionV1::Add,
+                fact_id: None,
+                kind: FactKind::Note,
+                content: "Review me".into(),
+                reason: "Fixture".into(),
+                status: AiFactCandidateStatusV1::Pending,
+            }],
+            model_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            latency_ms: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.append_ai_fact_refresh_operation(&operation).unwrap();
+
+        let unauthenticated_get = get_fact_refresh(
+            State(state.clone()),
+            Path(operation.operation_id.clone()),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unauthenticated_get.status, StatusCode::FORBIDDEN);
+        let _ = get_fact_refresh(
+            State(state.clone()),
+            Path(operation.operation_id.clone()),
+            authorized_headers(),
+        )
+        .await
+        .unwrap();
+
+        let mut cross_origin = authorized_headers();
+        cross_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.test"),
+        );
+        let rejected = review_fact_refresh_candidate(
+            State(state.clone()),
+            Path((
+                operation.operation_id.clone(),
+                "candidate-api-security".into(),
+            )),
+            cross_origin,
+            Json(ReviewFactRefreshCandidateRequest {
+                decision: CandidateDecision::Accept,
+                content: None,
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.status, StatusCode::FORBIDDEN);
+        assert!(store.get_fact("candidate-api-security").unwrap().is_none());
+
+        let accepted = review_fact_refresh_candidate(
+            State(state),
+            Path((operation.operation_id, "candidate-api-security".into())),
+            authorized_headers(),
+            Json(ReviewFactRefreshCandidateRequest {
+                decision: CandidateDecision::Accept,
+                content: Some("Human reviewed".into()),
+                kind: Some(FactKind::Decision),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted.0["candidate"]["status"], "accepted");
+        assert_eq!(accepted.0["fact"]["status"], "candidate");
+        assert_eq!(accepted.0["fact"]["evidenceIds"], json!([]));
+        let accepted_fact = store
+            .list_facts("task-1")
+            .unwrap()
+            .into_iter()
+            .find(|fact| fact.origin == crate::domain::FactOriginV1::AiAssisted)
+            .unwrap();
+        assert_eq!(accepted_fact.lifecycle, FactLifecycle::Candidate);
+        assert!(accepted_fact.evidence_ids.is_empty());
     }
 
     #[tokio::test]
@@ -2534,6 +2859,7 @@ mod tests {
                 kind: FactKind::Decision,
                 lifecycle: FactLifecycle::Confirmed,
                 freshness: Freshness::Fresh,
+                origin: crate::domain::FactOriginV1::Captured,
                 content: "Use the old authentication mode".to_string(),
                 evidence_ids: vec!["evidence-old-fact".to_string()],
                 superseded_by: None,
@@ -2671,6 +2997,7 @@ mod tests {
                 kind: FactKind::Decision,
                 lifecycle: FactLifecycle::Confirmed,
                 freshness: Freshness::Fresh,
+                origin: crate::domain::FactOriginV1::Captured,
                 content: format!("{INJECTION} {SECRETS}"),
                 evidence_ids: vec!["evidence-ui".to_string()],
                 superseded_by: None,

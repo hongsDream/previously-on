@@ -1139,6 +1139,7 @@ fn append_explicit_fact_candidates(store: &Store, source: &EventEnvelopeV1) -> R
             kind,
             lifecycle: FactLifecycle::Candidate,
             freshness: Freshness::Fresh,
+            origin: crate::domain::FactOriginV1::Captured,
             content: content.to_string(),
             evidence_ids: vec![evidence_id],
             superseded_by: None,

@@ -16,23 +16,22 @@ interface SidebarProps {
   onQueryChange: (query: string) => void;
   onStatusChange: (status: TaskStatus | 'all') => void;
   onTaskSelect: (taskId: string) => void;
-  activeNavigation: 'tasks' | 'sessions' | 'task';
+  activeNavigation: 'tasks' | 'sessions' | 'task' | 'settings';
   onOverviewOpen: (focus: 'tasks' | 'sessions') => void;
   onEvidenceOpen: () => void;
+  onSettingsOpen: () => void;
 }
 
-export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation, onQueryChange, onStatusChange, onTaskSelect, onOverviewOpen, onEvidenceOpen }: SidebarProps) {
+export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation, onQueryChange, onStatusChange, onTaskSelect, onOverviewOpen, onEvidenceOpen, onSettingsOpen }: SidebarProps) {
   return (
     <aside className="sidebar">
       <nav aria-label="Primary navigation">
         {navigation.map(({ label, icon: Icon }) => (
           <button
             key={label}
-            className={(label === 'Tasks' && activeNavigation === 'tasks') || (label === 'Sessions' && activeNavigation === 'sessions') ? 'nav-item active' : 'nav-item'}
+            className={(label === 'Tasks' && activeNavigation === 'tasks') || (label === 'Sessions' && activeNavigation === 'sessions') || (label === 'Settings' && activeNavigation === 'settings') ? 'nav-item active' : 'nav-item'}
             type="button"
-            disabled={label === 'Settings'}
-            onClick={label === 'Tasks' ? () => onOverviewOpen('tasks') : label === 'Sessions' ? () => onOverviewOpen('sessions') : label === 'Evidence' ? onEvidenceOpen : undefined}
-            title={label === 'Settings' ? 'Planned for a later release' : undefined}
+            onClick={label === 'Tasks' ? () => onOverviewOpen('tasks') : label === 'Sessions' ? () => onOverviewOpen('sessions') : label === 'Evidence' ? onEvidenceOpen : onSettingsOpen}
           >
             <Icon size={19} strokeWidth={1.7} />
             {label}

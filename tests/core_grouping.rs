@@ -184,6 +184,7 @@ fn insert_fact(
         kind: FactKind::Decision,
         lifecycle: FactLifecycle::Confirmed,
         freshness: Freshness::Fresh,
+        origin: previously_on::domain::FactOriginV1::Captured,
         content: format!("Fact {fact_id}"),
         evidence_ids: evidence.iter().map(|(id, _)| (*id).to_string()).collect(),
         superseded_by: None,
