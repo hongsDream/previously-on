@@ -117,6 +117,12 @@ jobs:
         env:
           OUTPUT_DIR: ${{ runner.temp }}/release
         run: ./scripts/build-release.sh
+      - name: Reverify release bundle before upload and attestation
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/verify-release-bundle.mjs \
+            --directory "${RUNNER_TEMP}/release" \
+            --version "$VERSION"
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
@@ -131,19 +137,11 @@ jobs:
             *-*) PRERELEASE=true ;;
           esac
           EXPECTED="${RUNNER_TEMP}/expected-assets.txt"
-          cat > "$EXPECTED" <<EOF
-          NOTICE
-          SHA256SUMS
-          THIRD_PARTY_LICENSES.md
-          previously-on-v$VERSION-macos-arm64.tar.gz
-          previously-on-v$VERSION-source.tar.gz
-          previously-on-v$VERSION.cdx.json
-          previously-v$VERSION-macos-arm64
-          EOF
-          LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
+          node scripts/verify-release-bundle.mjs \
+            --directory "${RUNNER_TEMP}/release" \
+            --version "$VERSION"
           find "${RUNNER_TEMP}/release" -maxdepth 1 -type f -exec basename {} \; \
-            | LC_ALL=C sort > "${RUNNER_TEMP}/local-assets.txt"
-          cmp "$EXPECTED" "${RUNNER_TEMP}/local-assets.txt"
+            | LC_ALL=C sort > "$EXPECTED"
 
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
@@ -203,6 +201,10 @@ jobs:
         run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/publish-target" >> "$GITHUB_ENV"
       - name: Install Rust 1.90
         run: rustup toolchain install 1.90.0 --profile minimal && rustup default 1.90.0
+      - name: Install Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
       - name: Download the tested and attested release source
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -212,15 +214,10 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           SOURCE_ARCHIVE="${RUNNER_TEMP}/release/previously-on-v$VERSION-source.tar.gz"
-          cd "${RUNNER_TEMP}/release"
-          shasum -a 256 -c SHA256SUMS
+          node scripts/verify-release-bundle.mjs \
+            --directory "${RUNNER_TEMP}/release" \
+            --version "$VERSION"
           mkdir -p "${RUNNER_TEMP}/publish-source"
-          tar -tzf "$SOURCE_ARCHIVE" | awk '
-            /^\// { exit 1 }
-            /(^|\/)\.\.($|\/)/ { exit 1 }
-          '
-          tar -tvzf "$SOURCE_ARCHIVE" \
-            | awk 'substr($1,1,1) !~ /^[-d]$/ { exit 1 }'
           tar -xzf "$SOURCE_ARCHIVE" -C "${RUNNER_TEMP}/publish-source"
           SOURCE_DIR="${RUNNER_TEMP}/publish-source/previously-on-$VERSION"
           test -f "$SOURCE_DIR/Cargo.toml"
@@ -347,31 +344,22 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           EXPECTED="${RUNNER_TEMP}/final-expected-assets.txt"
-          cat > "$EXPECTED" <<EOF
-          NOTICE
-          SHA256SUMS
-          THIRD_PARTY_LICENSES.md
-          previously-on-v$VERSION-macos-arm64.tar.gz
-          previously-on-v$VERSION-source.tar.gz
-          previously-on-v$VERSION.cdx.json
-          previously-v$VERSION-macos-arm64
-          EOF
-          LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
           test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
-          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
-            | LC_ALL=C sort > "${RUNNER_TEMP}/final-remote-assets.txt"
-          cmp "$EXPECTED" "${RUNNER_TEMP}/final-remote-assets.txt"
 
           mkdir -p "${RUNNER_TEMP}/final-release"
           gh release download "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "${RUNNER_TEMP}/final-release"
+          node scripts/verify-release-bundle.mjs \
+            --directory "${RUNNER_TEMP}/final-release" \
+            --version "$VERSION"
           find "${RUNNER_TEMP}/final-release" -maxdepth 1 -type f -exec basename {} \; \
-            | LC_ALL=C sort > "${RUNNER_TEMP}/final-downloaded-assets.txt"
-          cmp "$EXPECTED" "${RUNNER_TEMP}/final-downloaded-assets.txt"
+            | LC_ALL=C sort > "$EXPECTED"
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/final-remote-assets.txt"
+          cmp "$EXPECTED" "${RUNNER_TEMP}/final-remote-assets.txt"
 
           cd "${RUNNER_TEMP}/final-release"
-          shasum -a 256 -c SHA256SUMS
           CERT_IDENTITY="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME"
           while IFS= read -r asset; do
             gh attestation verify "$asset" \
