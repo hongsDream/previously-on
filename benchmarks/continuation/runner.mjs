@@ -230,17 +230,12 @@ export async function runCampaign({
       }, now);
       sourceRecords.push(record);
       source = record;
-    } else {
-      await assertSourceSnapshotMatches(provider, source);
     }
-    if (source && typeof provider.resumeThread === 'function') {
-      await provider.resumeThread({
-        threadId: source.snapshotThreadId,
+    if (source) {
+      await resumeAndAssertSourceSnapshot(provider, source, {
         model: sourceArms[0].model,
         cwd: sourceWorkspace.repositoryRoot,
         reasoningEffort: model.reasoningEffort,
-        fastMode: false,
-        sandbox: 'read-only',
       });
     }
 
@@ -409,7 +404,11 @@ export async function runCampaign({
         if (compactPostGuard.paused) return { status: 'paused', completedNow, pause: compactPostGuard };
       }
       if (!checkpointSource) throw new Error(`source checkpoint ${sourceKey}/${checkpoint} could not be materialized`);
-      await assertSourceSnapshotMatches(provider, checkpointSource);
+      await resumeAndAssertSourceSnapshot(provider, checkpointSource, {
+        model: sourceArms[0].model,
+        cwd: sourceWorkspace.repositoryRoot,
+        reasoningEffort: model.reasoningEffort,
+      });
 
       for (const arm of sourceArms.filter((candidate) => candidate.compaction === checkpoint)) {
         if (completedNow >= maxArms) break;
@@ -1304,6 +1303,20 @@ async function assertSourceSnapshotMatches(provider, source) {
   if (digest !== source.sourceSnapshotSha256) {
     throw new Error(`source checkpoint ${source.sourceKey}/${source.sourceSequence} thread/read snapshot digest does not match`);
   }
+}
+
+async function resumeAndAssertSourceSnapshot(provider, source, { model, cwd, reasoningEffort }) {
+  if (typeof provider.resumeThread === 'function') {
+    await provider.resumeThread({
+      threadId: source.snapshotThreadId,
+      model,
+      cwd,
+      reasoningEffort,
+      fastMode: false,
+      sandbox: 'read-only',
+    });
+  }
+  await assertSourceSnapshotMatches(provider, source);
 }
 
 function assertCompactionRecordBindings(record, expected, intent = null) {
