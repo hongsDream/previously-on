@@ -7,6 +7,7 @@ LATEST_BIN=""
 PREVIOUS_BIN=""
 APP_CURRENT="not-run"
 APP_PREVIOUS="not-run"
+PRODUCT_VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' "$ROOT/Cargo.toml")"
 
 usage() {
   printf '%s\n' "usage: scripts/run-compatibility.sh [--latest-bin PATH --previous-bin PATH] [--codex-app-current VERSION --codex-app-previous VERSION] [--output PATH]"
@@ -143,6 +144,7 @@ GIT_COMMIT="$(git -C "$ROOT" rev-parse HEAD)" \
 GIT_TREE_STATE="$GIT_TREE_STATE" \
 APP_CURRENT="$APP_CURRENT" \
 APP_PREVIOUS="$APP_PREVIOUS" \
+PRODUCT_VERSION="$PRODUCT_VERSION" \
 MATRIX_PATH="$ROOT/fixtures/compatibility/scenarios.json" \
 LATEST_PROBE="$TEMP_ROOT/latest-probe.json" \
 PREVIOUS_PROBE="$TEMP_ROOT/previous-probe.json" \
@@ -162,7 +164,7 @@ node -e '
   const result = {
     schemaVersion: 1,
     product: "PreviouslyOn",
-    productVersion: "0.1.0-alpha.1",
+    productVersion: process.env.PRODUCT_VERSION,
     gitCommit: process.env.GIT_COMMIT,
     gitTreeState: process.env.GIT_TREE_STATE,
     scenarioMatrixSha256: crypto.createHash("sha256").update(fs.readFileSync(process.env.MATRIX_PATH)).digest("hex"),

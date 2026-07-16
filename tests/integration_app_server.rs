@@ -48,6 +48,69 @@ printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"cliVersion":"0.144.3
 
 #[cfg(unix)]
 #[tokio::test]
+async fn uses_documented_start_name_turn_and_resume_shapes() {
+    use previously_on::app_server::AppServerClient;
+
+    let (_temp, fake) = fake_codex(
+        r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
+IFS= read -r initialized
+IFS= read -r start
+case "$start" in *'"method":"thread/start"'*) ;; *) exit 10 ;; esac
+case "$start" in *'"cwd":"/tmp/repo"'*) ;; *) exit 11 ;; esac
+case "$start" in *'"ephemeral":false'*) ;; *) exit 12 ;; esac
+case "$start" in *'"serviceName":"previously-on"'*) ;; *) exit 13 ;; esac
+case "$start" in *'"model":"gpt-5.6-sol"'*) ;; *) exit 14 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thread-fresh","sessionId":"session-fresh"}}}'
+IFS= read -r name
+case "$name" in *'"method":"thread/name/set"'*) ;; *) exit 15 ;; esac
+case "$name" in *'"threadId":"thread-fresh"'*) ;; *) exit 16 ;; esac
+case "$name" in *'"name":"Task name"'*) ;; *) exit 17 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{}}'
+IFS= read -r turn
+case "$turn" in *'"method":"turn/start"'*) ;; *) exit 18 ;; esac
+case "$turn" in *'"threadId":"thread-fresh"'*) ;; *) exit 19 ;; esac
+case "$turn" in *'"clientUserMessageId":"message-1"'*) ;; *) exit 20 ;; esac
+case "$turn" in *'"type":"text"'*) ;; *) exit 21 ;; esac
+case "$turn" in *'"text":"Continue safely"'*) ;; *) exit 24 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn-fresh"}}}'
+IFS= read -r resume
+case "$resume" in *'"method":"thread/resume"'*) ;; *) exit 22 ;; esac
+case "$resume" in *'"threadId":"thread-fresh"'*) ;; *) exit 23 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-fresh","sessionId":"session-fresh"}}}'
+"#,
+    );
+
+    let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
+    let thread = client
+        .start_thread(std::path::Path::new("/tmp/repo"), Some("gpt-5.6-sol"))
+        .await
+        .unwrap();
+    assert_eq!(thread.id, "thread-fresh");
+    assert_eq!(thread.session_id, "session-fresh");
+    client
+        .set_thread_name(&thread.id, "Task name")
+        .await
+        .unwrap();
+    let turn = client
+        .start_turn(
+            &thread.id,
+            std::path::Path::new("/tmp/repo"),
+            "Continue safely",
+            Some("gpt-5.6-sol"),
+            "message-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(turn.id, "turn-fresh");
+    let resumed = client.resume_thread(&thread.id).await.unwrap();
+    assert_eq!(resumed, thread);
+    client.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn rejects_an_oversized_unterminated_app_server_frame() {
     use previously_on::app_server::{AppServerClient, MAX_APP_SERVER_RPC_BYTES};
 

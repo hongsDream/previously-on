@@ -257,7 +257,7 @@ fn observed_resume_task_call_links_the_new_session_to_the_existing_task() {
 }
 
 #[test]
-fn current_conversation_suggests_a_new_thread_once_after_six_compactions() {
+fn current_conversation_suggests_a_new_thread_once_after_seven_compactions() {
     let temp = TempDir::new().unwrap();
     let repo = temp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -273,7 +273,7 @@ fn current_conversation_suggests_a_new_thread_once_after_six_compactions() {
         ingest_hook_event(&store, captured(HookEvent::UserPromptSubmit, first)).unwrap();
     assert!(first_ack.continuation_advice.is_none());
 
-    for index in 0..6 {
+    for index in 0..7 {
         let compact = json!({
             "session_id":"long-session",
             "turn_id":format!("compact-{index}"),
@@ -283,7 +283,7 @@ fn current_conversation_suggests_a_new_thread_once_after_six_compactions() {
         ingest_hook_event(&store, captured(HookEvent::PreCompact, compact)).unwrap();
     }
     let before = store.get_session("long-session").unwrap().unwrap();
-    assert_eq!(before.compaction_count, 6);
+    assert_eq!(before.compaction_count, 7);
     assert_eq!(before.continuation_state, ContinuationStateV1::Eligible);
 
     let next = json!({
@@ -414,7 +414,7 @@ fn historical_metadata_becomes_eligible_without_placeholder_tasks_or_import_advi
         )
     };
 
-    for index in 0..6 {
+    for index in 0..7 {
         let ack = ingest_hook_event(
             &store,
             historical(
@@ -479,7 +479,7 @@ fn historical_metadata_becomes_eligible_without_placeholder_tasks_or_import_advi
         .get_session("historical-eligible-session")
         .unwrap()
         .unwrap();
-    assert_eq!(session.compaction_count, 6);
+    assert_eq!(session.compaction_count, 7);
     assert_eq!(session.continuation_state, ContinuationStateV1::Eligible);
 
     let next_live_prompt = captured(
@@ -525,7 +525,7 @@ fn replay_after_lost_ack_rearms_advice_for_the_next_live_prompt() {
         ),
     )
     .unwrap();
-    for index in 0..6 {
+    for index in 0..7 {
         ingest_hook_event(
             &store,
             captured(
@@ -668,7 +668,7 @@ fn concurrent_next_prompts_claim_only_one_continuation_suggestion() {
         ),
     )
     .unwrap();
-    for index in 0..6 {
+    for index in 0..7 {
         ingest_hook_event(
             &store,
             captured(

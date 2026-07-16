@@ -1,7 +1,9 @@
 # Privacy and data handling
 
-PreviouslyOn is local-first. The default mode does not make network requests and does not
-require an API key.
+PreviouslyOn is local-first and requires no PreviouslyOn API key. It has no telemetry, cloud
+storage, or independent network integration. Automatic continuation asks the user's already
+configured local Codex App Server to start a model turn; Codex's own provider connection and
+credentials remain under Codex configuration.
 
 ## Before persistence
 
@@ -18,6 +20,11 @@ Regression Contract JSON has a deliberately narrow schema: redacted title and in
 selectors, argv test metadata, the source commit and timestamp, and a SHA-256 evidence digest. It
 does not contain raw prompts, tool output, raw source code, environment values, or secrets.
 Automatic candidate evidence is reduced to normalized structural metadata before hashing.
+
+At an automatic continuation boundary, the current prompt is redacted, capped at 12,000
+characters, and passed to a short-lived local worker over stdin. The full transient value is not
+written to canonical events, SQLite projections, fallback queues, or the UI. The ordinary stored
+UserPrompt event remains redacted and capped at 500 characters.
 
 Redaction is defense in depth, not a guarantee that arbitrary secrets can never appear. Review
 the local inspector before sharing an export.
@@ -54,9 +61,11 @@ Stored prompts and tool output can contain malicious instructions. PreviouslyOn 
 as historical evidence, labels them untrusted, and never maps their text to developer or system
 instructions. MCP tools return data; they do not execute commands from history.
 
-Resume suggestions and new-thread continuation advice contain metadata only. PreviouslyOn never
-injects a Context Pack automatically; the user must approve a resume and Codex must call the
-read-only `resume_task` MCP tool.
+Ordinary resume suggestions contain metadata only, and an approved manual resume still uses the
+read-only `resume_task` MCP tool. Automatic fresh-task continuation is the narrow exception: only
+after the deterministic boundary is reached, PreviouslyOn generates the same verified pack,
+places it in an explicitly data-only untrusted block after the current request, and starts a fresh
+Codex turn. Captured text inside the block is never promoted to system or developer instructions.
 
 ## Legacy development data
 

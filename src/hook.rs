@@ -138,7 +138,7 @@ pub fn run_hook(
     input: &mut dyn Read,
     output: &mut dyn Write,
 ) -> Result<()> {
-    let envelope = capture(event, input)?;
+    let (envelope, current_prompt) = capture_with_current_prompt(event, input)?;
     if !is_registered_repository(&envelope, config.registered_repository.as_deref()) {
         serde_json::to_writer(&mut *output, &json!({}))?;
         output.write_all(b"\n")?;
@@ -185,10 +185,29 @@ pub fn run_hook(
         }
     };
 
+    let rollover_result = if event == HookEvent::UserPromptSubmit {
+        ack.continuation_advice.as_ref().and_then(|advice| {
+            current_prompt.as_deref().and_then(|prompt| {
+                match attempt_automatic_rollover(config, &envelope, advice, prompt) {
+                    Ok(result) => Some(result),
+                    Err(error) => {
+                        tracing::warn!(
+                            diagnostic = %crate::redaction::redact_excerpt(&error.to_string()),
+                            "automatic rollover failed before completion; source prompt will continue"
+                        );
+                        None
+                    }
+                }
+            })
+        })
+    } else {
+        None
+    };
     let response = hook_response_with_continuation(
         event,
         ack.candidate.as_ref(),
         ack.continuation_advice.as_ref(),
+        rollover_result.as_ref(),
         ack.contract_context.as_deref(),
         ack.stop_block_reason.as_deref(),
     );
@@ -198,12 +217,28 @@ pub fn run_hook(
 }
 
 pub fn capture(event: HookEvent, input: &mut dyn Read) -> Result<EventEnvelopeV1> {
+    Ok(capture_with_current_prompt(event, input)?.0)
+}
+
+fn capture_with_current_prompt(
+    event: HookEvent,
+    input: &mut dyn Read,
+) -> Result<(EventEnvelopeV1, Option<String>)> {
     let bytes = read_capped(input, MAX_HOOK_PAYLOAD_BYTES)?;
-    let payload: Value = serde_json::from_slice(&bytes).context("hook stdin must be JSON")?;
-    if !payload.is_object() {
+    let raw_payload: Value = serde_json::from_slice(&bytes).context("hook stdin must be JSON")?;
+    if !raw_payload.is_object() {
         bail!("hook stdin must contain a JSON object");
     }
-    let mut payload = crate::redaction::redact_value(&payload);
+    let current_prompt = (event == HookEvent::UserPromptSubmit)
+        .then(|| {
+            raw_payload
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(crate::redaction::redact_text)
+                .map(|prompt| crate::redaction::cap_chars(&prompt, 12_000))
+        })
+        .flatten();
+    let mut payload = crate::redaction::redact_value(&raw_payload);
     cap_string_values(&mut payload);
     if let Some(object) = payload.as_object_mut() {
         object.insert(
@@ -312,7 +347,7 @@ pub fn capture(event: HookEvent, input: &mut dyn Read) -> Result<EventEnvelopeV1
             .push("assistant_final".to_string());
     }
     envelope.coverage.captured.push(event.as_str().to_string());
-    Ok(envelope)
+    Ok((envelope, current_prompt))
 }
 
 pub fn read_capped(input: &mut dyn Read, cap: usize) -> Result<Vec<u8>> {
@@ -328,7 +363,7 @@ pub fn read_capped(input: &mut dyn Read, cap: usize) -> Result<Vec<u8>> {
 }
 
 pub fn hook_response(event: HookEvent, candidate: Option<&ResumeCandidateMetadata>) -> Value {
-    hook_response_with_continuation(event, candidate, None, None, None)
+    hook_response_with_continuation(event, candidate, None, None, None, None)
 }
 
 pub fn contract_hook_response(
@@ -336,13 +371,14 @@ pub fn contract_hook_response(
     contract_context: Option<&str>,
     stop_block_reason: Option<&str>,
 ) -> Value {
-    hook_response_with_continuation(event, None, None, contract_context, stop_block_reason)
+    hook_response_with_continuation(event, None, None, None, contract_context, stop_block_reason)
 }
 
 fn hook_response_with_continuation(
     event: HookEvent,
     candidate: Option<&ResumeCandidateMetadata>,
     continuation: Option<&ContinuationAdviceV1>,
+    rollover: Option<&crate::continuation::AutomaticRolloverResultV1>,
     contract_context: Option<&str>,
     stop_block_reason: Option<&str>,
 ) -> Value {
@@ -372,6 +408,32 @@ fn hook_response_with_continuation(
     }
     if event != HookEvent::UserPromptSubmit {
         return json!({});
+    }
+    if let Some(rollover) = rollover {
+        match rollover.status {
+            crate::continuation::AutomaticRolloverStatusV1::Started => {
+                if let Some(thread_id) = rollover.new_thread_id.as_deref() {
+                    return json!({
+                        "decision": "block",
+                        "reason": format!(
+                            "PreviouslyOn moved this request to fresh Codex task {thread_id} and started it with a verified Context Pack. Continue in the new task; this source prompt was blocked to prevent duplicate work."
+                        )
+                    });
+                }
+            }
+            crate::continuation::AutomaticRolloverStatusV1::Failed
+            | crate::continuation::AutomaticRolloverStatusV1::PendingRecovery => {
+                return json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": format!(
+                            "PreviouslyOn could not safely complete automatic rollover: {} Continue the current user request in this task and tell the user briefly that no duplicate fresh task was started.",
+                            crate::redaction::redact_excerpt(&rollover.message)
+                        )
+                    }
+                });
+            }
+        }
     }
     if let Some(continuation) = continuation {
         let advice = serde_json::to_string(&json!({
@@ -417,6 +479,62 @@ fn hook_response_with_continuation(
             )
         }
     })
+}
+
+fn attempt_automatic_rollover(
+    config: &HookIngressConfig,
+    envelope: &EventEnvelopeV1,
+    advice: &ContinuationAdviceV1,
+    current_prompt: &str,
+) -> Result<crate::continuation::AutomaticRolloverResultV1> {
+    if advice.action != "new_thread" || envelope.kind != EventKind::UserPrompt {
+        bail!("automatic rollover requires new-thread advice for a user prompt");
+    }
+    let task_id = advice.task_id.trim();
+    if task_id.is_empty() {
+        bail!("automatic rollover advice omitted its task id");
+    }
+    let data_dir = config
+        .queue_path
+        .parent()
+        .and_then(Path::parent)
+        .context("PreviouslyOn queue path is outside the data directory")?;
+    let executable = std::env::current_exe().context("resolve PreviouslyOn hook executable")?;
+    let request = crate::continuation::AutomaticRolloverRequestV1 {
+        schema_version: crate::domain::SCHEMA_VERSION_V1,
+        repository_id: envelope.repository_id.clone(),
+        task_id: task_id.to_string(),
+        source_session_id: envelope.session_id.clone(),
+        source_event_id: envelope.event_id.clone(),
+        current_prompt: current_prompt.to_string(),
+    };
+    let mut child = Command::new(executable)
+        .arg("--data-dir")
+        .arg(data_dir)
+        .arg("auto-rollover")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start PreviouslyOn automatic rollover worker")?;
+    serde_json::to_writer(
+        child
+            .stdin
+            .as_mut()
+            .context("automatic rollover worker stdin unavailable")?,
+        &request,
+    )?;
+    drop(child.stdin.take());
+    let output = child
+        .wait_with_output()
+        .context("wait for PreviouslyOn automatic rollover worker")?;
+    if !output.status.success() {
+        bail!(
+            "automatic rollover worker failed: {}",
+            crate::redaction::redact_excerpt(&String::from_utf8_lossy(&output.stderr))
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("parse automatic rollover worker result")
 }
 
 fn send_to_daemon(envelope: &EventEnvelopeV1, socket_path: &Path) -> Result<HookAckV1> {
@@ -2271,14 +2389,14 @@ fn rollover_advice(store: &Store, event: &EventEnvelopeV1) -> Result<Option<Prop
         return Ok(None);
     };
     let mut reasons = Vec::new();
-    if session.compaction_count >= 6 {
+    if session.compaction_count >= crate::domain::PROVISIONAL_COMPACTION_THRESHOLD {
         reasons.push(ContinuationReasonV1::CompactionLimit);
     }
     if session
         .context_usage
         .as_ref()
         .and_then(crate::domain::ContextUsageV1::utilization)
-        .is_some_and(|ratio| ratio >= 0.8)
+        .is_some_and(|ratio| ratio >= crate::domain::PROVISIONAL_CONTEXT_USAGE_THRESHOLD)
     {
         reasons.push(ContinuationReasonV1::ContextUsageLimit);
     }
@@ -2815,6 +2933,99 @@ mod durability_tests {
         let ack = read_daemon_ack(&mut BufReader::new(std::io::Cursor::new(bytes))).unwrap();
         assert_eq!(ack.status, HookDeliveryStatus::Retryable);
         assert!(!ack.status.is_committed());
+    }
+
+    #[test]
+    fn successful_rollover_blocks_only_the_source_prompt() {
+        let result = crate::continuation::AutomaticRolloverResultV1 {
+            schema_version: crate::domain::SCHEMA_VERSION_V1,
+            operation_id: "operation-1".into(),
+            status: crate::continuation::AutomaticRolloverStatusV1::Started,
+            task_id: "task-1".into(),
+            task_title: "Continue safely".into(),
+            source_session_id: "session-1".into(),
+            new_thread_id: Some("thread-fresh".into()),
+            new_turn_id: Some("turn-fresh".into()),
+            started_at: Some(Utc::now()),
+            message: "started".into(),
+            warnings: Vec::new(),
+        };
+
+        let response = hook_response_with_continuation(
+            HookEvent::UserPromptSubmit,
+            None,
+            None,
+            Some(&result),
+            None,
+            None,
+        );
+
+        assert_eq!(response["decision"], "block");
+        assert!(response["reason"]
+            .as_str()
+            .unwrap()
+            .contains("thread-fresh"));
+    }
+
+    #[test]
+    fn failed_rollover_keeps_the_source_prompt_unblocked() {
+        let result = crate::continuation::AutomaticRolloverResultV1 {
+            schema_version: crate::domain::SCHEMA_VERSION_V1,
+            operation_id: "operation-1".into(),
+            status: crate::continuation::AutomaticRolloverStatusV1::Failed,
+            task_id: "task-1".into(),
+            task_title: "Continue safely".into(),
+            source_session_id: "session-1".into(),
+            new_thread_id: None,
+            new_turn_id: None,
+            started_at: None,
+            message: "app server unavailable".into(),
+            warnings: Vec::new(),
+        };
+
+        let response = hook_response_with_continuation(
+            HookEvent::UserPromptSubmit,
+            None,
+            None,
+            Some(&result),
+            None,
+            None,
+        );
+
+        assert!(response.get("decision").is_none());
+        assert!(response["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("Continue the current user request"));
+    }
+
+    #[test]
+    fn automatic_rollover_prompt_is_transient_redacted_and_more_complete_than_storage() {
+        let prompt = format!(
+            "Continue the task with password=transient-secret-value {}",
+            "x".repeat(900)
+        );
+        let payload = serde_json::to_vec(&json!({
+            "session_id": "session-transient",
+            "cwd": "/tmp/repo",
+            "prompt": prompt
+        }))
+        .unwrap();
+
+        let (event, transient) = capture_with_current_prompt(
+            HookEvent::UserPromptSubmit,
+            &mut std::io::Cursor::new(payload),
+        )
+        .unwrap();
+        let transient = transient.unwrap();
+        let stored = event.payload["prompt"].as_str().unwrap();
+
+        assert!(transient.chars().count() > stored.chars().count());
+        assert!(stored.chars().count() <= crate::domain::MAX_EVIDENCE_EXCERPT_CHARS);
+        assert!(!transient.contains("transient-secret-value"));
+        assert!(!serde_json::to_string(&event)
+            .unwrap()
+            .contains("transient-secret-value"));
     }
 
     #[test]

@@ -5,6 +5,8 @@ interfaces; prerelease compatibility may still change between alpha versions.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-07-16
+
 ### Added
 
 - Git-backed Regression Contracts with strict camelCase schemas, path and literal-symbol impact
@@ -15,11 +17,20 @@ interfaces; prerelease compatibility may still change between alpha versions.
   a version-pinned macOS GitHub Actions hard gate.
 - Non-blocking PreToolUse contract context and one-shot Stop blocking for missing, stale, or failed
   required tests.
+- Project overview for active tasks, recent Codex sessions, decisions, open items, and touched code
+  areas, plus explicit Codebase Lineage from task to repository/worktree and verification state.
+- Fact editing and Git-commit deprecation, session inclusion controls, and selection reasons wired
+  into the verified Context Pack builder.
+- Idempotent automatic fresh-task continuation through documented Codex App Server methods at the
+  provisional seven-compaction or 80% observed-context boundary.
 
 ### Security
 
 - Git Contract files exclude raw prompts, tool output, source code, environment values, and
   secrets; local candidate and evaluation data remains redacted before persistence.
+- Automatic continuation carries the redacted current prompt only over bounded child stdin,
+  records the new task ID before starting its turn, and leaves the source prompt unblocked on any
+  failure.
 
 ## [0.1.0-alpha.1] - 2026-07-13
 
@@ -56,4 +67,5 @@ interfaces; prerelease compatibility may still change between alpha versions.
 - Independently launched transparent capture is experimental; the supported alpha path is the
   explicit run wrapper or explicit import command.
 
+[0.1.0-alpha.2]: https://github.com/hongsDream/previously-on/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/hongsDream/previously-on/releases/tag/v0.1.0-alpha.1

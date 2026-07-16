@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { AppHeader } from './components/AppHeader';
 import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
+import { ProjectOverview } from './components/ProjectOverview';
 import { Sidebar } from './components/Sidebar';
 import { TaskWorkspace } from './components/TaskWorkspace';
 import { RegressionContractsPanel } from './components/RegressionContractsPanel';
@@ -17,6 +18,8 @@ import {
   supersedeRegressionContract,
   updateContractCandidate,
   updateFactStatus,
+  updateFact,
+  updateSession,
   updateTaskStatus,
 } from './lib/api';
 import type { ContractMutationResponse } from './lib/api';
@@ -29,6 +32,8 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = useState('');
   const [selectedCheckpointId, setSelectedCheckpointId] = useState('');
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('');
+  const [workspaceView, setWorkspaceView] = useState<'overview' | 'task'>('task');
+  const [overviewFocus, setOverviewFocus] = useState<'tasks' | 'sessions'>('tasks');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<TaskStatus | 'all'>('all');
   const [contextPackExpanded, setContextPackExpanded] = useState(() => (
@@ -127,6 +132,7 @@ export function App() {
         checkpoints: [],
         facts: [],
         evidence: [],
+        sessions: [],
         contractCandidates: [],
         contractEvaluation: null,
         resumeCandidate: undefined,
@@ -215,6 +221,8 @@ export function App() {
             onQueryChange={setQuery}
             onStatusChange={setStatus}
             onTaskSelect={() => undefined}
+            activeNavigation="tasks"
+            onOverviewOpen={() => undefined}
             onEvidenceOpen={() => setMobileInspectorOpen(true)}
           />
           <main className="repository-empty-workspace">
@@ -232,7 +240,13 @@ export function App() {
             <EmptyWorkspace repositoryName={data.repository.name} />
           </main>
         </div>
-        <BottomNavigation onEvidenceOpen={() => setMobileInspectorOpen(true)} />
+        <BottomNavigation
+          activeNavigation="tasks"
+          sessionsEnabled={false}
+          onTasksOpen={() => undefined}
+          onSessionsOpen={() => undefined}
+          onEvidenceOpen={() => setMobileInspectorOpen(true)}
+        />
       </div>
     );
   }
@@ -261,6 +275,13 @@ export function App() {
     setSelectedTaskId(taskId);
     setSelectedCheckpointId(checkpointId);
     setSelectedEvidenceId(data.evidence.find((item) => item.checkpointId === checkpointId)?.id ?? data.evidence[0]?.id ?? '');
+    setWorkspaceView('task');
+  };
+
+  const openOverview = (focus: 'tasks' | 'sessions') => {
+    setOverviewFocus(focus);
+    setWorkspaceView('overview');
+    setMobileInspectorOpen(false);
   };
 
   const selectCheckpoint = (checkpoint: Checkpoint) => {
@@ -279,7 +300,7 @@ export function App() {
   };
 
   const handleFactStatus = async (nextStatus: FactStatus, supersedesFactId?: string) => {
-    if (offlineFallback || mutationPending) return;
+    if (offlineFallback || mutationPending || !selectedFact) return;
     const previousStatus = selectedFact.status;
     setData((current) => current ? {
       ...current,
@@ -292,6 +313,45 @@ export function App() {
         facts: current.facts.map((fact) => fact.id === selectedFact.id ? { ...fact, status: previousStatus } : fact),
       } : current);
     }
+  };
+
+  const handleFactUpdate = async (content: string, deprecatedAfterCommit: string) => {
+    if (offlineFallback || mutationPending || !selectedFact) return false;
+    const previous = selectedFact;
+    setData((current) => current ? {
+      ...current,
+      facts: current.facts.map((fact) => fact.id === selectedFact.id ? { ...fact, text: content, deprecatedAfterCommit: deprecatedAfterCommit || undefined } : fact),
+    } : current);
+    const saved = await performMutation(() => updateFact(selectedFact.id, selectedFact.status, content, deprecatedAfterCommit));
+    if (!saved) {
+      setData((current) => current ? {
+        ...current,
+        facts: current.facts.map((fact) => fact.id === selectedFact.id ? previous : fact),
+      } : current);
+      return false;
+    }
+    setData((current) => current ? {
+      ...current,
+      facts: current.facts.map((fact) => fact.id === selectedFact.id ? {
+        ...fact,
+        text: saved.text,
+        updatedAt: saved.updatedAt,
+        deprecatedAfterCommit: saved.deprecatedAfterCommit || undefined,
+      } : fact),
+    } : current);
+    return true;
+  };
+
+  const handleSessionExcluded = async (excluded: boolean) => {
+    if (offlineFallback || mutationPending || !selectedEvidence?.sessionId) return;
+    const sessionId = selectedEvidence.sessionId;
+    const saved = await performMutation(() => updateSession(sessionId, excluded));
+    if (!saved) return;
+    setData((current) => current ? {
+      ...current,
+      sessions: current.sessions.map((session) => session.id === sessionId ? { ...session, excluded: saved.excluded } : session),
+      evidence: current.evidence.map((evidence) => evidence.sessionId === sessionId ? { ...evidence, excludedSession: saved.excluded } : evidence),
+    } : current);
   };
 
   const dismissCandidate = () => {
@@ -307,7 +367,7 @@ export function App() {
   };
 
   const handleRevalidate = async () => {
-    if (offlineFallback || mutationPending) return;
+    if (offlineFallback || mutationPending || !selectedFact) return;
     const result = await performMutation(() => revalidateFact(selectedFact.id));
     if (!result) return;
     setData((current) => current ? {
@@ -348,7 +408,7 @@ export function App() {
       />
       {offlineFallback ? <div className="sample-banner" role="status">Local API unavailable · read-only sample workspace · changes are disabled</div> : null}
       {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
-      <div className="app-body">
+      <div className={`app-body ${workspaceView === 'overview' ? 'overview-app-body' : ''}`}>
         <Sidebar
           query={query}
           status={status}
@@ -357,9 +417,19 @@ export function App() {
           onQueryChange={setQuery}
           onStatusChange={setStatus}
           onTaskSelect={selectTask}
+          activeNavigation={workspaceView === 'overview' ? overviewFocus : 'task'}
+          onOverviewOpen={openOverview}
           onEvidenceOpen={() => setMobileInspectorOpen(true)}
         />
-        <TaskWorkspace
+        {workspaceView === 'overview' ? (
+          <ProjectOverview
+            tasks={filteredTasks}
+            sessions={data.sessions}
+            facts={data.facts}
+            focus={overviewFocus}
+            onTaskSelect={selectTask}
+          />
+        ) : <TaskWorkspace
           task={selectedTask}
           checkpoints={taskCheckpoints}
           selectedCheckpoint={selectedCheckpoint}
@@ -380,9 +450,9 @@ export function App() {
           onSupersedeContract={handleSupersedeContract}
           contractMutationsDisabled={offlineFallback}
           mutationPending={mutationPending}
-          onBack={() => document.getElementById('task-search')?.focus()}
-        />
-        {selectedEvidence && selectedFact ? (
+          onBack={() => openOverview('tasks')}
+        />}
+        {workspaceView === 'task' && selectedEvidence && selectedFact ? (
           <EvidenceInspector
             evidence={selectedEvidence}
             availableEvidence={data.evidence.filter((evidence) => selectedTask.checkpointIds.includes(evidence.checkpointId))}
@@ -393,11 +463,19 @@ export function App() {
             onClose={() => setMobileInspectorOpen(false)}
             onEvidenceSelect={selectEvidence}
             onStatusChange={(nextStatus, supersedesFactId) => void handleFactStatus(nextStatus, supersedesFactId)}
+            onFactUpdate={handleFactUpdate}
+            onSessionExcludedChange={(excluded) => void handleSessionExcluded(excluded)}
             onRevalidate={() => void handleRevalidate()}
           />
         ) : null}
       </div>
-      <BottomNavigation onEvidenceOpen={() => setMobileInspectorOpen(true)} />
+      <BottomNavigation
+        activeNavigation={workspaceView === 'overview' ? overviewFocus : 'tasks'}
+        sessionsEnabled={data.sessions.length > 0}
+        onTasksOpen={() => openOverview('tasks')}
+        onSessionsOpen={() => openOverview('sessions')}
+        onEvidenceOpen={() => setMobileInspectorOpen(true)}
+      />
     </div>
   );
 }
@@ -443,6 +521,18 @@ function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
     contractCandidates: bootstrap.contractCandidates ?? [],
     contractEvaluation: bootstrap.contractEvaluation ?? null,
     contractEvaluations: bootstrap.contractEvaluations ?? [],
+    sessions: bootstrap.sessions ?? [],
+    facts: (bootstrap.facts ?? []).map((fact) => ({
+      ...fact,
+      taskId: fact.taskId ?? bootstrap.tasks[0]?.id ?? '',
+      kind: fact.kind ?? 'note',
+      relatedFiles: fact.relatedFiles ?? [],
+    })),
+    evidence: (bootstrap.evidence ?? []).map((evidence) => ({
+      ...evidence,
+      sessionId: evidence.sessionId ?? '',
+      excludedSession: evidence.excludedSession ?? false,
+    })),
   };
 }
 

@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use previously_on::context_pack::count_tokens;
 use previously_on::domain::{
-    ChangeAttribution, ChangeStatus, CheckpointV1, CoverageV1, FileChangeV1, RepositoryV1,
+    ChangeAttribution, ChangeStatus, CheckpointV1, CoverageV1, EventEnvelopeV1, EventKind,
+    EvidenceV1, FactKind, FactLifecycle, FactV1, FileChangeV1, Freshness, RepositoryV1,
     TaskLifecycle, TaskV1, MAX_CONTEXT_TEMPORAL_ITEMS, SCHEMA_VERSION_V1,
 };
 use previously_on::mcp::{
@@ -603,4 +604,164 @@ fn store_resume_task_revalidates_the_checkpoint_worktree_not_the_registered_sibl
     let backend = StoreMcpBackend::open(&database, repository_id).unwrap();
     let pack = backend.resume_task("linked-task", Some(1_200)).unwrap();
     assert_eq!(pack["temporal_revalidation"]["status"], "unchanged");
+}
+
+#[test]
+fn context_pack_honors_session_exclusion_and_commit_deprecation_controls() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--initial-branch=main"]);
+    std::fs::write(repo.join("state.txt"), "verified state\n").unwrap();
+    git(&repo, &["add", "state.txt"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=PreviouslyOn Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "baseline",
+        ],
+    );
+    let snapshot = previously_on::git::capture_snapshot(&repo).unwrap();
+    let repository_id = snapshot.repository_id.clone();
+    let head = snapshot.head.clone().unwrap();
+    let now = Utc::now();
+    let database = temp.path().join("previously.sqlite3");
+    let store = Store::open(&database).unwrap();
+    store
+        .upsert_repository(&RepositoryV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: repository_id.clone(),
+            path: repo.to_string_lossy().into_owned(),
+            remote_url: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_task(&TaskV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "memory-controls-task".into(),
+            repository_id: repository_id.clone(),
+            title: "Verify memory controls".into(),
+            goal: Some("Carry only user-approved memory".into()),
+            lifecycle: TaskLifecycle::Active,
+            branch: Some("main".into()),
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    let change = FileChangeV1 {
+        schema_version: SCHEMA_VERSION_V1,
+        repository_id: repository_id.clone(),
+        session_id: "memory-controls-session".into(),
+        task_id: Some("memory-controls-task".into()),
+        path: "state.txt".into(),
+        previous_path: None,
+        status: ChangeStatus::Modified,
+        additions: Some(1),
+        deletions: Some(0),
+        attribution: ChangeAttribution::ObservedChangedIn,
+        before_head: Some(head.clone()),
+        after_head: Some(head.clone()),
+    };
+    store
+        .upsert_checkpoint(&CheckpointV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "memory-controls-checkpoint".into(),
+            repository_id: repository_id.clone(),
+            task_id: "memory-controls-task".into(),
+            session_id: "memory-controls-session".into(),
+            created_at: now,
+            goal_hint: None,
+            git_before: None,
+            git_after: snapshot,
+            changed_files: vec![change],
+            tests: Vec::new(),
+            failures: Vec::new(),
+            unresolved_items: Vec::new(),
+            coverage: CoverageV1::default(),
+        })
+        .unwrap();
+    let mut evidence = EvidenceV1::new(
+        "memory-controls-evidence",
+        &repository_id,
+        "memory-controls-task",
+        "memory-controls-session",
+        "test-source",
+        "The verified boundary remains stable.",
+        now,
+    );
+    evidence.fact_id = Some("memory-controls-fact".into());
+    store.upsert_evidence(&evidence).unwrap();
+    store
+        .upsert_fact(&FactV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "memory-controls-fact".into(),
+            repository_id: repository_id.clone(),
+            task_id: "memory-controls-task".into(),
+            kind: FactKind::Decision,
+            lifecycle: FactLifecycle::Confirmed,
+            freshness: Freshness::Fresh,
+            content: "Keep the verified boundary.".into(),
+            evidence_ids: vec![evidence.id.clone()],
+            superseded_by: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    let backend = StoreMcpBackend::open(&database, repository_id.clone()).unwrap();
+    let initial = backend
+        .resume_task("memory-controls-task", Some(1_200))
+        .unwrap();
+    assert_eq!(initial["facts"].as_array().unwrap().len(), 1);
+
+    let mut exclude = EventEnvelopeV1::new(
+        "exclude-session",
+        &repository_id,
+        "memory-controls-session",
+        EventKind::SessionExcluded,
+        now + chrono::Duration::seconds(1),
+        json!({"session_id":"memory-controls-session","excluded":true}),
+    );
+    exclude.task_id = Some("memory-controls-task".into());
+    store.insert_event(&exclude).unwrap();
+    let excluded = backend
+        .resume_task("memory-controls-task", Some(1_200))
+        .unwrap();
+    assert!(excluded["facts"].as_array().unwrap().is_empty());
+
+    let mut include = EventEnvelopeV1::new(
+        "include-session",
+        &repository_id,
+        "memory-controls-session",
+        EventKind::SessionExcluded,
+        now + chrono::Duration::seconds(2),
+        json!({"session_id":"memory-controls-session","excluded":false}),
+    );
+    include.task_id = Some("memory-controls-task".into());
+    store.insert_event(&include).unwrap();
+    let included = backend
+        .resume_task("memory-controls-task", Some(1_200))
+        .unwrap();
+    assert_eq!(included["facts"].as_array().unwrap().len(), 1);
+
+    let mut deprecated = EventEnvelopeV1::new(
+        "deprecate-fact",
+        &repository_id,
+        "memory-controls-session",
+        EventKind::FactDeprecated,
+        now + chrono::Duration::seconds(3),
+        json!({"fact_id":"memory-controls-fact","deprecated_after_commit":head}),
+    );
+    deprecated.task_id = Some("memory-controls-task".into());
+    store.insert_event(&deprecated).unwrap();
+    let stale = backend
+        .resume_task("memory-controls-task", Some(1_200))
+        .unwrap();
+    assert!(stale["facts"].as_array().unwrap().is_empty());
 }

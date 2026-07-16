@@ -1,39 +1,42 @@
 # PreviouslyOn
 
-PreviouslyOn is a local-first, verifiable handoff layer for Codex. It connects captured session
-events to Git state and test evidence, then returns a deterministic Context Pack only after the
-user approves a resume suggestion.
+PreviouslyOn is a local-first, verifiable project-memory and continuation layer for Codex. It
+connects captured sessions to the codebase, Git state, test evidence, decisions, and open work. At
+a continuation boundary it can start the current request in a fresh Codex task with a verified,
+bounded Context Pack.
 
-Version `0.1.0-alpha.1` is an early public alpha. Historical evidence is always untrusted data,
+Version `0.1.0-alpha.2` is an early public alpha. Historical evidence is always untrusted data,
 not an instruction and not a replacement for checking the current source.
 
 ## What the alpha includes
 
 - one Rust `previously` binary for collection, storage, Git correlation, MCP, and the review UI;
-- an embedded React evidence inspector;
+- an embedded React project overview and evidence inspector;
 - a task timeline with source-thread identity, relative activity age, turn and compaction counts,
   and observed context usage;
 - deterministic context packs with provenance, freshness, and capture-coverage warnings;
 - Git-shared regression contracts that connect changed paths and literal symbols to required tests;
-- one-time new-thread advice after a session crosses a continuation threshold;
-- no API key, telemetry, or outbound network access in the default mode;
+- automatic fresh-task continuation after a session crosses the provisional boundary, with
+  idempotent recovery and source-prompt blocking only after the new turn starts;
+- no PreviouslyOn API key, telemetry, cloud service, or independent outbound integration; model
+  execution is delegated to the user's configured local Codex App Server;
 - repository-scoped JSON export and complete local purge.
 
 PreviouslyOn deliberately does not include a dependency graph, chat replay, cloud sync,
-multi-agent integration, automatic task switching, or automatic Context Pack injection.
+multi-agent orchestration, or UI-triggered AI fact refresh.
 
 ## Install
 
 ### Apple Silicon release archive
 
-Download `previously-on-v0.1.0-alpha.1-macos-arm64.tar.gz` and `SHA256SUMS` from the
-[`v0.1.0-alpha.1` release](https://github.com/hongsDream/previously-on/releases/tag/v0.1.0-alpha.1),
+Download `previously-on-v0.1.0-alpha.2-macos-arm64.tar.gz` and `SHA256SUMS` from the
+[`v0.1.0-alpha.2` release](https://github.com/hongsDream/previously-on/releases/tag/v0.1.0-alpha.2),
 then verify and install the unsigned alpha binary:
 
 ```bash
-grep ' previously-on-v0.1.0-alpha.1-macos-arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c -
-tar -xzf previously-on-v0.1.0-alpha.1-macos-arm64.tar.gz
-install -m 0755 previously-on-v0.1.0-alpha.1-macos-arm64/previously ~/.local/bin/previously
+grep ' previously-on-v0.1.0-alpha.2-macos-arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c -
+tar -xzf previously-on-v0.1.0-alpha.2-macos-arm64.tar.gz
+install -m 0755 previously-on-v0.1.0-alpha.2-macos-arm64/previously ~/.local/bin/previously
 previously --version
 ```
 
@@ -45,7 +48,7 @@ attestation before allowing it through macOS security controls.
 Intel Mac users should install from crates.io or source; no Intel binary archive is published.
 
 ```bash
-cargo install previously-on --version 0.1.0-alpha.1 --locked
+cargo install previously-on --version 0.1.0-alpha.2 --locked
 ```
 
 Building the repository requires Rust 1.90+ and Node.js 22+:
@@ -56,11 +59,10 @@ npm --prefix ui run build
 cargo install --path . --locked
 ```
 
-Regression Contracts are part of the current unreleased source tree; the already-published
-`0.1.0-alpha.1` package predates these commands. Until a later release includes them, build this
-checkout from source. A released `previously contracts init --github-actions` pins the same
-PreviouslyOn package version that generated the workflow and installs it outside the consumer
-repository, so the gate never assumes that repository is a Rust project.
+Regression Contracts are included in `0.1.0-alpha.2`. `previously contracts init
+--github-actions` pins the same PreviouslyOn package version that generated the workflow and
+installs it outside the consumer repository, so the gate never assumes that repository is a Rust
+project.
 
 ## Quick start
 
@@ -110,13 +112,22 @@ already uses that command name.
    verification results.
 5. On a later first prompt, Codex may show a small resume candidate. Nothing is loaded until the
    user approves it and `resume_task` is called through MCP.
-6. The localhost inspector shows the source thread, relative activity age, turns, compactions,
-   observed context usage, and the Git changes since the checkpoint. Facts can be confirmed,
-   pinned, invalidated, or superseded.
-7. When a session reaches six compactions or at least 80% observed context usage, the next user
-   prompt receives one suggestion to continue in a new thread. A session inactive for at least
-   72 hours receives the same one-time suggestion only when relevant code has changed. This is
-   advice, not an automatic thread switch or Context Pack injection.
+6. The project overview shows active tasks, recent source task IDs, decisions, open items, and code
+   areas. The task inspector shows detailed Codebase Lineage, checkpoints, and why facts were
+   selected. Facts can be edited, deprecated after a Git commit, confirmed, pinned, invalidated,
+   or superseded; a captured session can be excluded from future packs.
+7. When a session reaches seven observed compactions or at least 80% observed context usage, the
+   next user prompt triggers automatic continuation. PreviouslyOn revalidates Git and Regression
+   Contracts, creates a persisted task with the official Codex App Server, names it, starts the
+   current request with a verified Context Pack, and only then blocks the source prompt to prevent
+   duplicate work. If any step fails, the source prompt continues normally. A session inactive for
+   at least 72 hours also uses this flow only when relevant code changed.
+
+The seven-compaction/80% rule is an explicit provisional alpha policy, not a benchmark-derived or
+model-general threshold. It will be replaced only after the continuation benchmark described in
+[the product roadmap](docs/product-roadmap.md) produces a model-specific recommendation. The App
+Server creates a new persisted task that appears in Codex; the current public interface does not
+let PreviouslyOn force the desktop UI to focus that task.
 
 Context usage is recorded only when the App Server actually emits a token-usage notification.
 PreviouslyOn does not infer a percentage from prompt size or other incomplete observations.

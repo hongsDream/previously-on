@@ -74,6 +74,19 @@ pub struct AppServerThreadSummary {
     pub raw: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerStartedThreadV1 {
+    pub id: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerStartedTurnV1 {
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedThreadV1 {
@@ -942,6 +955,10 @@ impl AppServerClient {
                 "initialized".to_string(),
                 "thread/list".to_string(),
                 "thread/read".to_string(),
+                "thread/start".to_string(),
+                "thread/resume".to_string(),
+                "thread/name/set".to_string(),
+                "turn/start".to_string(),
             ],
             warnings,
         }
@@ -1056,6 +1073,128 @@ impl AppServerClient {
             .get("thread")
             .cloned()
             .context("Codex thread/read response omitted `thread`")
+    }
+
+    /// Starts a persisted Codex task through the documented App Server interface.
+    ///
+    /// Approval and sandbox fields are intentionally omitted so the new task inherits the user's
+    /// effective Codex configuration instead of PreviouslyOn silently widening permissions.
+    pub async fn start_thread(
+        &mut self,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<AppServerStartedThreadV1> {
+        if !cwd.is_absolute() {
+            bail!("Codex thread/start requires an absolute cwd");
+        }
+        let mut params = json!({
+            "cwd": cwd.to_string_lossy(),
+            "ephemeral": false,
+            "serviceName": "previously-on"
+        });
+        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+            params["model"] = json!(model);
+        }
+        let result = self
+            .request_timed("thread/start", params)
+            .await
+            .context("Codex thread/start failed")?;
+        let thread = result
+            .get("thread")
+            .context("Codex thread/start response omitted `thread`")?;
+        let id = thread
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .context("Codex thread/start response omitted `thread.id`")?
+            .to_string();
+        let session_id = thread
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        Ok(AppServerStartedThreadV1 { id, session_id })
+    }
+
+    pub async fn resume_thread(&mut self, thread_id: &str) -> Result<AppServerStartedThreadV1> {
+        if thread_id.is_empty() {
+            bail!("Codex thread/resume requires a thread id");
+        }
+        let result = self
+            .request_timed("thread/resume", json!({ "threadId": thread_id }))
+            .await
+            .context("Codex thread/resume failed")?;
+        let thread = result
+            .get("thread")
+            .context("Codex thread/resume response omitted `thread`")?;
+        let id = thread
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .context("Codex thread/resume response omitted `thread.id`")?
+            .to_string();
+        let session_id = thread
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        Ok(AppServerStartedThreadV1 { id, session_id })
+    }
+
+    pub async fn set_thread_name(&mut self, thread_id: &str, name: &str) -> Result<()> {
+        let name = crate::redaction::redact_excerpt(name.trim());
+        if thread_id.is_empty() || name.is_empty() {
+            bail!("Codex thread/name/set requires a thread id and non-empty name");
+        }
+        self.request_timed(
+            "thread/name/set",
+            json!({ "threadId": thread_id, "name": name }),
+        )
+        .await
+        .context("Codex thread/name/set failed")?;
+        Ok(())
+    }
+
+    pub async fn start_turn(
+        &mut self,
+        thread_id: &str,
+        cwd: &Path,
+        prompt: &str,
+        model: Option<&str>,
+        client_user_message_id: &str,
+    ) -> Result<AppServerStartedTurnV1> {
+        if thread_id.is_empty() || client_user_message_id.is_empty() {
+            bail!("Codex turn/start requires stable thread and client message ids");
+        }
+        if !cwd.is_absolute() {
+            bail!("Codex turn/start requires an absolute cwd");
+        }
+        if prompt.trim().is_empty() {
+            bail!("Codex turn/start requires non-empty input");
+        }
+        let mut params = json!({
+            "threadId": thread_id,
+            "cwd": cwd.to_string_lossy(),
+            "clientUserMessageId": client_user_message_id,
+            "input": [{ "type": "text", "text": prompt }]
+        });
+        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+            params["model"] = json!(model);
+        }
+        let result = self
+            .request_timed("turn/start", params)
+            .await
+            .context("Codex turn/start failed")?;
+        let id = result
+            .get("turn")
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .context("Codex turn/start response omitted `turn.id`")?
+            .to_string();
+        Ok(AppServerStartedTurnV1 { id })
     }
 
     pub async fn import_threads(&mut self, cwd: &Path) -> Result<Vec<ImportedThreadV1>> {

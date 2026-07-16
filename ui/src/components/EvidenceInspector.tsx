@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Ban, Check, ExternalLink, Info, MoreHorizontal, Pin, RotateCcw, X } from 'lucide-react';
+import { Ban, Check, ExternalLink, Info, MoreHorizontal, Pencil, Pin, RotateCcw, X } from 'lucide-react';
 import type { Evidence, Fact, FactStatus } from '../types';
 import { FactBadge, FreshnessBadge } from './StatusBadge';
 
@@ -13,6 +13,8 @@ interface EvidenceInspectorProps {
   replacementFacts: Fact[];
   mutationPending: boolean;
   onStatusChange: (status: FactStatus, supersedesFactId?: string) => void;
+  onFactUpdate: (content: string, deprecatedAfterCommit: string) => Promise<boolean>;
+  onSessionExcludedChange: (excluded: boolean) => void;
   onRevalidate: () => void;
 }
 
@@ -24,7 +26,7 @@ const capturedFormatter = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
 });
 
-export function EvidenceInspector({ evidence, availableEvidence, fact, replacementFacts, mutationPending, mobileOpen, onClose, onEvidenceSelect, onStatusChange, onRevalidate }: EvidenceInspectorProps) {
+export function EvidenceInspector({ evidence, availableEvidence, fact, replacementFacts, mutationPending, mobileOpen, onClose, onEvidenceSelect, onStatusChange, onFactUpdate, onSessionExcludedChange, onRevalidate }: EvidenceInspectorProps) {
   return (
     <aside className={`evidence-inspector ${mobileOpen ? 'mobile-open' : ''}`} aria-label="Evidence inspector">
       <div className="sheet-handle mobile-only" aria-hidden="true" />
@@ -45,10 +47,7 @@ export function EvidenceInspector({ evidence, availableEvidence, fact, replaceme
 
       <FactActions status={fact.status} replacementFacts={replacementFacts} disabled={mutationPending} onStatusChange={onStatusChange} />
 
-      <section className="inspector-section fact-section desktop-only">
-        <h3>Fact</h3>
-        <p>{fact.text}</p>
-      </section>
+      <FactEditor fact={fact} disabled={mutationPending} onSave={onFactUpdate} />
 
       <section className="inspector-section source-section">
         <h3 className="desktop-only">Source</h3>
@@ -59,6 +58,12 @@ export function EvidenceInspector({ evidence, availableEvidence, fact, replaceme
           <div className="mobile-only"><dt>Source</dt><dd><span className="source-value">{evidence.source}</span><ExternalLink size={15} /></dd></div>
           <div className="mobile-only"><dt>Captured</dt><dd>{capturedFormatter.format(new Date(evidence.capturedAt))}<FreshnessBadge status={evidence.freshness} /><Info size={15} /></dd></div>
         </dl>
+        <div className={`session-memory-control desktop-only ${evidence.excludedSession ? 'session-memory-excluded' : ''}`}>
+          <span>{evidence.excludedSession ? 'This session is excluded from future Context Packs.' : 'This session can contribute verified facts to Context Packs.'}</span>
+          <button className="secondary-button" type="button" disabled={mutationPending || !evidence.sessionId} onClick={() => onSessionExcludedChange(!evidence.excludedSession)}>
+            {evidence.excludedSession ? 'Include session' : 'Exclude session'}
+          </button>
+        </div>
       </section>
 
       <section className="inspector-section evidence-section">
@@ -85,6 +90,52 @@ export function EvidenceInspector({ evidence, availableEvidence, fact, replaceme
         </ul>
       </section>
     </aside>
+  );
+}
+
+function FactEditor({ fact, disabled, onSave }: { fact: Fact; disabled: boolean; onSave: (content: string, deprecatedAfterCommit: string) => Promise<boolean> }) {
+  const [editing, setEditing] = useState(false);
+  const [content, setContent] = useState(fact.text);
+  const [deprecatedAfterCommit, setDeprecatedAfterCommit] = useState(fact.deprecatedAfterCommit ?? '');
+  const [error, setError] = useState('');
+
+  const save = async () => {
+    const nextContent = content.trim();
+    if (!nextContent) {
+      setError('Fact text is required.');
+      return;
+    }
+    const saved = await onSave(nextContent, deprecatedAfterCommit.trim());
+    if (saved) {
+      setError('');
+      setEditing(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <section className="inspector-section fact-section desktop-only">
+        <header><h3>Fact</h3><button className="secondary-button" type="button" disabled={disabled} onClick={() => { setContent(fact.text); setDeprecatedAfterCommit(fact.deprecatedAfterCommit ?? ''); setEditing(true); }}><Pencil size={12} /> Edit</button></header>
+        <p>{fact.text}</p>
+        <small className="fact-selection-copy">{fact.selectionReason ?? 'Not selected in the current verified Context Pack.'}</small>
+        {fact.deprecatedAfterCommit ? <small className="fact-deprecation-copy">Treat as stale after commit {fact.deprecatedAfterCommit}</small> : null}
+      </section>
+    );
+  }
+
+  return (
+    <section className="inspector-section fact-section fact-editor desktop-only">
+      <header><h3>Edit fact memory</h3></header>
+      <label htmlFor="fact-memory-text">Fact text</label>
+      <textarea id="fact-memory-text" rows={4} maxLength={500} value={content} onChange={(event) => setContent(event.target.value)} />
+      <label htmlFor="fact-deprecation-commit">Deprecate after Git commit <span>(optional)</span></label>
+      <input id="fact-deprecation-commit" value={deprecatedAfterCommit} onChange={(event) => setDeprecatedAfterCommit(event.target.value)} placeholder="7–64 character SHA" />
+      {error ? <p className="fact-editor-error" role="alert">{error}</p> : null}
+      <footer>
+        <button className="secondary-button" type="button" disabled={disabled} onClick={() => setEditing(false)}>Cancel</button>
+        <button className="primary-button" type="button" disabled={disabled} onClick={() => void save()}>Save memory</button>
+      </footer>
+    </section>
   );
 }
 

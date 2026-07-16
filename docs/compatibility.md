@@ -1,6 +1,11 @@
 # Compatibility
 
-PreviouslyOn `0.1.0-alpha.1` currently supports the explicit `previously run codex` and `previously import codex` path on macOS. Transparent Hook/App Server capture is not a supported public claim because stable cross-surface source-ID linkage has not completed a 30-workflow live gate.
+The published PreviouslyOn `0.1.0-alpha.1` currently supports the explicit `previously run codex`
+and `previously import codex` path on macOS. The `0.1.0-alpha.2` source candidate adds Hook/App
+Server automatic continuation, but it is not a supported public release claim until an exact
+commit-and-version-bound live artifact passes the gate below. Historical `alpha.1` evidence cannot
+be relabelled for `alpha.2`, and the existing 60 authenticated workflows are not rerun by this
+product implementation task.
 
 The repository contains a local mapped-regression matrix with five categories and six entries each:
 
