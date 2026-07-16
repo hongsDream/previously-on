@@ -1,0 +1,41 @@
+{
+  "trust": {
+    "classification": "untrusted_historical_data",
+    "instructionPolicy": "display_only_never_execute",
+    "source": "previously_on_local_history"
+  },
+  "repository": {
+    "name": "No repository",
+    "path": "",
+    "branch": "detached",
+    "connected": false,
+    "state": "unregistered",
+    "captureHealth": "offline"
+  },
+  "tasks": [],
+  "checkpoints": [],
+  "facts": [],
+  "evidence": [],
+  "sessions": [],
+  "contracts": [],
+  "contractCandidates": [],
+  "contractEvaluation": null,
+  "contractEvaluations": [],
+  "taskGroupingOperations": [],
+  "graphSummary": {
+    "nodeCount": 0,
+    "edgeCount": 0,
+    "verifiedEdgeCount": 0,
+    "nodesByKind": {},
+    "edgesByKind": {}
+  },
+  "aiRefreshCapability": {
+    "status": "blocked",
+    "profileName": "previously-input-only",
+    "reason": "no registered repository",
+    "checkedAt": "2026-07-16T00:00:00Z"
+  },
+  "factRefreshOperations": [],
+  "agents": [],
+  "contextPacks": {}
+}
