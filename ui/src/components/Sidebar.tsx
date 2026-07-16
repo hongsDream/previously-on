@@ -1,4 +1,4 @@
-import { Clock3, FileText, GitBranch, List, Search, Settings } from 'lucide-react';
+import { Clock3, FileText, GitBranch, Laptop, List, Search, Settings } from 'lucide-react';
 import type { Task, TaskStatus } from '../types';
 
 const navigation = [
@@ -78,8 +78,8 @@ export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation
       </div>
 
       <div className="workspace-user" aria-label="Local workspace profile">
-        <span className="avatar">JD</span>
-        <span><strong>jdoe</strong><small><i className="health-dot health-good" /> Local workspace</small></span>
+        <span className="avatar" aria-hidden="true"><Laptop size={16} /></span>
+        <span><strong>Local device</strong><small>· No cloud account</small></span>
         <Chevron />
       </div>
     </aside>

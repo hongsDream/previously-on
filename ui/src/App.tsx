@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { AppHeader } from './components/AppHeader';
 import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
+import { FirstRunSetup } from './components/FirstRunSetup';
 import { ProjectOverview } from './components/ProjectOverview';
 import { Sidebar } from './components/Sidebar';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -104,9 +105,10 @@ export function App() {
   if (fatalError) return <ErrorScreen message={fatalError} />;
   if (!data) return <LoadingScreen />;
   const currentData = data;
+  const isUnregistered = currentData.repository.state === 'unregistered';
 
   const performMutation = async <T,>(mutation: () => Promise<T>): Promise<T | null> => {
-    if (offlineFallback || mutationPending) return null;
+    if (offlineFallback || isUnregistered || mutationPending) return null;
     setMutationPending(true);
     setActionError('');
     try {
@@ -121,7 +123,7 @@ export function App() {
   };
 
   async function handleExport() {
-    if (offlineFallback || mutationPending) return;
+    if (offlineFallback || isUnregistered || mutationPending) return;
     setActionError('');
     try {
       const exported = await exportRepository();
@@ -139,13 +141,18 @@ export function App() {
   }
 
   async function handlePurge() {
-    if (offlineFallback || mutationPending) return;
+    if (offlineFallback || isUnregistered || mutationPending) return;
     const confirmed = window.confirm(`Permanently delete all PreviouslyOn data for ${currentData.repository.path}? This cannot be undone.`);
     if (!confirmed) return;
     const purged = await performMutation(purgeRepository);
     if (purged !== null) {
       setData((current) => current ? {
         ...current,
+        repository: {
+          ...current.repository,
+          state: 'registered-empty',
+          captureHealth: 'good',
+        },
         tasks: [],
         checkpoints: [],
         facts: [],
@@ -229,7 +236,8 @@ export function App() {
           onPreview={() => undefined}
           onExport={() => void handleExport()}
           onPurge={() => void handlePurge()}
-          actionsDisabled={offlineFallback || mutationPending}
+          actionsDisabled={offlineFallback || isUnregistered || mutationPending}
+          previewDisabled={isUnregistered}
         />
         {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
         <div className="app-body empty-app-body">
@@ -242,29 +250,32 @@ export function App() {
             onStatusChange={setStatus}
             onTaskSelect={() => undefined}
             activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
-            onOverviewOpen={() => undefined}
+            onOverviewOpen={() => setWorkspaceView('task')}
             onEvidenceOpen={() => setMobileInspectorOpen(true)}
             onSettingsOpen={() => setWorkspaceView('settings')}
           />
           {workspaceView === 'settings' ? <SettingsPanel capability={data.aiRefreshCapability} /> : <main className="repository-empty-workspace">
+            {isUnregistered ? <FirstRunSetup /> : null}
             <RegressionContractsPanel
               contracts={data.contracts}
               candidates={data.contractCandidates}
               evaluation={data.contractEvaluation}
-              disabled={offlineFallback}
+              disabled={offlineFallback || isUnregistered}
               mutationPending={mutationPending}
               onCreateCandidate={handleCreateContractCandidate}
               onUpdateCandidate={handleUpdateContractCandidate}
               onApproveCandidate={handleApproveContractCandidate}
               onSupersedeContract={handleSupersedeContract}
             />
-            <EmptyWorkspace repositoryName={data.repository.name} />
+            {isUnregistered ? null : data.repository.state === 'degraded'
+              ? <DegradedWorkspace repositoryName={data.repository.name} />
+              : <EmptyWorkspace repositoryName={data.repository.name} />}
           </main>}
         </div>
         <BottomNavigation
           activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
           sessionsEnabled={false}
-          onTasksOpen={() => undefined}
+          onTasksOpen={() => setWorkspaceView('task')}
           onSessionsOpen={() => undefined}
           onEvidenceOpen={() => setMobileInspectorOpen(true)}
           onSettingsOpen={() => setWorkspaceView('settings')}
@@ -512,6 +523,7 @@ export function App() {
         actionsDisabled={offlineFallback || mutationPending}
       />
       {offlineFallback ? <div className="sample-banner" role="status">Local API unavailable · read-only sample workspace · changes are disabled</div> : null}
+      {!offlineFallback && data.repository.state === 'degraded' ? <div className="degraded-banner" role="status">Capture degraded · review missing evidence before trusting this workspace</div> : null}
       {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
       <div className={`app-body ${workspaceView === 'overview' || workspaceView === 'settings' ? 'overview-app-body' : ''}`}>
         <Sidebar
@@ -639,9 +651,21 @@ function EmptyWorkspace({ repositoryName }: { repositoryName: string }) {
   );
 }
 
+function DegradedWorkspace({ repositoryName }: { repositoryName: string }) {
+  return (
+    <section className="repository-empty-state degraded-empty-state">
+      <span className="empty-lineage-mark" aria-hidden="true" />
+      <h1>{repositoryName} capture is degraded</h1>
+      <p>PreviouslyOn found the registered repository, but it cannot confirm a complete first checkpoint. Run <code>previously doctor</code>, then start a new captured session after resolving the reported issue.</p>
+    </section>
+  );
+}
+
 function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
+  const repositoryState = bootstrap.repository.state ?? inferRepositoryState(bootstrap);
   return {
     ...bootstrap,
+    repository: { ...bootstrap.repository, state: repositoryState },
     contracts: bootstrap.contracts ?? [],
     contractCandidates: bootstrap.contractCandidates ?? [],
     contractEvaluation: bootstrap.contractEvaluation ?? null,
@@ -670,6 +694,12 @@ function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
       excludedSession: evidence.excludedSession ?? false,
     })),
   };
+}
+
+function inferRepositoryState(bootstrap: BootstrapData): BootstrapData['repository']['state'] {
+  if (!bootstrap.repository.connected) return 'unregistered';
+  if (bootstrap.repository.captureHealth === 'degraded' || bootstrap.repository.captureHealth === 'offline') return 'degraded';
+  return bootstrap.checkpoints?.length > 0 ? 'active' : 'registered-empty';
 }
 
 function latestFactRefreshOperation(operations: AiFactRefreshOperationV1[], taskId: string) {

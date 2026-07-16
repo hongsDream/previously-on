@@ -506,6 +506,7 @@ export interface BootstrapData {
     path: string;
     branch: string;
     connected: boolean;
+    state: 'unregistered' | 'registered-empty' | 'active' | 'degraded';
     captureHealth: 'good' | 'degraded' | 'offline';
   };
   tasks: Task[];

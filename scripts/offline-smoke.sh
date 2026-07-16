@@ -46,14 +46,81 @@ offline() {
     "$@"
 }
 
+start_ui() {
+  : >"$STAGE/ui.stdout"
+  : >"$STAGE/ui.stderr"
+  offline "$BINARY" ui --bind 127.0.0.1:0 --no-open >"$STAGE/ui.stdout" 2>"$STAGE/ui.stderr" &
+  UI_PID=$!
+  for _ in {1..100}; do
+    grep -F 'PreviouslyOn UI: http://127.0.0.1:' "$STAGE/ui.stdout" >/dev/null 2>&1 && break
+    kill -0 "$UI_PID" 2>/dev/null || {
+      sed -n '1,120p' "$STAGE/ui.stderr" >&2
+      echo "error: loopback UI exited before serving a request" >&2
+      exit 1
+    }
+    sleep 0.05
+  done
+  UI_URL="$(sed -n 's/^PreviouslyOn UI: //p' "$STAGE/ui.stdout" | head -n 1)"
+  [[ "$UI_URL" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || {
+    echo "error: loopback UI did not report a valid ephemeral address" >&2
+    exit 1
+  }
+  rm -f "$STAGE/ui.cookies"
+  for _ in {1..100}; do
+    if curl --fail --silent --max-time 2 \
+      --cookie-jar "$STAGE/ui.cookies" --output "$STAGE/ui.html" "$UI_URL/"; then
+      return
+    fi
+    kill -0 "$UI_PID" 2>/dev/null || {
+      sed -n '1,120p' "$STAGE/ui.stderr" >&2
+      echo "error: loopback UI exited before accepting a request" >&2
+      exit 1
+    }
+    sleep 0.05
+  done
+  echo "error: loopback UI did not accept a request" >&2
+  exit 1
+}
+
+assert_ui_state() {
+  local expected="$1"
+  curl --fail --silent --show-error --max-time 10 \
+    --cookie "$STAGE/ui.cookies" --output "$STAGE/bootstrap-$expected.json" "$UI_URL/api/bootstrap"
+  node -e '
+    const fs = require("node:fs");
+    const [path, expected] = process.argv.slice(1);
+    const value = JSON.parse(fs.readFileSync(path, "utf8"));
+    if (value.repository?.state !== expected) {
+      throw new Error(`expected ${expected}, received ${JSON.stringify(value.repository)}`);
+    }
+    if (expected === "unregistered" && value.contractEvaluation !== null) {
+      throw new Error(`${expected} bootstrap synthesized contractEvaluation`);
+    }
+    if (expected === "active" && (!Array.isArray(value.checkpoints) || value.checkpoints.length < 1)) {
+      throw new Error("active bootstrap has no first checkpoint");
+    }
+  ' "$STAGE/bootstrap-$expected.json" "$expected"
+}
+
+stop_ui() {
+  kill "$UI_PID"
+  wait "$UI_PID" 2>/dev/null || true
+  UI_PID=""
+}
+
 offline "$BINARY" --version
 if offline curl --silent --max-time 2 https://example.com/ >/dev/null 2>&1; then
   echo "error: sandbox unexpectedly allowed non-loopback outbound HTTP" >&2
   exit 1
 fi
+start_ui
+assert_ui_state unregistered
+
 offline "$BINARY" setup codex --repo "$REPO_CANONICAL"
 offline "$BINARY" status
 offline "$BINARY" doctor
+
+assert_ui_state registered-empty
 
 offline "$BINARY" daemon >"$STAGE/daemon.stdout" 2>"$STAGE/daemon.stderr" &
 DAEMON_PID=$!
@@ -84,12 +151,38 @@ node -e '
   if (Object.keys(response).length !== 0) throw new Error("unexpected SessionStart hook response");
 ' "$STAGE/hook-response.json"
 
+node -e '
+  const fs = require("node:fs");
+  const base = {
+    session_id: "offline-session",
+    turn_id: "turn-1",
+    cwd: process.argv[2],
+    timestamp: "2026-07-13T00:00:01Z",
+  };
+  fs.writeFileSync(process.argv[1], `${JSON.stringify({...base, prompt: "Create the first synthetic checkpoint"})}\n`);
+' "$STAGE/prompt.json" "$REPO_CANONICAL"
+offline "$BINARY" hook UserPromptSubmit <"$STAGE/prompt.json" >"$STAGE/prompt-response.json"
+node -e '
+  const fs = require("node:fs");
+  fs.writeFileSync(process.argv[1], `${JSON.stringify({
+    session_id: "offline-session",
+    turn_id: "turn-1",
+    cwd: process.argv[2],
+    timestamp: "2026-07-13T00:00:02Z",
+    last_assistant_message: "Created the first synthetic checkpoint.",
+  })}\n`);
+' "$STAGE/stop.json" "$REPO_CANONICAL"
+offline "$BINARY" hook Stop <"$STAGE/stop.json" >"$STAGE/stop-response.json"
+
+assert_ui_state active
+stop_ui
+
 offline "$BINARY" export --format json >"$STAGE/export-before-purge.json"
 node -e '
   const fs = require("node:fs");
   const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  if (value.canonical_events?.length !== 1) {
-    throw new Error(`daemon/hook delivery did not persist exactly one canonical event: ${JSON.stringify(value)}`);
+  if ((value.canonical_events?.length ?? 0) < 4) {
+    throw new Error(`daemon/hook delivery did not persist the synthetic first-checkpoint transition: ${JSON.stringify(value)}`);
   }
 ' "$STAGE/export-before-purge.json"
 
@@ -108,38 +201,6 @@ node -e '
   const expected = ["explain_fact", "get_task_timeline", "resume_task", "search_tasks", "suggest_resume"].sort();
   if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error("MCP tools/list contract changed");
 ' "$STAGE/mcp-output.jsonl"
-
-offline "$BINARY" ui --bind 127.0.0.1:0 --no-open >"$STAGE/ui.stdout" 2>"$STAGE/ui.stderr" &
-UI_PID=$!
-for _ in {1..100}; do
-  grep -F 'PreviouslyOn UI: http://127.0.0.1:' "$STAGE/ui.stdout" >/dev/null 2>&1 && break
-  kill -0 "$UI_PID" 2>/dev/null || {
-    sed -n '1,120p' "$STAGE/ui.stderr" >&2
-    echo "error: loopback UI exited before serving a request" >&2
-    exit 1
-  }
-  sleep 0.05
-done
-UI_URL="$(sed -n 's/^PreviouslyOn UI: //p' "$STAGE/ui.stdout" | head -n 1)"
-[[ "$UI_URL" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || {
-  echo "error: loopback UI did not report a valid ephemeral address" >&2
-  exit 1
-}
-curl --fail --silent --show-error --max-time 2 \
-  --output "$STAGE/ui.html" --write-out '%{http_code}' \
-  "$UI_URL/" >"$STAGE/ui-status"
-case "$(cat "$STAGE/ui-status" 2>/dev/null || true)" in
-  2*|3*) ;;
-  *)
-    echo "error: loopback UI did not return a successful HTTP status: $(cat "$STAGE/ui-status" 2>/dev/null || true)" >&2
-    sed -n '1,120p' "$STAGE/ui.stdout" >&2
-    sed -n '1,120p' "$STAGE/ui.stderr" >&2
-    exit 1
-    ;;
-esac
-kill "$UI_PID"
-wait "$UI_PID" 2>/dev/null || true
-UI_PID=""
 
 offline "$BINARY" purge --repo "$REPO_CANONICAL"
 wait "$DAEMON_PID" 2>/dev/null || true
@@ -162,4 +223,4 @@ for managed_file in "$STAGE/home/.codex/hooks.json" "$STAGE/home/.codex/config.t
   [[ ! -e "$managed_file" ]] || ! grep -F 'previously-on-v1' "$managed_file" >/dev/null
 done
 
-echo "offline smoke passed: daemon/hook, MCP, loopback UI, export, purge, and uninstall with non-loopback outbound denied"
+echo "offline smoke passed: setup-before -> registered-empty -> first-checkpoint UI transition, daemon/hook, MCP, export, purge, and uninstall with non-loopback outbound denied"
