@@ -6,6 +6,8 @@ pub mod continuation;
 pub mod contracts;
 pub mod domain;
 pub mod git;
+pub mod graph;
+pub mod grouping;
 pub mod hook;
 pub mod mcp;
 pub mod redaction;

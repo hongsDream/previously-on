@@ -223,9 +223,141 @@ pub enum EventKind {
     FactDeprecated,
     RegressionCandidateRecorded,
     ContractEvaluationRecorded,
+    TaskUpdated,
+    TaskGroupingChanged,
     #[default]
     SessionStopped,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskGroupingActionV1 {
+    Move,
+    Merge,
+    Split,
+    Undo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionMoveV1 {
+    pub session_id: String,
+    pub from_task_id: String,
+    pub to_task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskLifecycleSnapshotV1 {
+    pub task_id: String,
+    #[serde(default)]
+    pub before: Option<TaskLifecycle>,
+    #[serde(default)]
+    pub after: Option<TaskLifecycle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FactGroupingImpactV1 {
+    pub fact_id: String,
+    pub from_task_id: String,
+    #[serde(default)]
+    pub to_task_id: Option<String>,
+    pub mixed_provenance: bool,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskGroupingOperationV1 {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub repository_id: String,
+    pub action: TaskGroupingActionV1,
+    pub session_moves: Vec<SessionMoveV1>,
+    #[serde(default)]
+    pub task_lifecycle: Vec<TaskLifecycleSnapshotV1>,
+    #[serde(default)]
+    pub fact_impacts: Vec<FactGroupingImpactV1>,
+    #[serde(default)]
+    pub created_task: Option<TaskV1>,
+    #[serde(default)]
+    pub inverse_of: Option<String>,
+    pub request_fingerprint: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphNodeKindV1 {
+    Task,
+    Session,
+    Commit,
+    File,
+    RegressionContract,
+    VerifiedSymbol,
+    Test,
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphEdgeKindV1 {
+    TaskHasSession,
+    SessionObservedCommit,
+    SessionChangedFile,
+    ContractCoversFile,
+    ContractDeclaresSymbol,
+    ContractRequiresTest,
+    TaskRelevantContract,
+    AgentParent,
+    AgentWorkedOnTask,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphSourceKindV1 {
+    CanonicalEvent,
+    Projection,
+    RegressionContract,
+    ContractEvaluation,
+    AgentObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GraphNodeV1 {
+    pub id: String,
+    pub kind: GraphNodeKindV1,
+    pub label: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GraphEdgeV1 {
+    pub id: String,
+    pub kind: GraphEdgeKindV1,
+    pub from: String,
+    pub to: String,
+    pub provenance_ids: Vec<String>,
+    pub source_kind: GraphSourceKindV1,
+    pub observed_at: DateTime<Utc>,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RelationshipGraphV1 {
+    pub schema_version: u16,
+    pub repository_id: String,
+    #[serde(default)]
+    pub task_filter: Option<String>,
+    pub nodes: Vec<GraphNodeV1>,
+    pub edges: Vec<GraphEdgeV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

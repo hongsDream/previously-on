@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { fallbackData } from './data/fallback';
+import type { BootstrapData, RelationshipGraphV1, TaskGroupingOperationV1 } from './types';
 
 function liveWorkspace() {
   const data = structuredClone(fallbackData);
@@ -128,7 +129,7 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getByRole('main', { name: 'Project overview' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'What this codebase remembers' })).toBeInTheDocument();
     expect(screen.getAllByText('Active tasks').length).toBeGreaterThan(0);
-    expect(screen.getByText('Code map')).toBeInTheDocument();
+    expect(screen.getByText('Verified relationship graph')).toBeInTheDocument();
 
     await user.click(screen.getAllByRole('button', { name: 'Sessions' })[0]);
     expect(screen.getByText('Recent sessions')).toBeInTheDocument();
@@ -153,7 +154,172 @@ describe('PreviouslyOn review workspace', () => {
 
     await user.click(taskButtons[1]);
     expect(taskButtons[1]).toHaveClass('active');
-    expect(screen.getByText('Code map')).toBeInTheDocument();
+    expect(screen.getByText('Verified relationship graph')).toBeInTheDocument();
+  });
+
+  it('edits task title, goal, and lifecycle with the deterministic suggestion contract', async () => {
+    let data = liveWorkspace();
+    data.tasks[0].titleSuggestion = { value: 'Verified authentication boundary', source: 'goal' };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') return { ok: true, json: async () => data };
+      if (path === `/api/tasks/${data.tasks[0].id}` && init?.method === 'PATCH') {
+        const update = JSON.parse(String(init.body));
+        data = {
+          ...data,
+          tasks: data.tasks.map((task) => task.id === data.tasks[0].id ? { ...task, ...update, updatedAt: '2025-05-21T00:00:00Z' } : task),
+        };
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Edit task' }));
+    const editor = screen.getByRole('form', { name: /Edit task Refactor authentication boundary/ });
+    expect(screen.getByText('Source: verified goal first line')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Use suggestion' }));
+    const goal = within(editor).getByLabelText('Goal');
+    await user.clear(goal);
+    await user.type(goal, 'Keep authentication at the verified middleware boundary.');
+    await user.selectOptions(within(editor).getByLabelText('Status'), 'completed');
+    await user.click(screen.getByRole('button', { name: 'Save task' }));
+
+    await waitFor(() => {
+      const mutation = fetchMock.mock.calls.find(([input, init]) => String(input).startsWith('/api/tasks/') && init?.method === 'PATCH');
+      expect(JSON.parse(String(mutation?.[1]?.body))).toEqual({
+        title: 'Verified authentication boundary',
+        goal: 'Keep authentication at the verified middleware boundary.',
+        status: 'completed',
+      });
+    });
+    expect(await screen.findByRole('heading', { name: 'Verified authentication boundary' })).toBeInTheDocument();
+    expect(screen.getByText('completed')).toBeInTheDocument();
+  });
+
+  it('invalidates stale grouping previews, refreshes task-scoped projections, and appends undo history', async () => {
+    let data = liveWorkspace();
+    const sourceTaskId = data.tasks[0].id;
+    const targetTaskId = data.tasks[1].id;
+    const movedSessionId = 'session-auth-2';
+    data.facts[1].provenanceSessionIds = ['session-auth-2', 'session-auth-3'];
+    let latestOperation: typeof data.taskGroupingOperations[number] | null = null;
+    const original = structuredClone(data);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') return { ok: true, json: async () => data };
+      if (path === '/api/task-grouping/preview') {
+        const request = JSON.parse(String(init?.body));
+        latestOperation = groupingOperation(request.operationId, request.targetTaskId, sourceTaskId, movedSessionId, data);
+        return {
+          ok: true,
+          json: async () => ({
+            operation: latestOperation,
+            affectedSessions: latestOperation!.sessionMoves,
+            affectedFacts: latestOperation!.factImpacts,
+            counts: { sessions: 1, factsMoved: 1, factsMixed: 1 },
+          }),
+        };
+      }
+      if (path === '/api/task-grouping') {
+        const request = JSON.parse(String(init?.body));
+        latestOperation = groupingOperation(request.operationId, request.targetTaskId, sourceTaskId, movedSessionId, data);
+        data = {
+          ...data,
+          tasks: data.tasks.map((task) => task.id === sourceTaskId
+            ? { ...task, checkpointIds: task.checkpointIds.filter((id) => id !== 'checkpoint-2') }
+            : task.id === request.targetTaskId ? { ...task, checkpointIds: [...task.checkpointIds, 'checkpoint-2'] } : task),
+          sessions: data.sessions.map((session) => session.id === movedSessionId ? { ...session, taskId: request.targetTaskId } : session),
+          facts: data.facts.map((fact) => fact.id === 'fact-auth-boundary'
+            ? { ...fact, taskId: request.targetTaskId }
+            : fact.id === 'fact-tenant-isolation' ? { ...fact, mixedProvenance: true } : fact),
+          taskGroupingOperations: [latestOperation],
+        };
+        return { ok: true, json: async () => ({ ok: true, operation: latestOperation }) };
+      }
+      if (path === `/api/task-grouping/${latestOperation?.operationId}/undo`) {
+        const inverse = { ...latestOperation!, operationId: 'undo-operation-1', action: 'undo' as const, inverseOf: latestOperation!.operationId, occurredAt: '2025-05-21T00:02:00Z' };
+        data = { ...original, taskGroupingOperations: [latestOperation!, inverse] };
+        return { ok: true, json: async () => ({ ok: true, operation: inverse }) };
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Organize sessions' }));
+    await user.click(screen.getByRole('checkbox', { name: /thread_01HZX4AUTHBOUNDARY02/ }));
+    await user.selectOptions(screen.getByLabelText('Task'), targetTaskId);
+    await user.click(screen.getByRole('button', { name: 'Preview impact' }));
+    expect(await screen.findByRole('heading', { name: 'Impact preview' })).toBeInTheDocument();
+    expect(screen.getByText(/mixed provenance · not duplicated/)).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText('Task'), data.tasks[2].id);
+    expect(screen.queryByRole('button', { name: 'Confirm move' })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('Task'), targetTaskId);
+    await user.click(screen.getByRole('button', { name: 'Preview impact' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm move' }));
+
+    expect(await screen.findByText('Operation history')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Evidence inspector')).not.toBeInTheDocument();
+    const undo = screen.getByRole('button', { name: `Undo grouping operation ${latestOperation!.operationId}` });
+    await user.click(undo);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith(`/${latestOperation!.operationId}/undo`))).toBe(true));
+    expect(await screen.findByText('Undone')).toBeInTheDocument();
+  });
+
+  it('renders the explicit relationship graph with a keyboard-accessible semantic table fallback', async () => {
+    const data = liveWorkspace();
+    data.graphSummary = { nodeCount: 3, edgeCount: 2, verifiedEdgeCount: 2 };
+    const graph = relationshipGraph(data.tasks[0].id);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') return { ok: true, json: async () => data };
+      if (path.startsWith('/api/graph?repository=acme%2Fapi')) return { ok: true, json: async () => graph };
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: 'All tasks' })).toBeInTheDocument();
+    await user.click((await screen.findAllByRole('button', { name: 'Tasks' }))[0]);
+    expect(await screen.findByRole('img', { name: /Relationship graph with 3 nodes and 2 edges/ })).toBeInTheDocument();
+    const listView = screen.getByRole('button', { name: 'List' });
+    listView.focus();
+    await user.keyboard('{Enter}');
+    expect(listView).toHaveAttribute('aria-pressed', 'true');
+    const table = await screen.findByRole('table', { name: 'Explicit relationship edges and provenance' });
+    expect(within(table).getByText('task-has-session')).toBeInTheDocument();
+    expect(within(table).getByText('canonical_event')).toBeInTheDocument();
+    expect(within(table).getAllByText('Verified', { selector: 'span' })).toHaveLength(2);
+    expect(screen.queryByText(/similarity/i)).not.toBeInTheDocument();
+  });
+
+  it('defaults the relationship graph to the list fallback on narrow viewports', async () => {
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(max-width: 900px)',
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    const data = liveWorkspace();
+    data.graphSummary = { nodeCount: 3, edgeCount: 2, verifiedEdgeCount: 2 };
+    const graph = relationshipGraph(data.tasks[0].id);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input) === '/api/bootstrap'
+      ? { ok: true, json: async () => data }
+      : { ok: true, json: async () => graph }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click((await screen.findAllByRole('button', { name: 'Tasks' }))[0]);
+    expect(await screen.findByRole('table', { name: 'Explicit relationship edges and provenance' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('img', { name: /Relationship graph with/ })).not.toBeInTheDocument();
   });
 
   it('edits fact memory and excludes its source session through the local API', async () => {
@@ -449,3 +615,54 @@ describe('PreviouslyOn review workspace', () => {
     await waitFor(() => expect(pin).not.toHaveClass('active'));
   });
 });
+
+function groupingOperation(operationId: string, targetTaskId: string, sourceTaskId: string, sessionId: string, data: BootstrapData): TaskGroupingOperationV1 {
+  return {
+    schemaVersion: 1,
+    operationId,
+    repositoryId: data.tasks[0].repositoryId,
+    action: 'move',
+    sessionMoves: [{ sessionId, fromTaskId: sourceTaskId, toTaskId: targetTaskId }],
+    taskLifecycle: [],
+    factImpacts: [
+      { factId: 'fact-auth-boundary', fromTaskId: sourceTaskId, toTaskId: targetTaskId, mixedProvenance: false, sessionIds: [sessionId] },
+      { factId: 'fact-tenant-isolation', fromTaskId: sourceTaskId, mixedProvenance: true, sessionIds: [sessionId, 'session-auth-3'] },
+    ],
+    requestFingerprint: `fingerprint-${operationId}`,
+    occurredAt: '2025-05-21T00:01:00Z',
+  };
+}
+
+function relationshipGraph(taskId: string): RelationshipGraphV1 {
+  return {
+    schemaVersion: 1,
+    repositoryId: 'acme/api',
+    nodes: [
+      { id: taskId, kind: 'task', label: 'Refactor authentication boundary', taskId },
+      { id: 'session-auth-2', kind: 'session', label: 'Authentication session', taskId },
+      { id: 'src/middleware/auth.ts', kind: 'file', label: 'src/middleware/auth.ts', taskId },
+    ],
+    edges: [
+      {
+        id: 'edge-task-session',
+        kind: 'task-has-session',
+        from: taskId,
+        to: 'session-auth-2',
+        provenanceIds: ['event-task-session'],
+        sourceKind: 'canonical_event',
+        observedAt: '2025-05-21T00:00:00Z',
+        verified: true,
+      },
+      {
+        id: 'edge-session-file',
+        kind: 'session-changed-file',
+        from: 'session-auth-2',
+        to: 'src/middleware/auth.ts',
+        provenanceIds: ['checkpoint-2'],
+        sourceKind: 'projection',
+        observedAt: '2025-05-21T00:00:00Z',
+        verified: true,
+      },
+    ],
+  };
+}
