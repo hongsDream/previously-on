@@ -13,6 +13,24 @@ fn parses_public_cli_surface() {
             target: SetupTarget::Codex { .. }
         }
     ));
+    let setup_ai = Cli::try_parse_from([
+        "previously",
+        "setup",
+        "codex",
+        "--repo",
+        "/tmp/repo",
+        "--enable-ai-refresh",
+    ])
+    .unwrap();
+    assert!(matches!(
+        setup_ai.command,
+        Commands::Setup {
+            target: SetupTarget::Codex {
+                enable_ai_refresh: true,
+                ..
+            }
+        }
+    ));
     for args in [
         vec!["previously", "status"],
         vec!["previously", "doctor"],

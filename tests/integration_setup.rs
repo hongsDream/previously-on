@@ -1,7 +1,8 @@
 use std::fs;
 
 use previously_on::setup::{
-    install_codex, uninstall_codex, uninstall_codex_detailed, SetupPaths, MANAGED_ID,
+    install_codex, install_codex_with_options, uninstall_codex, uninstall_codex_detailed,
+    SetupPaths, MANAGED_ID,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -32,6 +33,151 @@ fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<
     let mut entries = Vec::new();
     walk(root, root, &mut entries);
     entries
+}
+
+#[test]
+fn ai_refresh_profile_is_explicit_input_only_and_never_changes_the_global_default() {
+    let (_temp, paths, repository) = fixture();
+    fs::write(
+        paths.config_path(),
+        "default_permissions = \"user-default\"\n",
+    )
+    .unwrap();
+
+    let manifest = install_codex_with_options(&paths, &repository, true).unwrap();
+    let config = fs::read_to_string(paths.config_path()).unwrap();
+
+    assert!(manifest.ai_refresh_enabled);
+    assert_eq!(
+        manifest.ai_refresh_profile_sha256.as_deref().unwrap().len(),
+        64
+    );
+    assert!(config.contains("default_permissions = \"user-default\""));
+    assert!(config.contains("[permissions.previously-input-only.filesystem]"));
+    assert!(config.contains("\":root\" = \"deny\""));
+    assert!(config.contains("\":minimal\" = \"read\""));
+    assert!(config.contains("\":tmpdir\" = \"deny\""));
+    assert!(config.contains("\":slash_tmp\" = \"deny\""));
+    assert!(config.contains("[permissions.previously-input-only.network]"));
+    assert!(config.contains("enabled = false"));
+
+    let result = uninstall_codex_detailed(&paths).unwrap();
+    assert!(!result.degraded);
+    assert_eq!(
+        fs::read_to_string(paths.config_path()).unwrap(),
+        "default_permissions = \"user-default\"\n"
+    );
+}
+
+#[test]
+fn ai_refresh_profile_collision_is_a_strict_no_mutation_failure() {
+    let (temp, paths, repository) = fixture();
+    fs::write(
+        paths.config_path(),
+        "[permissions.previously-input-only.network]\nenabled = true\n",
+    )
+    .unwrap();
+    let before = tree_snapshot(temp.path());
+
+    let error = install_codex_with_options(&paths, &repository, true).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("already exists and is not managed"));
+    assert_eq!(tree_snapshot(temp.path()), before);
+}
+
+#[test]
+fn uninstall_preserves_a_user_modified_ai_refresh_profile() {
+    let (_temp, paths, repository) = fixture();
+    install_codex_with_options(&paths, &repository, true).unwrap();
+    let mut config = fs::read_to_string(paths.config_path()).unwrap();
+    config = config.replace("enabled = false", "enabled = true");
+    fs::write(paths.config_path(), &config).unwrap();
+    let manifest = previously_on::setup::read_manifest(&paths.manifest_path()).unwrap();
+    assert!(!previously_on::setup::ai_refresh_profile_matches(&paths, &manifest).unwrap());
+
+    let result = uninstall_codex_detailed(&paths).unwrap();
+    let after = fs::read_to_string(paths.config_path()).unwrap();
+
+    assert!(result.degraded);
+    assert!(after.contains("[permissions.previously-input-only.network]"));
+    assert!(after.contains("enabled = true"));
+    assert!(!after.contains("mcp_servers.previously_on"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ai_refresh_capability_is_ready_only_for_an_unchanged_allowed_profile() {
+    use previously_on::ai_refresh::{inspect_capability_with_program, AiRefreshCapabilityStatusV1};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fake_server(root: &std::path::Path, name: &str, allowed: bool) -> std::path::PathBuf {
+        let path = root.join(name);
+        fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+IFS= read -r initialize
+case "$initialize" in *'"experimentalApi":true'*) ;; *) exit 10 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"userAgent":"codex-cli/test"}}}}'
+IFS= read -r initialized
+IFS= read -r profiles
+case "$profiles" in *'"method":"permissionProfile/list"'*) ;; *) exit 11 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"data":[{{"id":"previously-input-only","allowed":{allowed}}}],"nextCursor":null}}}}'
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    let (temp, paths, repository) = fixture();
+    install_codex_with_options(&paths, &repository, true).unwrap();
+    let allowed = fake_server(temp.path(), "allowed-app-server", true);
+    let denied = fake_server(temp.path(), "denied-app-server", false);
+
+    let ready = inspect_capability_with_program(&paths, &repository, &allowed)
+        .await
+        .unwrap();
+    assert_eq!(ready.status, AiRefreshCapabilityStatusV1::Ready);
+    let blocked = inspect_capability_with_program(&paths, &repository, &denied)
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, AiRefreshCapabilityStatusV1::Blocked);
+
+    let config = fs::read_to_string(paths.config_path())
+        .unwrap()
+        .replace("enabled = false", "enabled = true");
+    fs::write(paths.config_path(), config).unwrap();
+    let changed = inspect_capability_with_program(
+        &paths,
+        &repository,
+        &temp.path().join("must-not-be-started"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(changed.status, AiRefreshCapabilityStatusV1::Blocked);
+    assert!(changed.reason.unwrap().contains("changed or is missing"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ai_refresh_capability_reports_unsupported_app_server_without_enabling_refresh() {
+    use previously_on::ai_refresh::{inspect_capability_with_program, AiRefreshCapabilityStatusV1};
+    use std::os::unix::fs::PermissionsExt;
+
+    let (temp, paths, repository) = fixture();
+    install_codex_with_options(&paths, &repository, true).unwrap();
+    let fake = temp.path().join("unsupported-app-server");
+    fs::write(&fake, "#!/bin/sh\nexit 7\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let report = inspect_capability_with_program(&paths, &repository, &fake)
+        .await
+        .unwrap();
+    assert_eq!(report.status, AiRefreshCapabilityStatusV1::Unsupported);
 }
 
 fn fixture() -> (TempDir, SetupPaths, std::path::PathBuf) {

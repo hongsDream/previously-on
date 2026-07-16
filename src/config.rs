@@ -103,6 +103,9 @@ pub enum SetupTarget {
     Codex {
         #[arg(long)]
         repo: PathBuf,
+        /// Explicitly install the beta input-only permission profile for user-triggered fact refresh.
+        #[arg(long)]
+        enable_ai_refresh: bool,
     },
 }
 
@@ -211,9 +214,14 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
     let config = AppConfig::resolve(cli.data_dir)?;
     match cli.command {
         Commands::Setup {
-            target: SetupTarget::Codex { repo },
+            target:
+                SetupTarget::Codex {
+                    repo,
+                    enable_ai_refresh,
+                },
         } => {
-            let manifest = setup::install_codex(&config.setup_paths(), &repo)?;
+            let manifest =
+                setup::install_codex_with_options(&config.setup_paths(), &repo, enable_ai_refresh)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Commands::Status => {
@@ -602,6 +610,29 @@ async fn import_codex_threads(config: &AppConfig, repo: &Path) -> Result<()> {
         store.insert_event(&event)?;
     }
     client.shutdown().await?;
+    let agent_lineage = match AppServerClient::connect_experimental().await {
+        Ok(mut lineage_client) => {
+            let observed = crate::app_server::collect_agent_lineage(
+                &mut lineage_client,
+                &store,
+                &repository.root,
+                &repository_id,
+            )
+            .await;
+            lineage_client.shutdown().await.ok();
+            observed
+        }
+        Err(error) => Err(error),
+    };
+    let (observed_agents, agent_lineage_warning) = match agent_lineage {
+        Ok(agents) => (agents.len(), None),
+        Err(error) => (
+            0,
+            Some(crate::redaction::redact_excerpt(&format!(
+                "agent lineage unavailable: {error}"
+            ))),
+        ),
+    };
     let semantic_coverage = CoverageV1::merge(semantic_coverages.iter());
     println!(
         "{}",
@@ -612,7 +643,9 @@ async fn import_codex_threads(config: &AppConfig, repo: &Path) -> Result<()> {
             "capability": capability,
             "coverage": import_report.coverage,
             "semanticCoverage": semantic_coverage,
-            "notices": import_report.notices
+            "notices": import_report.notices,
+            "observedAgents": observed_agents,
+            "agentLineageWarning": agent_lineage_warning
         }))?
     );
     Ok(())

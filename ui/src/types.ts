@@ -1,12 +1,76 @@
 export type Freshness = 'fresh' | 'stale' | 'broken';
 export type TemporalStatus = 'unchanged' | 'changed' | 'diverged' | 'broken' | 'degraded';
 export type FactStatus = 'candidate' | 'confirmed' | 'pinned' | 'invalid' | 'superseded';
+export type FactKind = 'decision' | 'constraint' | 'open_item' | 'progress' | 'goal' | 'note';
 export type TaskStatus = 'active' | 'completed' | 'abandoned';
 export type ContinuationState = 'normal' | 'eligible' | 'suggested';
 export type ContractStatus = 'active' | 'superseded';
 export type ContractReadiness = 'ready' | 'contract_blocked';
 export type RequiredTestStatus = 'passed' | 'failed' | 'missing' | 'stale';
 export type TaskGroupingAction = 'move' | 'merge' | 'split' | 'undo';
+export type AiRefreshCapabilityStatus = 'ready' | 'needs_setup' | 'unsupported' | 'blocked';
+export type AiFactRefreshStatus = 'pending' | 'thread_created' | 'completed' | 'failed';
+export type AiFactCandidateAction = 'add' | 'update' | 'deprecate';
+export type AiFactCandidateStatus = 'pending' | 'accepted' | 'rejected';
+export type AgentAssociationState = 'linked' | 'unlinked' | 'degraded';
+
+export interface AiRefreshCapabilityV1 {
+  status: AiRefreshCapabilityStatus;
+  profileName: string;
+  reason?: string | null;
+  checkedAt?: string | null;
+}
+
+export interface AiFactCandidateV1 {
+  schemaVersion: 1;
+  id: string;
+  operationId: string;
+  action: AiFactCandidateAction;
+  factId?: string | null;
+  kind: FactKind;
+  content: string;
+  reason: string;
+  status: AiFactCandidateStatus;
+}
+
+export interface AiFactRefreshOperationV1 {
+  schemaVersion: 1;
+  operationId: string;
+  repositoryId: string;
+  taskId: string;
+  status: AiFactRefreshStatus;
+  requestFingerprint: string;
+  threadId?: string | null;
+  candidates: AiFactCandidateV1[];
+  modelId?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  latencyMs?: number | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentV1 {
+  schemaVersion: 1;
+  id: string;
+  repositoryId: string;
+  threadId: string;
+  sessionId?: string | null;
+  parentThreadId?: string | null;
+  forkedFromId?: string | null;
+  taskId?: string | null;
+  sourceKind: 'interactive' | 'subAgent' | 'subAgentReview' | 'subAgentCompact' | 'subAgentThreadSpawn' | 'subAgentOther';
+  role: string;
+  status: string;
+  name: string;
+  outputSummary?: string | null;
+  files: string[];
+  tests: string[];
+  observedAt: string;
+  associationState: AgentAssociationState;
+  degradedReason?: string | null;
+}
 
 export interface TaskTitleSuggestionV1 {
   value: string;
@@ -301,7 +365,7 @@ export interface Evidence {
 export interface Fact {
   id: string;
   taskId: string;
-  kind: 'decision' | 'constraint' | 'open_item' | 'progress' | 'goal' | 'note';
+  kind: FactKind;
   text: string;
   status: FactStatus;
   confirmedAt?: string;
@@ -455,6 +519,9 @@ export interface BootstrapData {
   contractEvaluations: ContractEvaluationV1[];
   taskGroupingOperations: TaskGroupingOperationV1[];
   graphSummary: RelationshipGraphSummaryV1;
+  aiRefreshCapability: AiRefreshCapabilityV1;
+  factRefreshOperations: AiFactRefreshOperationV1[];
+  agents: AgentV1[];
   resumeCandidate?: ResumeCandidate;
   contextPacks: Record<string, ContextPack>;
 }

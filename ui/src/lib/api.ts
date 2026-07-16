@@ -1,7 +1,11 @@
 import type {
+  AiFactCandidateV1,
+  AiFactRefreshOperationV1,
   BootstrapData,
   ContractEvaluationV1,
   FactStatus,
+  Fact,
+  FactKind,
   RegressionCandidateDraftV1,
   RegressionCandidateV1,
   RegressionContractV1,
@@ -11,6 +15,20 @@ import type {
   TaskGroupingRequestV1,
   TaskUpdateV1,
 } from '../types';
+
+export interface FactCandidateReviewResponse {
+  ok: true;
+  candidate: AiFactCandidateV1;
+  fact?: Fact | {
+    id: string;
+    taskId: string;
+    kind: FactKind;
+    lifecycle: FactStatus;
+    content: string;
+    updatedAt: string;
+    evidenceIds?: string[];
+  } | null;
+}
 
 export interface ContractMutationResponse {
   ok?: true;
@@ -39,7 +57,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ...init?.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new ApiUnavailableError();
   }
 
@@ -128,6 +147,34 @@ export function fetchRelationshipGraph(repositoryId: string, taskId?: string, si
   const query = new URLSearchParams({ repository: repositoryId });
   if (taskId) query.set('task', taskId);
   return request<RelationshipGraphV1>(`/api/graph?${query.toString()}`, { signal });
+}
+
+export function startFactRefresh(taskId: string, requestId: string) {
+  return request<AiFactRefreshOperationV1>(`/api/tasks/${encodeURIComponent(taskId)}/fact-refresh`, {
+    method: 'POST',
+    body: JSON.stringify({ requestId }),
+  });
+}
+
+export function fetchFactRefresh(operationId: string, signal?: AbortSignal) {
+  return request<AiFactRefreshOperationV1>(`/api/fact-refresh/${encodeURIComponent(operationId)}`, { signal });
+}
+
+export function reviewFactRefreshCandidate(
+  operationId: string,
+  candidateId: string,
+  decision: 'accept' | 'reject',
+  content?: string,
+  kind?: FactKind,
+) {
+  return request<FactCandidateReviewResponse>(`/api/fact-refresh/${encodeURIComponent(operationId)}/candidates/${encodeURIComponent(candidateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      decision,
+      ...(content === undefined ? {} : { content }),
+      ...(kind === undefined ? {} : { kind }),
+    }),
+  });
 }
 
 export function createContractCandidate(candidate: RegressionCandidateDraftV1) {

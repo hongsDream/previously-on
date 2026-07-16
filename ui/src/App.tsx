@@ -4,11 +4,13 @@ import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
 import { ProjectOverview } from './components/ProjectOverview';
 import { Sidebar } from './components/Sidebar';
+import { SettingsPanel } from './components/SettingsPanel';
 import { TaskWorkspace } from './components/TaskWorkspace';
 import { RegressionContractsPanel } from './components/RegressionContractsPanel';
 import { fallbackData } from './data/fallback';
 import {
   exportRepository,
+  fetchFactRefresh,
   fetchBootstrap,
   ApiUnavailableError,
   approveContractCandidate,
@@ -17,6 +19,8 @@ import {
   previewTaskGrouping,
   purgeRepository,
   revalidateFact,
+  reviewFactRefreshCandidate,
+  startFactRefresh,
   supersedeRegressionContract,
   updateContractCandidate,
   updateFactStatus,
@@ -25,11 +29,14 @@ import {
   undoTaskGrouping,
   updateTask,
 } from './lib/api';
-import type { ContractMutationResponse } from './lib/api';
+import type { ContractMutationResponse, FactCandidateReviewResponse } from './lib/api';
 import type {
+  AiFactRefreshOperationV1,
   BootstrapData,
   Checkpoint,
   FactStatus,
+  Fact,
+  FactKind,
   RegressionCandidateDraftV1,
   TaskGroupingPreviewV1,
   TaskGroupingRequestV1,
@@ -44,7 +51,7 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = useState('');
   const [selectedCheckpointId, setSelectedCheckpointId] = useState('');
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('');
-  const [workspaceView, setWorkspaceView] = useState<'overview' | 'task'>('task');
+  const [workspaceView, setWorkspaceView] = useState<'overview' | 'task' | 'settings'>('task');
   const [overviewFocus, setOverviewFocus] = useState<'tasks' | 'sessions'>('tasks');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<TaskStatus | 'all'>('all');
@@ -234,11 +241,12 @@ export function App() {
             onQueryChange={setQuery}
             onStatusChange={setStatus}
             onTaskSelect={() => undefined}
-            activeNavigation="tasks"
+            activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
             onOverviewOpen={() => undefined}
             onEvidenceOpen={() => setMobileInspectorOpen(true)}
+            onSettingsOpen={() => setWorkspaceView('settings')}
           />
-          <main className="repository-empty-workspace">
+          {workspaceView === 'settings' ? <SettingsPanel capability={data.aiRefreshCapability} /> : <main className="repository-empty-workspace">
             <RegressionContractsPanel
               contracts={data.contracts}
               candidates={data.contractCandidates}
@@ -251,14 +259,15 @@ export function App() {
               onSupersedeContract={handleSupersedeContract}
             />
             <EmptyWorkspace repositoryName={data.repository.name} />
-          </main>
+          </main>}
         </div>
         <BottomNavigation
-          activeNavigation="tasks"
+          activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
           sessionsEnabled={false}
           onTasksOpen={() => undefined}
           onSessionsOpen={() => undefined}
           onEvidenceOpen={() => setMobileInspectorOpen(true)}
+          onSettingsOpen={() => setWorkspaceView('settings')}
         />
       </div>
     );
@@ -294,6 +303,11 @@ export function App() {
   const openOverview = (focus: 'tasks' | 'sessions') => {
     setOverviewFocus(focus);
     setWorkspaceView('overview');
+    setMobileInspectorOpen(false);
+  };
+
+  const openSettings = () => {
+    setWorkspaceView('settings');
     setMobileInspectorOpen(false);
   };
 
@@ -435,6 +449,59 @@ export function App() {
     selectedTask.id,
   );
 
+  const installFactRefreshOperation = (operation: AiFactRefreshOperationV1) => {
+    setData((current) => current ? {
+      ...current,
+      factRefreshOperations: current.factRefreshOperations.some((item) => item.operationId === operation.operationId)
+        ? current.factRefreshOperations.map((item) => item.operationId === operation.operationId ? operation : item)
+        : [...current.factRefreshOperations, operation],
+    } : current);
+  };
+
+  const handleFactRefreshStart = async (requestId: string): Promise<AiFactRefreshOperationV1 | null> => {
+    if (offlineFallback || mutationPending || currentData.aiRefreshCapability.status !== 'ready') return null;
+    const operation = await performMutation(() => startFactRefresh(selectedTask.id, requestId));
+    if (operation) installFactRefreshOperation(operation);
+    return operation;
+  };
+
+  const handleFactRefreshPoll = async (operationId: string, signal: AbortSignal): Promise<AiFactRefreshOperationV1 | null> => {
+    if (offlineFallback) return null;
+    try {
+      const operation = await fetchFactRefresh(operationId, signal);
+      installFactRefreshOperation(operation);
+      return operation;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return null;
+      console.error('PreviouslyOn fact refresh polling failed', error);
+      setActionError(error instanceof Error ? error.message : 'The local refresh status could not be checked.');
+      return null;
+    }
+  };
+
+  const handleFactRefreshReview = async (
+    operationId: string,
+    candidateId: string,
+    decision: 'accept' | 'reject',
+    content?: string,
+    kind?: FactKind,
+  ) => {
+    const result = await performMutation(() => reviewFactRefreshCandidate(operationId, candidateId, decision, content, kind));
+    if (!result) return null;
+    const reviewedFact = normalizeReviewedFact(result.fact);
+    setData((current) => current ? {
+      ...current,
+      facts: reviewedFact
+        ? [...current.facts.filter((fact) => fact.id !== reviewedFact.id), reviewedFact]
+        : current.facts,
+      factRefreshOperations: current.factRefreshOperations.map((operation) => operation.operationId === operationId ? {
+        ...operation,
+        candidates: operation.candidates.map((candidate) => candidate.id === candidateId ? result.candidate : candidate),
+      } : operation),
+    } : current);
+    return result;
+  };
+
   return (
     <div className="app-shell">
       <AppHeader
@@ -446,7 +513,7 @@ export function App() {
       />
       {offlineFallback ? <div className="sample-banner" role="status">Local API unavailable · read-only sample workspace · changes are disabled</div> : null}
       {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
-      <div className={`app-body ${workspaceView === 'overview' ? 'overview-app-body' : ''}`}>
+      <div className={`app-body ${workspaceView === 'overview' || workspaceView === 'settings' ? 'overview-app-body' : ''}`}>
         <Sidebar
           query={query}
           status={status}
@@ -455,11 +522,12 @@ export function App() {
           onQueryChange={setQuery}
           onStatusChange={setStatus}
           onTaskSelect={selectTask}
-          activeNavigation={workspaceView === 'overview' ? overviewFocus : 'task'}
+          activeNavigation={workspaceView === 'overview' ? overviewFocus : workspaceView}
           onOverviewOpen={openOverview}
           onEvidenceOpen={() => setMobileInspectorOpen(true)}
+          onSettingsOpen={openSettings}
         />
-        {workspaceView === 'overview' ? (
+        {workspaceView === 'settings' ? <SettingsPanel capability={data.aiRefreshCapability} /> : workspaceView === 'overview' ? (
           <ProjectOverview
             tasks={filteredTasks}
             graphTasks={data.tasks}
@@ -478,6 +546,9 @@ export function App() {
           sessions={data.sessions}
           facts={data.facts}
           groupingOperations={data.taskGroupingOperations}
+          aiRefreshCapability={data.aiRefreshCapability}
+          factRefreshOperation={latestFactRefreshOperation(data.factRefreshOperations, selectedTask.id)}
+          agents={data.agents}
           checkpoints={taskCheckpoints}
           selectedCheckpoint={selectedCheckpoint}
           resumeCandidate={resumeCandidate}
@@ -494,6 +565,9 @@ export function App() {
           onGroupingPreview={handleGroupingPreview}
           onGroupingApply={handleGroupingApply}
           onGroupingUndo={handleGroupingUndo}
+          onFactRefreshStart={handleFactRefreshStart}
+          onFactRefreshPoll={handleFactRefreshPoll}
+          onFactRefreshReview={handleFactRefreshReview}
           onCreateContractCandidate={handleCreateContractCandidate}
           onUpdateContractCandidate={handleUpdateContractCandidate}
           onApproveContractCandidate={handleApproveContractCandidate}
@@ -520,11 +594,12 @@ export function App() {
         ) : null}
       </div>
       <BottomNavigation
-        activeNavigation={workspaceView === 'overview' ? overviewFocus : 'tasks'}
+        activeNavigation={workspaceView === 'settings' ? 'settings' : workspaceView === 'overview' ? overviewFocus : 'tasks'}
         sessionsEnabled={data.sessions.length > 0}
         onTasksOpen={() => openOverview('tasks')}
         onSessionsOpen={() => openOverview('sessions')}
         onEvidenceOpen={() => setMobileInspectorOpen(true)}
+        onSettingsOpen={openSettings}
       />
     </div>
   );
@@ -573,6 +648,13 @@ function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
     contractEvaluations: bootstrap.contractEvaluations ?? [],
     taskGroupingOperations: bootstrap.taskGroupingOperations ?? [],
     graphSummary: bootstrap.graphSummary ?? { nodeCount: 0, edgeCount: 0, verifiedEdgeCount: 0 },
+    aiRefreshCapability: bootstrap.aiRefreshCapability ?? {
+      status: 'blocked',
+      profileName: 'previously-input-only',
+      reason: 'The local API did not provide a verified AI refresh capability.',
+    },
+    factRefreshOperations: bootstrap.factRefreshOperations ?? [],
+    agents: bootstrap.agents ?? [],
     sessions: bootstrap.sessions ?? [],
     facts: (bootstrap.facts ?? []).map((fact) => ({
       ...fact,
@@ -587,6 +669,29 @@ function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
       sessionId: evidence.sessionId ?? '',
       excludedSession: evidence.excludedSession ?? false,
     })),
+  };
+}
+
+function latestFactRefreshOperation(operations: AiFactRefreshOperationV1[], taskId: string) {
+  return operations
+    .filter((operation) => operation.taskId === taskId)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+}
+
+function normalizeReviewedFact(fact: FactCandidateReviewResponse['fact']): Fact | null {
+  if (!fact) return null;
+  if ('text' in fact) return fact;
+  return {
+    id: fact.id,
+    taskId: fact.taskId,
+    kind: fact.kind,
+    text: fact.content,
+    status: fact.lifecycle,
+    updatedAt: fact.updatedAt,
+    evidenceIds: fact.evidenceIds ?? [],
+    relatedFiles: [],
+    mixedProvenance: false,
+    provenanceSessionIds: [],
   };
 }
 

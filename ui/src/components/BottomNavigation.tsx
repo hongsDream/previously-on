@@ -8,18 +8,20 @@ const items = [
 ];
 
 interface BottomNavigationProps {
-  activeNavigation: 'tasks' | 'sessions';
+  activeNavigation: 'tasks' | 'sessions' | 'settings';
   sessionsEnabled: boolean;
   onTasksOpen: () => void;
   onSessionsOpen: () => void;
   onEvidenceOpen: () => void;
+  onSettingsOpen: () => void;
 }
 
-export function BottomNavigation({ activeNavigation, sessionsEnabled, onTasksOpen, onSessionsOpen, onEvidenceOpen }: BottomNavigationProps) {
+export function BottomNavigation({ activeNavigation, sessionsEnabled, onTasksOpen, onSessionsOpen, onEvidenceOpen, onSettingsOpen }: BottomNavigationProps) {
   const actions: Record<string, (() => void) | undefined> = {
     Tasks: onTasksOpen,
     Sessions: onSessionsOpen,
     Evidence: onEvidenceOpen,
+    Settings: onSettingsOpen,
   };
   return (
     <nav className="bottom-navigation mobile-only" aria-label="Mobile navigation">
@@ -28,7 +30,7 @@ export function BottomNavigation({ activeNavigation, sessionsEnabled, onTasksOpe
           key={label}
           className={label.toLowerCase() === activeNavigation ? 'active' : ''}
           type="button"
-          disabled={label === 'Settings' || (label === 'Sessions' && !sessionsEnabled)}
+          disabled={label === 'Sessions' && !sessionsEnabled}
           onClick={actions[label]}
         >
           <Icon size={22} strokeWidth={1.8} />

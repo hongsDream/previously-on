@@ -707,6 +707,7 @@ fn context_pack_honors_session_exclusion_and_commit_deprecation_controls() {
             kind: FactKind::Decision,
             lifecycle: FactLifecycle::Confirmed,
             freshness: Freshness::Fresh,
+            origin: previously_on::domain::FactOriginV1::Captured,
             content: "Keep the verified boundary.".into(),
             evidence_ids: vec![evidence.id.clone()],
             superseded_by: None,

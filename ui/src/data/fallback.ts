@@ -399,6 +399,13 @@ export const fallbackData: BootstrapData = {
     edgeCount: 0,
     verifiedEdgeCount: 0,
   },
+  aiRefreshCapability: {
+    status: 'blocked',
+    profileName: 'previously-input-only',
+    reason: 'The read-only sample workspace cannot verify the local App Server permission profile.',
+  },
+  factRefreshOperations: [],
+  agents: [],
   resumeCandidate: {
     id: 'resume-auth-boundary',
     taskId: 'task_01HZX3P7K2BBQW9F7D8Z1A2C3V',

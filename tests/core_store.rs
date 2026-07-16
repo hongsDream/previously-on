@@ -64,6 +64,40 @@ fn event(kind: EventKind, time: i64, payload: serde_json::Value) -> EventEnvelop
 }
 
 #[test]
+fn fact_origin_defaults_to_captured_and_replays_explicit_origin() {
+    let legacy = json!({
+        "schema_version": SCHEMA_VERSION_V1,
+        "id": "legacy-fact",
+        "repository_id": "repo-1",
+        "task_id": "task-1",
+        "kind": "decision",
+        "lifecycle": "confirmed",
+        "freshness": "fresh",
+        "content": "legacy",
+        "evidence_ids": [],
+        "superseded_by": null,
+        "created_at": at(1),
+        "updated_at": at(1)
+    });
+    let parsed: FactV1 = serde_json::from_value(legacy).unwrap();
+    assert_eq!(parsed.origin, previously_on::domain::FactOriginV1::Captured);
+
+    let temp = TempDir::new().unwrap();
+    let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+    let mut manual = parsed;
+    manual.id = "manual-fact".into();
+    manual.origin = previously_on::domain::FactOriginV1::Manual;
+    store
+        .insert_event(&event(EventKind::FactConfirmed, 2, json!({"fact": manual})))
+        .unwrap();
+    store.rebuild_projections().unwrap();
+    assert_eq!(
+        store.get_fact("manual-fact").unwrap().unwrap().origin,
+        previously_on::domain::FactOriginV1::Manual
+    );
+}
+
+#[test]
 fn deduplicates_and_replays_reordered_events_deterministically() {
     let temp = TempDir::new().unwrap();
     let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
@@ -117,6 +151,7 @@ fn redacts_before_canonical_persistence_and_rebuilds_fact_projection() {
         kind: FactKind::Decision,
         lifecycle: FactLifecycle::Confirmed,
         freshness: Freshness::Fresh,
+        origin: previously_on::domain::FactOriginV1::Captured,
         content: "Tokens stay server-side".into(),
         evidence_ids: vec!["evidence-1".into()],
         superseded_by: None,
@@ -533,6 +568,7 @@ fn retention_keeps_only_recent_events_and_minimum_pinned_evidence() {
         kind: FactKind::Decision,
         lifecycle: FactLifecycle::Pinned,
         freshness: Freshness::Fresh,
+        origin: previously_on::domain::FactOriginV1::Captured,
         content: "Keep auth enforcement in middleware".into(),
         evidence_ids: vec![pinned_evidence.id.clone()],
         superseded_by: None,
