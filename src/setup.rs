@@ -521,7 +521,11 @@ pub fn merge_hooks(
             "timeout": if event == "Stop" { 30 } else { 10 }
         });
         if event == "UserPromptSubmit" {
-            hook["timeout"] = json!(5);
+            // Automatic rollover creates a durable Context Pack and starts a fresh App Server
+            // thread before it blocks the old prompt. Keep this bounded, but leave enough time
+            // for initialize, thread/start, optional name, and turn/start round trips on a cold
+            // App Server. Each individual RPC still has its own shorter client deadline.
+            hook["timeout"] = json!(60);
         }
         let mut group = json!({ "hooks": [hook] });
         if event == "SessionStart" {

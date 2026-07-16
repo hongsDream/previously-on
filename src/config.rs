@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, ExitCode, Stdio};
@@ -92,6 +93,9 @@ pub enum Commands {
     /// Run the read-only MCP server over stdio.
     #[command(hide = true)]
     Mcp,
+    /// Create a verified fresh-task continuation. Invoked only by the managed prompt hook.
+    #[command(hide = true)]
+    AutoRollover,
 }
 
 #[derive(Debug, Subcommand)]
@@ -313,6 +317,22 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             let repository_id = config.repository_id()?;
             let backend = crate::mcp::StoreMcpBackend::open(&config.database_path, repository_id)?;
             crate::mcp::run_stdio(&backend, tokio::io::stdin(), tokio::io::stdout()).await?;
+        }
+        Commands::AutoRollover => {
+            let mut input = Vec::new();
+            std::io::stdin()
+                .take(crate::hook::MAX_HOOK_PAYLOAD_BYTES as u64 + 1)
+                .read_to_end(&mut input)?;
+            if input.len() > crate::hook::MAX_HOOK_PAYLOAD_BYTES {
+                bail!("automatic rollover request exceeds the input limit");
+            }
+            let request =
+                serde_json::from_slice::<crate::continuation::AutomaticRolloverRequestV1>(&input)
+                    .context("parse automatic rollover request")?;
+            let result =
+                crate::continuation::execute_automatic_rollover(&config.database_path, request)
+                    .await?;
+            println!("{}", serde_json::to_string(&result)?);
         }
     }
     Ok(ExitCode::SUCCESS)

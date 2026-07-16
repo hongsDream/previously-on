@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE_NAME="$(awk -F ' *= *' '/^name = / { gsub(/"/, "", $2); print $2; exit }' "$ROOT/Cargo.toml")"
 VERSION="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' "$ROOT/Cargo.toml")"
-EXPECTED_VERSION="${EXPECTED_VERSION:-0.1.0-alpha.1}"
+EXPECTED_VERSION="${EXPECTED_VERSION:-0.1.0-alpha.2}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/outputs}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 RELEASE_GIT_COMMIT=""

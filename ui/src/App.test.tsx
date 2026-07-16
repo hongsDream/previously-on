@@ -40,8 +40,16 @@ describe('PreviouslyOn review workspace', () => {
   it('renders session age, rollover pressure, and Git revalidation details', async () => {
     render(<App />);
 
+    const lineage = await screen.findByRole('region', { name: 'Codebase lineage' });
+    expect(within(lineage).getAllByText('acme/api')).toHaveLength(2);
+    expect(within(lineage).getByText('~/Projects/acme-app')).toBeInTheDocument();
+    expect(within(lineage).getByText('feat/auth-boundary')).toBeInTheDocument();
+    expect(within(lineage).getByText('3 captured')).toBeInTheDocument();
+    expect(within(lineage).getByText('3 verified checkpoints')).toBeInTheDocument();
+    expect(within(lineage).getAllByText('Relevant code changed')).toHaveLength(2);
+    expect(within(lineage).getByText('src/auth/')).toBeInTheDocument();
     expect(await screen.findByText('New thread suggested')).toBeInTheDocument();
-    expect(screen.getAllByText('6 compactions').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('7 compactions').length).toBeGreaterThan(0);
     expect(screen.getByText('81% used')).toBeInTheDocument();
     expect(screen.getAllByText('Relevant code changed').length).toBeGreaterThan(0);
     expect(screen.getByText('src/middleware/auth.ts → src/middleware/access.ts')).toBeInTheDocument();
@@ -104,6 +112,83 @@ describe('PreviouslyOn review workspace', () => {
 
     expect(screen.getByRole('heading', { name: 'Add tenant audit trail' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'No checkpoints yet' })).toBeInTheDocument();
+    const lineage = screen.getByRole('region', { name: 'Codebase lineage' });
+    expect(within(lineage).getByText('feat/tenant-audit')).toBeInTheDocument();
+    expect(within(lineage).getByText('~/Projects/acme-app/.worktrees/tenant-audit')).toBeInTheDocument();
+    expect(within(lineage).getByText('0 captured')).toBeInTheDocument();
+    expect(within(lineage).getByText('No source task IDs captured')).toBeInTheDocument();
+  });
+
+  it('shows the project overview and recent Codex sessions from primary navigation', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Refactor authentication boundary' });
+    await user.click(screen.getAllByRole('button', { name: 'Tasks' })[0]);
+    expect(screen.getByRole('main', { name: 'Project overview' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'What this codebase remembers' })).toBeInTheDocument();
+    expect(screen.getAllByText('Active tasks').length).toBeGreaterThan(0);
+    expect(screen.getByText('Code map')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: 'Sessions' })[0]);
+    expect(screen.getByText('Recent sessions')).toBeInTheDocument();
+    expect(screen.getByText('thread_01HZX4AUTHBOUNDARY03')).toBeInTheDocument();
+    expect(screen.getByText('7 compactions · 81% context')).toBeInTheDocument();
+  });
+
+  it('connects mobile Tasks and Sessions navigation to the same project overview', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Refactor authentication boundary' });
+    const taskButtons = screen.getAllByRole('button', { name: 'Tasks' });
+    const sessionButtons = screen.getAllByRole('button', { name: 'Sessions' });
+    expect(taskButtons).toHaveLength(2);
+    expect(sessionButtons).toHaveLength(2);
+    expect(sessionButtons[1]).toBeEnabled();
+
+    await user.click(sessionButtons[1]);
+    expect(screen.getByRole('main', { name: 'Project overview' })).toBeInTheDocument();
+    expect(sessionButtons[1]).toHaveClass('active');
+
+    await user.click(taskButtons[1]);
+    expect(taskButtons[1]).toHaveClass('active');
+    expect(screen.getByText('Code map')).toBeInTheDocument();
+  });
+
+  it('edits fact memory and excludes its source session through the local API', async () => {
+    const data = liveWorkspace();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') return { ok: true, json: async () => data };
+      if (path.startsWith('/api/facts/')) {
+        const body = JSON.parse(String(init?.body));
+        return { ok: true, json: async () => ({ ok: true, text: body.content, status: body.status, updatedAt: '2025-05-20T00:00:00Z', deprecatedAfterCommit: body.deprecatedAfterCommit }) };
+      }
+      if (path.startsWith('/api/sessions/')) {
+        const body = JSON.parse(String(init?.body));
+        return { ok: true, json: async () => ({ ok: true, sessionId: 'session-auth-2', excluded: body.excluded }) };
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const factText = screen.getByLabelText('Fact text');
+    await user.clear(factText);
+    await user.type(factText, 'Handlers depend only on the verified AuthContext boundary.');
+    await user.type(screen.getByLabelText(/Deprecate after Git commit/), 'abcdef1');
+    await user.click(screen.getByRole('button', { name: 'Save memory' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => {
+      if (!String(input).startsWith('/api/facts/') || init?.method !== 'PATCH') return false;
+      return JSON.parse(String(init.body)).deprecatedAfterCommit === 'abcdef1';
+    })).toBe(true));
+
+    await user.click(screen.getByRole('button', { name: 'Exclude session' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input) === '/api/sessions/session-auth-2' && JSON.parse(String(init?.body)).excluded === true)).toBe(true));
+    expect(await screen.findByText('This session is excluded from future Context Packs.')).toBeInTheDocument();
   });
 
   it('does not mutate facts in fallback mode', async () => {

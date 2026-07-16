@@ -173,6 +173,7 @@ export interface Evidence {
   id: string;
   checkpointId: string;
   factId: string;
+  sessionId: string;
   sessionLabel: string;
   turnLabel: string;
   capturedAt: string;
@@ -181,20 +182,63 @@ export interface Evidence {
   code: string;
   freshness: Freshness;
   selectionReason: string;
+  excludedSession: boolean;
   relatedFiles: FileChange[];
 }
 
 export interface Fact {
   id: string;
+  taskId: string;
+  kind: 'decision' | 'constraint' | 'open_item' | 'progress' | 'goal' | 'note';
   text: string;
   status: FactStatus;
   confirmedAt?: string;
   updatedAt: string;
   evidenceIds: string[];
+  selectionReason?: string;
+  relatedFiles: string[];
+  deprecatedAfterCommit?: string;
+}
+
+export interface Session {
+  id: string;
+  taskId: string;
+  sourceThreadId?: string;
+  startedAt: string;
+  lastActivityAt?: string;
+  turnCount: number;
+  compactionCount: number;
+  contextUsage?: ContextUsage;
+  continuationState: ContinuationState;
+  excluded: boolean;
+}
+
+export interface AutomaticRollover {
+  operationId?: string;
+  status: 'pending' | 'thread_created' | 'started' | 'failed';
+  sourceSessionId?: string;
+  newThreadId?: string;
+  newTurnId?: string;
+  startedAt?: string;
+  message?: string;
+  warnings?: string[];
+}
+
+export interface TaskCodebaseConnection {
+  repositoryName: string;
+  registeredRoot: string;
+  worktreeRoot: string;
+  branch: string;
+  baselineSha?: string;
+  currentSha?: string;
+  status: TemporalStatus;
+  sourceThreadIds: string[];
+  sessionCount: number;
 }
 
 export interface Task {
   id: string;
+  repositoryId: string;
   title: string;
   status: TaskStatus;
   updatedAt: string;
@@ -204,6 +248,8 @@ export interface Task {
   openItems: { risks: number; questions: number; actions: number };
   files: { path: string; count: number }[];
   tests: { passing: number; failing: number; skipped: number };
+  codebase: TaskCodebaseConnection;
+  rollover?: AutomaticRollover;
 }
 
 export interface ResumeCandidate {
@@ -287,6 +333,7 @@ export interface BootstrapData {
   checkpoints: Checkpoint[];
   facts: Fact[];
   evidence: Evidence[];
+  sessions: Session[];
   contracts: RegressionContractV1[];
   contractCandidates: RegressionCandidateV1[];
   contractEvaluation: ContractEvaluationV1 | null;

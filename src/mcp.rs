@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::context_pack::ContextPackBuilder;
-use crate::domain::{CoverageStatus, CoverageV1, EvidenceV1, FactV1, Freshness};
+use crate::domain::{
+    ContextPackV1, CoverageStatus, CoverageV1, EventKind, EvidenceV1, FactV1, Freshness,
+};
 use crate::redaction::redact_value;
 use crate::store::Store;
 use crate::APP_VERSION;
@@ -38,6 +40,13 @@ impl StoreMcpBackend {
         })
     }
 
+    pub(crate) fn from_store(store: Store, repository_id: String) -> Self {
+        Self {
+            store,
+            repository_id,
+        }
+    }
+
     fn repository_path(&self) -> String {
         self.store
             .list_repositories()
@@ -51,24 +60,12 @@ impl StoreMcpBackend {
             .filter(|path| !path.is_empty())
             .unwrap_or_else(|| self.repository_id.clone())
     }
-}
 
-impl McpBackend for StoreMcpBackend {
-    fn suggest_resume(&self, query: &str) -> Result<Value> {
-        let branch = crate::git::capture_snapshot(self.repository_path())
-            .ok()
-            .and_then(|snapshot| snapshot.branch);
-        Ok(serde_json::to_value(
-            self.store.suggest_resume_for_branch(
-                &self.repository_id,
-                query,
-                5,
-                branch.as_deref(),
-            )?,
-        )?)
-    }
-
-    fn resume_task(&self, task_id: &str, token_budget: Option<u32>) -> Result<Value> {
+    pub fn verified_context_pack(
+        &self,
+        task_id: &str,
+        token_budget: Option<u32>,
+    ) -> Result<ContextPackV1> {
         let task = self
             .store
             .get_task(task_id)?
@@ -76,10 +73,65 @@ impl McpBackend for StoreMcpBackend {
         if task.repository_id != self.repository_id {
             bail!("task does not belong to the registered repository");
         }
+        let task_events = self.store.list_task_events(&self.repository_id, task_id)?;
+        let mut excluded_sessions = std::collections::BTreeMap::<String, bool>::new();
+        let mut deprecated_facts = std::collections::BTreeMap::<String, String>::new();
+        for event in task_events {
+            match event.kind {
+                EventKind::SessionExcluded => {
+                    if let Some(session_id) =
+                        event.payload.get("session_id").and_then(Value::as_str)
+                    {
+                        excluded_sessions.insert(
+                            session_id.to_string(),
+                            event
+                                .payload
+                                .get("excluded")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(true),
+                        );
+                    }
+                }
+                EventKind::FactDeprecated => {
+                    if let (Some(fact_id), Some(commit)) = (
+                        event.payload.get("fact_id").and_then(Value::as_str),
+                        event
+                            .payload
+                            .get("deprecated_after_commit")
+                            .and_then(Value::as_str),
+                    ) {
+                        if commit.is_empty() {
+                            deprecated_facts.remove(fact_id);
+                        } else {
+                            deprecated_facts.insert(fact_id.to_string(), commit.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let excluded_sessions = excluded_sessions
+            .into_iter()
+            .filter_map(|(id, excluded)| excluded.then_some(id))
+            .collect::<std::collections::BTreeSet<_>>();
+
         let mut facts = self.store.list_facts(task_id)?;
-        let evidence = self.store.list_evidence(task_id)?;
-        let files = self.store.list_file_changes(task_id)?;
-        let tests = self.store.list_test_results(task_id)?;
+        let mut evidence = self.store.list_evidence(task_id)?;
+        let mut files = self.store.list_file_changes(task_id)?;
+        let mut tests = self.store.list_test_results(task_id)?;
+        evidence.retain(|item| !excluded_sessions.contains(&item.session_id));
+        files.retain(|item| !excluded_sessions.contains(&item.session_id));
+        tests.retain(|item| !excluded_sessions.contains(&item.session_id));
+        let retained_evidence_ids = evidence
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        facts.retain(|fact| {
+            fact.evidence_ids
+                .iter()
+                .all(|id| retained_evidence_ids.contains(id.as_str()))
+        });
+
         let checkpoints = self.store.list_checkpoints(task_id)?;
         let mut coverage = if checkpoints.is_empty() {
             CoverageV1 {
@@ -94,6 +146,12 @@ impl McpBackend for StoreMcpBackend {
         } else {
             CoverageV1::merge(checkpoints.iter().map(|checkpoint| &checkpoint.coverage))
         };
+        if !excluded_sessions.is_empty() {
+            coverage.captured.push(format!(
+                "user_excluded_sessions={}",
+                excluded_sessions.len()
+            ));
+        }
         let registered_repository_path = self.repository_path();
         let repository_path = checkpoints
             .last()
@@ -113,6 +171,14 @@ impl McpBackend for StoreMcpBackend {
                 &checkpoints,
                 &files,
             );
+            if let (Some(commit), Some(current_head)) = (
+                deprecated_facts.get(&fact.id),
+                temporal.current_head.as_deref(),
+            ) {
+                if crate::git::is_ancestor(repository_path, commit, current_head).unwrap_or(false) {
+                    fact.freshness = Freshness::Stale;
+                }
+            }
         }
         if temporal.status != crate::domain::TemporalStatusV1::Unchanged {
             coverage.status = coverage.status.worst(CoverageStatus::Degraded);
@@ -127,7 +193,27 @@ impl McpBackend for StoreMcpBackend {
         builder = builder
             .current_validation(crate::git::current_validation(&temporal))
             .temporal_revalidation(temporal);
-        let pack = builder.build(task.goal, facts, evidence, files, tests, coverage)?;
+        builder.build(task.goal, facts, evidence, files, tests, coverage)
+    }
+}
+
+impl McpBackend for StoreMcpBackend {
+    fn suggest_resume(&self, query: &str) -> Result<Value> {
+        let branch = crate::git::capture_snapshot(self.repository_path())
+            .ok()
+            .and_then(|snapshot| snapshot.branch);
+        Ok(serde_json::to_value(
+            self.store.suggest_resume_for_branch(
+                &self.repository_id,
+                query,
+                5,
+                branch.as_deref(),
+            )?,
+        )?)
+    }
+
+    fn resume_task(&self, task_id: &str, token_budget: Option<u32>) -> Result<Value> {
+        let pack = self.verified_context_pack(task_id, token_budget)?;
         Ok(serde_json::to_value(pack)?)
     }
 

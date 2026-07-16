@@ -59,6 +59,20 @@ export function updateFactStatus(id: string, status: FactStatus, supersedesFactI
   });
 }
 
+export function updateFact(id: string, status: FactStatus, content: string, deprecatedAfterCommit: string) {
+  return request<{ ok: true; text: string; status: FactStatus; updatedAt: string; deprecatedAfterCommit?: string }>(`/api/facts/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, content, deprecatedAfterCommit }),
+  });
+}
+
+export function updateSession(id: string, excluded: boolean) {
+  return request<{ ok: true; sessionId: string; excluded: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ excluded }),
+  });
+}
+
 export function revalidateFact(id: string) {
   return request<{ ok: true; freshness: 'fresh' | 'stale' | 'broken'; validatedAt: string }>(`/api/facts/${encodeURIComponent(id)}/revalidate`, {
     method: 'POST',

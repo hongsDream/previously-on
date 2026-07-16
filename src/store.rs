@@ -751,14 +751,16 @@ impl Store {
             let continuation_advice = latest_session.and_then(|session| {
                 (session.continuation_state != ContinuationStateV1::Normal).then(|| {
                     let mut reasons = Vec::new();
-                    if session.compaction_count >= 6 {
+                    if session.compaction_count >= crate::domain::PROVISIONAL_COMPACTION_THRESHOLD {
                         reasons.push(ContinuationReasonV1::CompactionLimit);
                     }
                     if session
                         .context_usage
                         .as_ref()
                         .and_then(ContextUsageV1::utilization)
-                        .is_some_and(|ratio| ratio >= 0.8)
+                        .is_some_and(|ratio| {
+                            ratio >= crate::domain::PROVISIONAL_CONTEXT_USAGE_THRESHOLD
+                        })
                     {
                         reasons.push(ContinuationReasonV1::ContextUsageLimit);
                     }
@@ -1619,7 +1621,7 @@ fn ensure_session_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> 
         }
         if event.kind == EventKind::ContextCompaction {
             session.compaction_count = session.compaction_count.saturating_add(1);
-            if session.compaction_count >= 6
+            if session.compaction_count >= crate::domain::PROVISIONAL_COMPACTION_THRESHOLD
                 && session.continuation_state == ContinuationStateV1::Normal
             {
                 session.continuation_state = ContinuationStateV1::Eligible;
@@ -1627,7 +1629,9 @@ fn ensure_session_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> 
             changed = true;
         }
         if let Some(usage) = context_usage(&event.payload, event.occurred_at) {
-            if usage.utilization().is_some_and(|ratio| ratio >= 0.8)
+            if usage
+                .utilization()
+                .is_some_and(|ratio| ratio >= crate::domain::PROVISIONAL_CONTEXT_USAGE_THRESHOLD)
                 && session.continuation_state == ContinuationStateV1::Normal
             {
                 session.continuation_state = ContinuationStateV1::Eligible;
@@ -1713,11 +1717,11 @@ fn ensure_session_tx(transaction: &Transaction<'_>, event: &EventEnvelopeV1) -> 
             } else {
                 ContinuationStateV1::Suggested
             }
-        } else if compaction_count >= 6
+        } else if compaction_count >= crate::domain::PROVISIONAL_COMPACTION_THRESHOLD
             || context_usage
                 .as_ref()
                 .and_then(ContextUsageV1::utilization)
-                .is_some_and(|ratio| ratio >= 0.8)
+                .is_some_and(|ratio| ratio >= crate::domain::PROVISIONAL_CONTEXT_USAGE_THRESHOLD)
         {
             ContinuationStateV1::Eligible
         } else {

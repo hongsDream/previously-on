@@ -1,4 +1,4 @@
-import { Clock3, FileText, List, Search, Settings } from 'lucide-react';
+import { Clock3, FileText, GitBranch, List, Search, Settings } from 'lucide-react';
 import type { Task, TaskStatus } from '../types';
 
 const navigation = [
@@ -16,15 +16,24 @@ interface SidebarProps {
   onQueryChange: (query: string) => void;
   onStatusChange: (status: TaskStatus | 'all') => void;
   onTaskSelect: (taskId: string) => void;
+  activeNavigation: 'tasks' | 'sessions' | 'task';
+  onOverviewOpen: (focus: 'tasks' | 'sessions') => void;
   onEvidenceOpen: () => void;
 }
 
-export function Sidebar({ query, status, tasks, selectedTaskId, onQueryChange, onStatusChange, onTaskSelect, onEvidenceOpen }: SidebarProps) {
+export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation, onQueryChange, onStatusChange, onTaskSelect, onOverviewOpen, onEvidenceOpen }: SidebarProps) {
   return (
     <aside className="sidebar">
       <nav aria-label="Primary navigation">
-        {navigation.map(({ label, icon: Icon }, index) => (
-          <button key={label} className={index === 0 ? 'nav-item active' : 'nav-item'} type="button" disabled={label === 'Sessions' || label === 'Settings'} onClick={label === 'Evidence' ? onEvidenceOpen : undefined} title={label === 'Sessions' || label === 'Settings' ? 'Planned for a later release' : undefined}>
+        {navigation.map(({ label, icon: Icon }) => (
+          <button
+            key={label}
+            className={(label === 'Tasks' && activeNavigation === 'tasks') || (label === 'Sessions' && activeNavigation === 'sessions') ? 'nav-item active' : 'nav-item'}
+            type="button"
+            disabled={label === 'Settings'}
+            onClick={label === 'Tasks' ? () => onOverviewOpen('tasks') : label === 'Sessions' ? () => onOverviewOpen('sessions') : label === 'Evidence' ? onEvidenceOpen : undefined}
+            title={label === 'Settings' ? 'Planned for a later release' : undefined}
+          >
             <Icon size={19} strokeWidth={1.7} />
             {label}
           </button>
@@ -59,6 +68,10 @@ export function Sidebar({ query, status, tasks, selectedTaskId, onQueryChange, o
               onClick={() => onTaskSelect(task.id)}
             >
               <strong>{task.title}</strong>
+              <span className="task-result-repository">
+                <span>{task.codebase.repositoryName}</span>
+                <code><GitBranch size={10} /> {task.codebase.branch}</code>
+              </span>
               <small>{task.status} · {task.checkpointIds.length} checkpoints</small>
             </button>
           ))}

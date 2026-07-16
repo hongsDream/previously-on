@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -20,7 +20,6 @@ use sha2::{Digest, Sha256};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::context_pack::{ContextPackBuilder, DEFAULT_TOKEN_BUDGET};
 use crate::contracts::{
     CandidateEvidenceKindV1, ContractEvaluationV1, ContractOriginV1, ContractReadinessV1,
     ContractStatusV1, ImpactSelectorGroupV1, RegressionCandidateStatusV1, RegressionCandidateV1,
@@ -31,7 +30,7 @@ use crate::domain::{
     EventKind, EvidenceIntegrity, FactKind, FactLifecycle, FactV1, Freshness, TaskLifecycle,
     TemporalStatusV1, TestStatus,
 };
-use crate::redaction::{redact_excerpt, redact_value};
+use crate::redaction::{redact_excerpt, redact_text, redact_value};
 use crate::store::Store;
 
 const UI_HISTORY_CLASSIFICATION: &str = "untrusted_historical_data";
@@ -116,6 +115,7 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
         .route("/api/repository", delete(purge_repository))
         .route("/api/facts/{id}", patch(update_fact))
         .route("/api/facts/{id}/revalidate", post(revalidate_fact))
+        .route("/api/sessions/{id}", patch(update_session))
         .route("/api/tasks/{id}", patch(update_task))
         .route("/api/contract-candidates", post(create_contract_candidate))
         .route(
@@ -191,11 +191,65 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     let mut checkpoint_values = Vec::new();
     let mut fact_values = Vec::new();
     let mut evidence_values = Vec::new();
+    let mut session_values = Vec::new();
     let mut task_values = Vec::new();
     let mut context_packs = serde_json::Map::new();
     let mut capture_degraded = false;
 
     for task in &tasks {
+        let task_events = state
+            .store
+            .list_task_events(&task.repository_id, &task.id)
+            .map_err(ApiError::internal)?;
+        let mut excluded_session_states = BTreeMap::<String, bool>::new();
+        let mut deprecated_facts = BTreeMap::<String, String>::new();
+        let mut rollover_value = Value::Null;
+        for event in &task_events {
+            match event.kind {
+                EventKind::SessionExcluded => {
+                    if let Some(session_id) =
+                        event.payload.get("session_id").and_then(Value::as_str)
+                    {
+                        excluded_session_states.insert(
+                            session_id.to_string(),
+                            event
+                                .payload
+                                .get("excluded")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(true),
+                        );
+                    }
+                }
+                EventKind::FactDeprecated => {
+                    if let (Some(fact_id), Some(commit)) = (
+                        event.payload.get("fact_id").and_then(Value::as_str),
+                        event
+                            .payload
+                            .get("deprecated_after_commit")
+                            .and_then(Value::as_str),
+                    ) {
+                        if commit.is_empty() {
+                            deprecated_facts.remove(fact_id);
+                        } else {
+                            deprecated_facts.insert(fact_id.to_string(), commit.to_string());
+                        }
+                    }
+                }
+                EventKind::ContinuationStarted => {
+                    rollover_value = json!({
+                        "operationId": event.payload.get("operation_id"),
+                        "status": event.payload.get("status"),
+                        "sourceSessionId": event.payload.get("source_session_id"),
+                        "newThreadId": event.payload.get("new_thread_id"),
+                        "newTurnId": event.payload.get("new_turn_id"),
+                        "startedAt": event.payload.get("started_at"),
+                        "message": event.payload.get("message"),
+                        "warnings": event.payload.get("warnings")
+                    });
+                }
+                _ => {}
+            }
+        }
         let sessions = state
             .store
             .get_task_timeline(&task.id)
@@ -258,35 +312,24 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
                 &checkpoints,
                 &changes,
             );
+            if let (Some(commit), Some(current_head)) = (
+                deprecated_facts.get(&fact.id),
+                task_temporal.current_head.as_deref(),
+            ) {
+                if crate::git::is_ancestor(repository_path, commit, current_head).unwrap_or(false) {
+                    fact.freshness = Freshness::Stale;
+                }
+            }
         }
 
-        let coverage = if checkpoints.is_empty() {
-            crate::domain::CoverageV1 {
-                status: CoverageStatus::Degraded,
-                missing: vec!["checkpoint".to_string()],
-                warnings: vec![
-                    "No deterministic checkpoint is available; semantic facts are excluded."
-                        .to_string(),
-                ],
-                ..crate::domain::CoverageV1::default()
+        let mut fact_selection_reasons = BTreeMap::<String, String>::new();
+        if let Ok(pack) =
+            crate::mcp::StoreMcpBackend::from_store(state.store.clone(), task.repository_id.clone())
+                .verified_context_pack(&task.id, Some(crate::context_pack::DEFAULT_TOKEN_BUDGET))
+        {
+            for fact in pack.facts.iter().chain(pack.unresolved_items.iter()) {
+                fact_selection_reasons.insert(fact.id.clone(), fact.selection_reason.clone());
             }
-        } else {
-            crate::domain::CoverageV1::merge(
-                checkpoints.iter().map(|checkpoint| &checkpoint.coverage),
-            )
-        };
-        let builder = ContextPackBuilder::new(&task.repository_id, &task.id)
-            .token_budget(DEFAULT_TOKEN_BUDGET)
-            .current_validation(crate::git::current_validation(&task_temporal))
-            .temporal_revalidation(task_temporal.clone());
-        if let Ok(pack) = builder.build(
-            task.goal.clone(),
-            facts.clone(),
-            evidence.clone(),
-            changes.clone(),
-            tests.clone(),
-            coverage,
-        ) {
             context_packs.insert(
                 task.id.clone(),
                 serde_json::to_value(pack).map_err(ApiError::internal)?,
@@ -344,9 +387,26 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
             .iter()
             .filter(|test| test.status == TestStatus::Skipped)
             .count();
+        let repository_name = repository
+            .filter(|item| item.id == task.repository_id)
+            .and_then(|item| std::path::Path::new(&item.path).file_name())
+            .and_then(|value| value.to_str())
+            .unwrap_or(&task.repository_id);
+        let source_thread_ids = sessions
+            .iter()
+            .filter_map(|session| session.source_thread_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let task_branch = checkpoints
+            .last()
+            .and_then(|checkpoint| checkpoint.git_after.branch.clone())
+            .or_else(|| task.branch.clone())
+            .unwrap_or_else(|| "detached".to_string());
 
         task_values.push(json!({
             "id": task.id,
+            "repositoryId": task.repository_id,
             "title": task.title,
             "status": task_lifecycle(task.lifecycle),
             "updatedAt": iso(task.updated_at),
@@ -355,8 +415,39 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
             "decisions": { "confirmed": confirmed_decisions, "proposed": proposed_decisions },
             "openItems": { "risks": 0, "questions": open_count, "actions": 0 },
             "files": directories.into_iter().map(|(path, count)| json!({ "path": path, "count": count })).collect::<Vec<_>>(),
-            "tests": { "passing": passing, "failing": failing, "skipped": skipped }
+            "tests": { "passing": passing, "failing": failing, "skipped": skipped },
+            "rollover": rollover_value,
+            "codebase": {
+                "repositoryName": repository_name,
+                "registeredRoot": registered_repository_path,
+                "worktreeRoot": repository_path,
+                "branch": task_branch,
+                "baselineSha": task_temporal.baseline_head,
+                "currentSha": task_temporal.current_head,
+                "status": temporal_status_name(task_temporal.status),
+                "sourceThreadIds": source_thread_ids,
+                "sessionCount": sessions.len()
+            }
         }));
+
+        for session in &sessions {
+            session_values.push(json!({
+                "id": session.id,
+                "taskId": task.id,
+                "sourceThreadId": session.source_thread_id,
+                "startedAt": iso(session.started_at),
+                "lastActivityAt": session.last_activity_at.map(iso),
+                "turnCount": session.turn_count,
+                "compactionCount": session.compaction_count,
+                "contextUsage": session.context_usage.as_ref().map(|usage| json!({
+                    "totalTokens": usage.total_tokens,
+                    "modelContextWindow": usage.model_context_window,
+                    "observedAt": usage.observed_at.map(iso)
+                })),
+                "continuationState": continuation_state_name(session.continuation_state),
+                "excluded": excluded_session_states.get(&session.id).copied().unwrap_or(false)
+            }));
+        }
 
         for (index, checkpoint) in checkpoints.iter().enumerate() {
             capture_degraded |= checkpoint.coverage.status != CoverageStatus::Complete;
@@ -422,14 +513,16 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
             let continuation_advice = session.and_then(|session| {
                 (session.continuation_state != ContinuationStateV1::Normal).then(|| {
                     let mut reasons = Vec::new();
-                    if session.compaction_count >= 6 {
+                    if session.compaction_count >= crate::domain::PROVISIONAL_COMPACTION_THRESHOLD {
                         reasons.push(ContinuationReasonV1::CompactionLimit);
                     }
                     if session
                         .context_usage
                         .as_ref()
                         .and_then(crate::domain::ContextUsageV1::utilization)
-                        .is_some_and(|ratio| ratio >= 0.8)
+                        .is_some_and(|ratio| {
+                            ratio >= crate::domain::PROVISIONAL_CONTEXT_USAGE_THRESHOLD
+                        })
                     {
                         reasons.push(ContinuationReasonV1::ContextUsageLimit);
                     }
@@ -498,13 +591,30 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         }
 
         for fact in &facts {
+            let evidence_sessions = fact
+                .evidence_ids
+                .iter()
+                .filter_map(|id| evidence.iter().find(|item| item.id == *id))
+                .map(|item| item.session_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let related_files = changes
+                .iter()
+                .filter(|change| evidence_sessions.contains(change.session_id.as_str()))
+                .take(5)
+                .map(|change| change.path.clone())
+                .collect::<Vec<_>>();
             fact_values.push(json!({
                 "id": fact.id,
+                "taskId": fact.task_id,
+                "kind": fact_kind_name(fact.kind),
                 "text": fact.content,
                 "status": fact_lifecycle(fact.lifecycle),
                 "confirmedAt": if matches!(fact.lifecycle, FactLifecycle::Confirmed | FactLifecycle::Pinned) { Some(iso(fact.updated_at)) } else { None },
                 "updatedAt": iso(fact.updated_at),
-                "evidenceIds": fact.evidence_ids
+                "evidenceIds": fact.evidence_ids,
+                "selectionReason": fact_selection_reasons.get(&fact.id),
+                "relatedFiles": related_files,
+                "deprecatedAfterCommit": deprecated_facts.get(&fact.id)
             }));
         }
 
@@ -532,6 +642,7 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
                 "id": item.id,
                 "checkpointId": checkpoint.map(|value| value.id.clone()).unwrap_or_default(),
                 "factId": item.fact_id.clone().unwrap_or_default(),
+                "sessionId": item.session_id,
                 "sessionLabel": item.session_id,
                 "turnLabel": item.turn_index.map(|turn| format!("Turn {turn}")).unwrap_or_else(|| "Observed item".to_string()),
                 "capturedAt": iso(item.created_at),
@@ -539,7 +650,11 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
                 "excerpt": item.excerpt,
                 "code": item.excerpt,
                 "freshness": freshness_name(fact.map(|value| value.freshness).unwrap_or(Freshness::Fresh)),
-                "selectionReason": "Included because it is verified evidence linked to this task.",
+                "selectionReason": item.fact_id.as_ref()
+                    .and_then(|id| fact_selection_reasons.get(id))
+                    .cloned()
+                    .unwrap_or_else(|| "Verified evidence is linked to this task but is not selected in the current Context Pack.".to_string()),
+                "excludedSession": excluded_session_states.get(&item.session_id).copied().unwrap_or(false),
                 "relatedFiles": related
             }));
         }
@@ -574,6 +689,7 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "checkpoints": checkpoint_values,
         "facts": fact_values,
         "evidence": evidence_values,
+        "sessions": session_values,
         "contracts": contracts,
         "contractCandidates": contract_candidates,
         "contractEvaluation": contract_evaluation,
@@ -638,6 +754,10 @@ struct FactUpdate {
     status: FactLifecycle,
     #[serde(default)]
     supersedes_fact_id: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    deprecated_after_commit: Option<String>,
 }
 
 async fn update_fact(
@@ -652,6 +772,32 @@ async fn update_fact(
         .get_fact(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("fact not found: {id}")))?;
+    let deprecated_after_commit = update
+        .deprecated_after_commit
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_string);
+    if let Some(commit) = deprecated_after_commit.as_deref() {
+        if !commit.is_empty()
+            && (commit.len() < 7
+                || commit.len() > 64
+                || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(ApiError::bad_request(
+                "deprecatedAfterCommit must be an empty value or a 7-64 character Git SHA",
+            ));
+        }
+    }
+    if let Some(content) = update.content.as_deref() {
+        let content = content.trim();
+        if content.is_empty() || content.chars().count() > crate::domain::MAX_EVIDENCE_EXCERPT_CHARS
+        {
+            return Err(ApiError::bad_request(
+                "fact content must be between 1 and 500 characters",
+            ));
+        }
+        fact.content = redact_text(content);
+    }
     fact.lifecycle = update.status;
     fact.updated_at = Utc::now();
     if fact.lifecycle == FactLifecycle::Superseded {
@@ -682,7 +828,56 @@ async fn update_fact(
         fact.superseded_by = None;
     }
     persist_fact_event(&state.store, &fact).map_err(ApiError::internal)?;
-    Ok(Json(json!({ "ok": true })))
+    if let Some(commit) = deprecated_after_commit.as_deref() {
+        persist_fact_deprecation_event(&state.store, &fact, commit).map_err(ApiError::internal)?;
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "text": fact.content,
+        "status": fact_lifecycle(fact.lifecycle),
+        "updatedAt": iso(fact.updated_at),
+        "deprecatedAfterCommit": deprecated_after_commit
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionUpdate {
+    excluded: bool,
+}
+
+async fn update_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(update): Json<SessionUpdate>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    let session = state
+        .store
+        .get_session(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found(format!("session not found: {id}")))?;
+    let task_id = session
+        .task_id
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("session is not linked to a task"))?;
+    let now = Utc::now();
+    let mut event = EventEnvelopeV1::new(
+        format!("local-ui:session-exclusion:{id}:{}", now.timestamp_micros()),
+        &session.repository_id,
+        &session.id,
+        EventKind::SessionExcluded,
+        now,
+        json!({ "session_id": session.id, "excluded": update.excluded }),
+    );
+    event.task_id = Some(task_id.to_string());
+    state
+        .store
+        .insert_event(&event)
+        .map_err(ApiError::internal)?;
+    Ok(Json(
+        json!({ "ok": true, "sessionId": id, "excluded": update.excluded }),
+    ))
 }
 
 async fn revalidate_fact(
@@ -1071,6 +1266,32 @@ fn persist_fact_event(store: &Store, fact: &FactV1) -> Result<()> {
     Ok(())
 }
 
+fn persist_fact_deprecation_event(store: &Store, fact: &FactV1, commit: &str) -> Result<()> {
+    let now = Utc::now();
+    let mut event = EventEnvelopeV1::new(
+        format!(
+            "local-ui:fact-deprecation:{}:{}",
+            fact.id,
+            now.timestamp_micros()
+        ),
+        &fact.repository_id,
+        fact.evidence_ids
+            .iter()
+            .find_map(|id| store.get_evidence(id).ok().flatten())
+            .map(|evidence| evidence.session_id)
+            .unwrap_or_else(|| "local-ui".to_string()),
+        EventKind::FactDeprecated,
+        now,
+        json!({
+            "fact_id": fact.id,
+            "deprecated_after_commit": commit
+        }),
+    );
+    event.task_id = Some(fact.task_id.clone());
+    store.insert_event(&event)?;
+    Ok(())
+}
+
 fn authorize_mutation(state: &AppState, headers: &HeaderMap) -> ApiResult<()> {
     authorize_api_read(state, headers)?;
     let host = headers
@@ -1207,6 +1428,17 @@ fn fact_lifecycle(value: FactLifecycle) -> &'static str {
         FactLifecycle::Pinned => "pinned",
         FactLifecycle::Invalid => "invalid",
         FactLifecycle::Superseded => "superseded",
+    }
+}
+
+fn fact_kind_name(value: FactKind) -> &'static str {
+    match value {
+        FactKind::Goal => "goal",
+        FactKind::Decision => "decision",
+        FactKind::Constraint => "constraint",
+        FactKind::OpenItem => "open_item",
+        FactKind::Progress => "progress",
+        FactKind::Note => "note",
     }
 }
 
@@ -1410,6 +1642,8 @@ mod tests {
             Json(FactUpdate {
                 status: FactLifecycle::Superseded,
                 supersedes_fact_id: Some("fact-new".to_string()),
+                content: None,
+                deprecated_after_commit: None,
             }),
         )
         .await
@@ -1815,6 +2049,25 @@ mod tests {
         assert!(evaluations.iter().any(|evaluation| {
             evaluation["taskId"] == "task-ready" && evaluation["readiness"] == "ready"
         }));
+        let tasks = payload["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 2);
+        for task in tasks {
+            assert_eq!(task["repositoryId"], identity.id, "{task:#}");
+            assert_eq!(task["codebase"]["repositoryName"], "repo", "{task:#}");
+            assert_eq!(
+                task["codebase"]["registeredRoot"],
+                repository.to_string_lossy().as_ref(),
+                "{task:#}"
+            );
+            assert_eq!(
+                task["codebase"]["worktreeRoot"],
+                repository.to_string_lossy().as_ref(),
+                "{task:#}"
+            );
+            assert_eq!(task["codebase"]["branch"], "main", "{task:#}");
+            assert!(task["codebase"]["sessionCount"].is_number(), "{task:#}");
+            assert_eq!(task["codebase"]["sourceThreadIds"], json!([]), "{task:#}");
+        }
     }
 
     #[tokio::test]

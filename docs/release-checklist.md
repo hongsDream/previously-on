@@ -1,4 +1,4 @@
-# `v0.1.0-alpha.1` release checklist
+# `v0.1.0-alpha.2` release checklist
 
 The release owner records links or hashes for every item before creating the tag. A failed item
 stops publication; the crate name must not be published speculatively because crates.io versions
@@ -7,6 +7,13 @@ cannot be overwritten.
 ## Local and compatibility gates
 
 - [ ] All known audit findings are closed or explicitly release-blocking.
+- [ ] Fake App Server integration proves documented `thread/start`, `thread/name/set`,
+      `turn/start`, and `thread/resume` request shapes; successful automatic continuation is
+      idempotent and a failed attempt leaves the source prompt unblocked.
+- [ ] Project overview, Codebase Lineage, fact edit/deprecation, session exclusion, and automatic
+      rollover state pass UI typecheck, lint, tests, and production build.
+- [ ] Secret fixtures do not persist the transient automatic-continuation prompt or leak through
+      App Server errors, Context Packs, export, or the UI.
 - [ ] The mapped-regression result is labelled ineligible and is not used as live evidence.
 - [ ] A separately produced live artifact passes all 30 authenticated reconstruction workflows on
       each npm-selected CLI version and satisfies `scripts/validate-live-compatibility.mjs`; the
@@ -64,12 +71,12 @@ cannot be overwritten.
 
 ## Immutable publication sequence
 
-- [ ] Create and push `v0.1.0-alpha.1` from the reviewed clean `main` commit.
+- [ ] Create and push `v0.1.0-alpha.2` from the reviewed clean `main` commit.
 - [ ] Approve the `release-compatibility` gate and confirm it accepts the pinned live artifact.
 - [ ] Confirm `transparentCaptureReleaseGate.eligible` is true only after all 60 scenario entries
       and their retained evidence hashes have been reviewed.
 - [ ] Confirm the tag workflow creates a draft release and provenance attestations.
 - [ ] Inspect archive names, SBOM, NOTICE, third-party inventory, and checksums.
 - [ ] Explicitly approve the protected crates.io job.
-- [ ] Confirm `cargo install previously-on --version 0.1.0-alpha.1 --locked` succeeds.
+- [ ] Confirm `cargo install previously-on --version 0.1.0-alpha.2 --locked` succeeds.
 - [ ] Confirm the workflow publishes the GitHub release only after exact-version install passes.

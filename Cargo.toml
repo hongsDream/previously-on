@@ -1,6 +1,6 @@
 [package]
 name = "previously-on"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 rust-version = "1.90"
 license = "Apache-2.0"
@@ -24,6 +24,7 @@ include = [
     "/docs/compatibility.md",
     "/docs/live-compatibility-evidence.md",
     "/docs/privacy.md",
+    "/docs/product-roadmap.md",
     "/fixtures/**/*.json",
     "/scripts/compatibility/*.mjs",
     "/scripts/validate-live-compatibility.mjs",

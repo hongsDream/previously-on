@@ -1,6 +1,7 @@
-import { ArrowLeft, MoreHorizontal } from 'lucide-react';
+import { ArrowLeft, CircleAlert, CircleCheck, LoaderCircle, MoreHorizontal } from 'lucide-react';
 import type { BootstrapData, Checkpoint, RegressionCandidateDraftV1, Task, TaskStatus } from '../types';
 import { CheckpointTimeline } from './CheckpointTimeline';
+import { CodebaseLineage } from './CodebaseLineage';
 import { ContextPackPreview } from './ContextPackPreview';
 import { ResumeBanner } from './ResumeBanner';
 import { RegressionContractsPanel } from './RegressionContractsPanel';
@@ -74,6 +75,10 @@ export function TaskWorkspace({
         <ResumeBanner candidate={resumeCandidate} task={task} onReview={onReviewResume} onDismiss={onDismissResume} />
       ) : null}
 
+      {task.rollover ? <AutomaticRolloverBanner task={task} /> : null}
+
+      <CodebaseLineage task={task} />
+
       <RegressionContractsPanel
         contracts={contracts}
         candidates={contractCandidates}
@@ -101,6 +106,30 @@ export function TaskWorkspace({
       ) : <EmptyTask />}
     </main>
   );
+}
+
+function AutomaticRolloverBanner({ task }: { task: Task }) {
+  const rollover = task.rollover!;
+  const Icon = rollover.status === 'started' ? CircleCheck : rollover.status === 'failed' ? CircleAlert : LoaderCircle;
+  const title = rollover.status === 'started'
+    ? 'Continued in a fresh Codex task'
+    : rollover.status === 'failed'
+      ? 'Automatic continuation did not start'
+      : 'Fresh Codex task is being prepared';
+  return (
+    <section className={`automatic-rollover-banner rollover-${rollover.status}`} aria-label="Automatic continuation status">
+      <Icon size={19} className={rollover.status === 'pending' || rollover.status === 'thread_created' ? 'spin-icon' : ''} />
+      <span>
+        <strong>{title}</strong>
+        <small>{rollover.message ?? (rollover.status === 'failed' ? 'The original request was left in this task so work can continue safely.' : 'The source prompt was blocked only after the new turn started.')}</small>
+      </span>
+      {rollover.newThreadId ? <code title={rollover.newThreadId}>Task {shortId(rollover.newThreadId)}</code> : null}
+    </section>
+  );
+}
+
+function shortId(value: string) {
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
 }
 
 function EmptyTask() {

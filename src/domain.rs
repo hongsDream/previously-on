@@ -7,6 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const SCHEMA_VERSION_V1: u16 = 1;
 pub const MAX_EVIDENCE_EXCERPT_CHARS: usize = 500;
 pub const MAX_CONTEXT_TEMPORAL_ITEMS: usize = 8;
+/// Provisional alpha policy. This is a one-time rollover trigger, not a benchmark-validated
+/// model-specific threshold.
+pub const PROVISIONAL_COMPACTION_THRESHOLD: u32 = 7;
+pub const PROVISIONAL_CONTEXT_USAGE_THRESHOLD: f64 = 0.80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -214,6 +218,9 @@ pub enum EventKind {
     ContextCompaction,
     ContextUsageUpdated,
     ContinuationSuggested,
+    ContinuationStarted,
+    SessionExcluded,
+    FactDeprecated,
     RegressionCandidateRecorded,
     ContractEvaluationRecorded,
     #[default]

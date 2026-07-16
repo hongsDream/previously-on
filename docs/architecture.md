@@ -65,9 +65,9 @@ and nonzero exits as failures.
 The PreToolUse hook is advisory and never blocks editing. The Stop hook may issue one continuation
 with the exact required argv when readiness is blocked; persisted evaluation state and Codex's
 `stop_hook_active` flag prevent an automatic loop. GitHub Actions remains the enforcement boundary.
-No dependency graph or automatic new-task transition is part of v1.
+No dependency graph is part of v1.
 
-## Session timeline and continuation advice
+## Session timeline and automatic continuation
 
 The session projection records the source App Server thread ID when available, last observed
 activity, turn count, compaction count, and observed context usage. The UI renders relative age
@@ -84,16 +84,33 @@ checkpoint baseline. For linked worktrees, later revalidation runs against the c
 root stored in the checkpoint while confirming that it still belongs to the registered logical
 repository.
 
-Continuation advice is deterministic and session-scoped:
+Continuation eligibility is deterministic and session-scoped:
 
-- six observed compactions make the session eligible;
+- seven observed compactions make the session eligible;
 - at least 80% observed context-window usage makes the session eligible;
 - after 72 hours of inactivity, a relevant Git change makes the session eligible.
 
-Eligibility is checked before each user prompt. The prompt after a threshold is crossed receives
-the advice once, and the session moves to `suggested` so later prompts do not repeat it. The advice
-asks Codex to recommend a new thread; it does not create a thread, transfer control, or load a
-Context Pack.
+The seven/80 rule is a provisional alpha policy rather than a model-general threshold. Eligibility
+is checked before each user prompt. At a boundary, the redacted current prompt is carried over a
+bounded child-process stdin channel and is not written to the canonical event log. The worker then:
+
+1. validates the source event and repository identity, then writes a deterministic `pending`
+   operation event before any external task can be created;
+2. revalidates current Git state, fact freshness, excluded sessions, fact deprecation commits, and
+   relevant Regression Contracts into a bounded Context Pack;
+3. calls the documented Codex App Server `thread/start` method for a persisted task and durably
+   records its task ID before doing anything else;
+4. links the new App Server session to the existing PreviouslyOn task, sets a display name on a
+   best-effort basis, and calls `turn/start` with the current request plus a bounded verified pack;
+5. records `started`, then returns a UserPromptSubmit `block` decision for only the source prompt.
+
+The operation ID and all transition event IDs are deterministic. A repeated hook invocation reuses
+the recorded result. If a task ID was durably recorded, recovery resumes that task; if an attempt
+stopped before the ID was recorded, PreviouslyOn refuses to create a possible duplicate. Any App
+Server or validation failure records `failed` and leaves the source request unblocked.
+
+The public App Server interface creates a persisted task but does not expose a way for PreviouslyOn
+to force the Codex desktop UI to focus it. The new ID and rollover state are shown in the review UI.
 
 ## Attribution
 
@@ -117,8 +134,9 @@ separates the checkpoint baseline (Then), intervening file changes (Since), curr
 renames, deletions, divergence, and relevant edits are surfaced explicitly. Invalid, superseded,
 stale, broken, or unsupported facts remain excluded by default.
 
-Pack creation remains behind the read-only MCP call. Neither a resume candidate nor continuation
-advice automatically injects historical context.
+Ordinary user-approved resume remains behind the read-only MCP call. The only automatic pack
+delivery is the boundary-triggered fresh-task flow above; it uses the same verified builder and
+labels the pack as data-only untrusted history.
 
 ## AI fact refresh is deferred
 
