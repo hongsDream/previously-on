@@ -198,7 +198,7 @@ node -e '
     throw new Error("MCP initialize did not return the PreviouslyOn server identity");
   }
   const names = rows[1].result?.tools?.map(({name}) => name).sort();
-  const expected = ["explain_fact", "get_task_timeline", "resume_task", "search_tasks", "suggest_resume"].sort();
+  const expected = ["continue_task", "explain_fact", "get_task_timeline", "resume_task", "search_tasks", "suggest_resume"].sort();
   if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error("MCP tools/list contract changed");
 ' "$STAGE/mcp-output.jsonl"
 
