@@ -696,6 +696,43 @@ test('resume rejects a source checkpoint whose official thread snapshot changed'
   assert.equal(provider.calls.filter((call) => call.method === 'turn/start').length, turnCount);
 });
 
+test('resume normalizes a not-loaded source thread before verifying its snapshot', async (t) => {
+  const paths = await temporaryCase(t);
+  const provider = new FakeProvider({ finalResponse: expectedFinal(), failTurnNumbers: [2] });
+  const resumeThread = provider.resumeThread.bind(provider);
+  provider.resumeThread = async (options) => {
+    const thread = provider.threads.get(options.threadId);
+    if (thread?.status?.type === 'notLoaded') delete thread.status;
+    return resumeThread(options);
+  };
+  const input = {
+    manifest: MANIFEST,
+    fixtures: ALL_FIXTURES,
+    provider,
+    phase: 'measured',
+    campaignLock: campaignLock(),
+    scheduledArms: [twoArms()[0]],
+    ...paths,
+  };
+  await runCampaign(input);
+  const checkpoint = readJsonLines(paths.controlPath).find((record) => record.event === 'source_checkpoint');
+  provider.threads.get(checkpoint.snapshotThreadId).status = { type: 'notLoaded' };
+  const callCount = provider.calls.length;
+
+  const resumed = await runCampaign({ ...input, resume: true });
+
+  assert.equal(resumed.completedNow, 1);
+  const resumeCalls = provider.calls.slice(callCount);
+  const resumeIndex = resumeCalls.findIndex((call) =>
+    call.method === 'thread/resume' && call.threadId === checkpoint.snapshotThreadId,
+  );
+  const readIndex = resumeCalls.findIndex((call) =>
+    call.method === 'thread/read' && call.threadId === checkpoint.snapshotThreadId,
+  );
+  assert.ok(resumeIndex >= 0);
+  assert.ok(readIndex > resumeIndex);
+});
+
 test('resume recovers a crash after compaction without compacting the source twice', async (t) => {
   const paths = await temporaryCase(t);
   const provider = new FakeProvider({
