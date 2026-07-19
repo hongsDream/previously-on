@@ -331,6 +331,13 @@ command = "user-mcp"
     assert!(config.contains("user_server"));
     assert!(config.contains("user-mcp"));
     assert_eq!(config.matches("[mcp_servers.previously_on]").count(), 1);
+    assert_eq!(
+        config
+            .matches("[mcp_servers.previously_on.tools.continue_task]")
+            .count(),
+        1
+    );
+    assert!(config.contains("approval_mode = \"prompt\""));
     assert_eq!(config.matches(MANAGED_ID).count(), 1);
     assert!(config.contains("hooks = true"));
     let reserve = paths.data_dir.join("queue/disk-reserve.bin");

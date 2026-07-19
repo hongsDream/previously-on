@@ -183,22 +183,31 @@ function AutomaticRolloverBanner({ task }: { task: Task }) {
   const title = rollover.status === 'started'
     ? 'Continued in a fresh Codex task'
     : rollover.status === 'failed'
-      ? 'Automatic continuation did not start'
+      ? 'Continuation did not start'
       : 'Fresh Codex task is being prepared';
   return (
-    <section className={`automatic-rollover-banner rollover-${rollover.status}`} aria-label="Automatic continuation status">
+    <section className={`automatic-rollover-banner rollover-${rollover.status}`} aria-label="Continuation status">
       <Icon size={19} className={rollover.status === 'pending' || rollover.status === 'thread_created' ? 'spin-icon' : ''} />
       <span>
         <strong>{title}</strong>
-        <small>{rollover.message ?? (rollover.status === 'failed' ? 'The original request was left in this task so work can continue safely.' : 'The source prompt was blocked only after the new turn started.')}</small>
+        <small>{rollover.message ?? (rollover.status === 'failed' ? 'The original request was left in this task so work can continue safely.' : 'The verified Context Pack and current request were started only after approval.')}</small>
       </span>
-      {rollover.newThreadId ? <code title={rollover.newThreadId}>Task {shortId(rollover.newThreadId)}</code> : null}
+      {rollover.newThreadId ? (
+        <span className="rollover-actions">
+          <code title={rollover.newThreadId}>Task {shortId(rollover.newThreadId)}</code>
+          <a className="secondary-button" href={codexThreadUrl(rollover.newThreadId)}>Open in Codex</a>
+        </span>
+      ) : null}
     </section>
   );
 }
 
 function shortId(value: string) {
   return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+}
+
+function codexThreadUrl(threadId: string) {
+  return `codex://threads/${encodeURIComponent(threadId)}`;
 }
 
 function EmptyTask() {

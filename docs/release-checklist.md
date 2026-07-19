@@ -34,9 +34,9 @@ must be bound to the reviewed commit. Any public-release item in the final secti
       candidate-only. AI output is not Evidence and unavailable metrics are not invented.
 - [ ] Local agent lineage is documented as same-device read-only observation, not cloud/team
       access, orchestration, or write-back.
-- [ ] Desktop focus/open is documented as unavailable; only Copy ID and Find in Codex guidance are
-      offered, with no private deep link or fake Open button.
-- [ ] Automatic continuation is documented as a provisional policy: seven observed compactions
+- [ ] Consent-gated continuation opens only the documented `codex://threads/<thread-id>` deep link,
+      and the review UI preserves Copy ID as a fallback when the operating-system opener fails.
+- [ ] The continuation boundary is documented as a provisional policy: seven observed compactions
       OR 80% observed context usage; independently, 72 hours of inactivity plus a relevant code
       change. It is not called benchmark validated.
 - [ ] The continuation campaign remains untouched at 6/864 complete, 858 remaining, and

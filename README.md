@@ -23,14 +23,15 @@ instruction and not a replacement for checking the current source.
 - optional user-triggered AI fact refresh that produces reviewable candidates only after an
   input-only named permission profile is verified;
 - same-device, read-only Codex agent lineage with explicit parentage when the App Server reports it;
-- automatic fresh-task continuation after a session crosses the provisional boundary, with
-  idempotent recovery and source-prompt blocking only after the new turn starts;
+- consent-gated fresh-task continuation after a session crosses the provisional boundary, with
+  idempotent recovery and automatic navigation to the started Codex task;
 - no PreviouslyOn API key, telemetry, cloud service, or independent outbound integration; model
   execution is delegated to the user's configured local Codex App Server;
 - repository-scoped JSON export and complete local purge.
 
 PreviouslyOn deliberately does not infer dependencies, replay chats, sync to a cloud or team
-account, orchestrate agents, or write back to Codex tasks. Local agent lineage is observation only.
+account, or orchestrate agents. The only Codex write is the explicitly approved fresh-task
+continuation; local agent lineage remains observation only.
 
 ## Install
 
@@ -130,19 +131,19 @@ already uses that command name.
    edited, deprecated after a Git commit, confirmed, pinned, invalidated, or superseded; a
    captured session can be excluded from future packs.
 7. When a session reaches seven observed compactions or at least 80% observed context usage, the
-   next user prompt triggers automatic continuation. PreviouslyOn revalidates Git and Regression
-   Contracts, creates a persisted task with the official Codex App Server, names it, starts the
-   current request with a verified Context Pack, and only then blocks the source prompt to prevent
-   duplicate work. If any step fails, the source prompt continues normally. A session inactive for
-   at least 72 hours also uses this flow only when relevant code changed.
+   next user prompt offers **Continue in a fresh task?** Codex must show its approval UI before the
+   `continue_task` MCP write can run. Approval revalidates Git and Regression Contracts, creates a
+   persisted task with the official Codex App Server, starts the exact current request with a
+   verified Context Pack, opens `codex://threads/<thread-id>`, and stops the source turn after the
+   successful tool result to prevent duplicate work. Decline, cancel, or failure keeps the request
+   in the source task. A session inactive for at least 72 hours also offers this flow only when
+   relevant code changed.
 
 The seven-compaction/80% rule is an explicit provisional alpha policy, not a benchmark-derived or
 model-general threshold. It will be replaced only after the continuation benchmark described in
-[the product roadmap](docs/product-roadmap.md) produces a model-specific recommendation. The App
-Server creates a new persisted task that appears in Codex; the current public interface does not
-let PreviouslyOn force the desktop UI to focus or open that task. PreviouslyOn therefore exposes
-the unique ID with **Copy ID** and **Find in Codex** guidance, not a private deep link or fake Open
-button.
+[the product roadmap](docs/product-roadmap.md) produces a model-specific recommendation. Codex's
+documented desktop deep link opens the persisted task after `turn/start`; the review UI keeps an
+**Open in Codex** fallback when automatic navigation is unavailable.
 
 Context usage is recorded only when the App Server actually emits a token-usage notification.
 PreviouslyOn does not infer a percentage from prompt size or other incomplete observations.
@@ -152,8 +153,10 @@ The mapped 30-row regression driver and live App Server schema probe do not prov
 workflows or stable Hook/App Server ID linkage, so releases must not advertise that path as
 supported yet.
 
-The MCP server is read-only and exposes `suggest_resume`, `resume_task`, `search_tasks`,
-`explain_fact`, and `get_task_timeline`.
+The MCP server exposes five read-only tools (`suggest_resume`, `resume_task`, `search_tasks`,
+`explain_fact`, and `get_task_timeline`) plus the idempotent local write `continue_task`. Setup
+forces `continue_task` to `approval_mode = "prompt"`; it cannot create or start a task before the
+user approves Codex's confirmation UI.
 
 ## AI refresh and local agent lineage
 

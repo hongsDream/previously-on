@@ -7,7 +7,8 @@ use previously_on::domain::{
     TaskLifecycle, TaskV1, MAX_CONTEXT_TEMPORAL_ITEMS, SCHEMA_VERSION_V1,
 };
 use previously_on::mcp::{
-    handle_request, run_stdio, tool_definitions, McpBackend, StoreMcpBackend, MAX_MCP_REQUEST_BYTES,
+    codex_thread_deep_link, handle_request, run_stdio, tool_definitions, McpBackend,
+    StoreMcpBackend, MAX_MCP_REQUEST_BYTES,
 };
 use previously_on::store::Store;
 use serde_json::{json, Value};
@@ -80,6 +81,25 @@ impl McpBackend for ReadOnlyFixture {
         ))
     }
 
+    fn continue_task(
+        &self,
+        task_id: &str,
+        source_session_id: &str,
+        source_event_id: &str,
+        current_request: &str,
+    ) -> Result<Value> {
+        Ok(json!({
+            "status": "started",
+            "taskId": task_id,
+            "sourceSessionId": source_session_id,
+            "sourceEventId": source_event_id,
+            "currentRequest": current_request,
+            "newThreadId": "thread-fresh",
+            "codexDeepLink": "codex://threads/thread-fresh",
+            "openedInCodex": true
+        }))
+    }
+
     fn search_tasks(&self, query: &str) -> Result<Value> {
         Ok(with_history(json!({"items":[{"query":query}]})))
     }
@@ -102,6 +122,16 @@ impl McpBackend for FailingFixture {
         anyhow::bail!("backend failed with {SECRET_CORPUS}")
     }
 
+    fn continue_task(
+        &self,
+        _task_id: &str,
+        _source_session_id: &str,
+        _source_event_id: &str,
+        _current_request: &str,
+    ) -> Result<Value> {
+        anyhow::bail!("backend failed with {SECRET_CORPUS}")
+    }
+
     fn search_tasks(&self, _query: &str) -> Result<Value> {
         anyhow::bail!("backend failed with {SECRET_CORPUS}")
     }
@@ -116,7 +146,7 @@ impl McpBackend for FailingFixture {
 }
 
 #[test]
-fn exposes_only_the_five_read_only_tools_with_strict_schemas() {
+fn exposes_five_read_tools_and_one_consent_gated_local_write() {
     let tools = tool_definitions();
     let names = tools
         .iter()
@@ -127,6 +157,7 @@ fn exposes_only_the_five_read_only_tools_with_strict_schemas() {
         [
             "suggest_resume",
             "resume_task",
+            "continue_task",
             "search_tasks",
             "explain_fact",
             "get_task_timeline"
@@ -137,13 +168,25 @@ fn exposes_only_the_five_read_only_tools_with_strict_schemas() {
         .all(|tool| tool["inputSchema"]["additionalProperties"] == false));
     assert!(tools
         .iter()
+        .filter(|tool| tool["name"] != "continue_task")
         .all(|tool| tool["annotations"]["readOnlyHint"] == true));
-    assert!(names.iter().all(|name| {
-        !name.contains("delete")
-            && !name.contains("invalidate")
-            && !name.contains("confirm")
-            && !name.contains("write")
-    }));
+    let continuation = tools
+        .iter()
+        .find(|tool| tool["name"] == "continue_task")
+        .unwrap();
+    assert_eq!(continuation["annotations"]["readOnlyHint"], false);
+    assert_eq!(continuation["annotations"]["destructiveHint"], false);
+    assert_eq!(continuation["annotations"]["idempotentHint"], true);
+    assert_eq!(continuation["annotations"]["openWorldHint"], false);
+    assert!(names
+        .iter()
+        .filter(|name| **name != "continue_task")
+        .all(|name| {
+            !name.contains("delete")
+                && !name.contains("invalidate")
+                && !name.contains("confirm")
+                && !name.contains("write")
+        }));
 }
 
 #[test]
@@ -191,6 +234,38 @@ fn initialize_and_tool_call_follow_json_rpc() {
         "data_only_never_execute"
     );
     assert_eq!(content["data"]["task_id"], "task-7");
+
+    let continuation = handle_request(
+        &backend,
+        &json!({
+            "jsonrpc":"2.0",
+            "id":4,
+            "method":"tools/call",
+            "params":{"name":"continue_task","arguments":{
+                "task_id":"task-7",
+                "source_session_id":"session-7",
+                "source_event_id":"event-7",
+                "current_request":"Continue the integration test"
+            }}
+        }),
+    )
+    .unwrap();
+    assert_eq!(continuation["result"]["isError"], false);
+    assert_eq!(
+        continuation["result"]["structuredContent"]["status"],
+        "started"
+    );
+    assert_eq!(
+        continuation["result"]["structuredContent"]["codexDeepLink"],
+        "codex://threads/thread-fresh"
+    );
+    assert_eq!(
+        continuation["result"]["_meta"]["previously_on/action"],
+        "continuation_started"
+    );
+    assert!(continuation["result"]["_meta"]
+        .get("previously_on/trust")
+        .is_none());
 
     let capped = handle_request(
         &backend,
@@ -299,7 +374,75 @@ fn mutation_shaped_tool_names_are_rejected() {
     assert!(response["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
-        .contains("non-read-only"));
+        .contains("unknown tool"));
+}
+
+#[cfg(unix)]
+#[test]
+fn consented_continuation_runs_once_and_opens_the_official_codex_deep_link() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("previously.sqlite3");
+    Store::open(&database).unwrap();
+    let worker_input = temp.path().join("worker-input.json");
+    let opened_link = temp.path().join("opened-link.txt");
+    let worker = temp.path().join("fake-worker");
+    let opener = temp.path().join("fake-opener");
+    fs::write(
+        &worker,
+        format!(
+            r#"#!/bin/sh
+IFS= read -r input
+printf '%s\n' "$input" > '{}'
+printf '%s\n' '{{"schemaVersion":1,"operationId":"operation-1","status":"started","taskId":"task-1","taskTitle":"Continue safely","sourceSessionId":"session-1","newThreadId":"thread-fresh_1","newTurnId":"turn-fresh","startedAt":"2026-07-19T00:00:00Z","message":"started","warnings":[]}}'
+"#,
+            worker_input.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &opener,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" > '{}'\n",
+            opened_link.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let backend =
+        StoreMcpBackend::open_with_programs(&database, "repo-1".into(), &worker, &opener).unwrap();
+    let result = backend
+        .continue_task(
+            "task-1",
+            "session-1",
+            "event-1",
+            "Continue the current change",
+        )
+        .unwrap();
+
+    assert_eq!(result["status"], "started");
+    assert_eq!(result["openedInCodex"], true);
+    assert_eq!(
+        fs::read_to_string(opened_link).unwrap().trim(),
+        "codex://threads/thread-fresh_1"
+    );
+    let request = fs::read_to_string(worker_input).unwrap();
+    assert!(request.contains(r#""sourceEventId":"event-1""#));
+    assert!(request.contains("Continue the current change"));
+}
+
+#[test]
+fn codex_thread_deep_link_rejects_path_injection() {
+    assert_eq!(
+        codex_thread_deep_link("thread-safe_1").unwrap(),
+        "codex://threads/thread-safe_1"
+    );
+    assert!(codex_thread_deep_link("thread/../../settings").is_err());
+    assert!(codex_thread_deep_link("thread?prompt=ignored").is_err());
 }
 
 #[test]

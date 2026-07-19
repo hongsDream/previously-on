@@ -5,6 +5,19 @@ interfaces; prerelease compatibility may still change between alpha versions.
 
 ## [Unreleased]
 
+### Added
+
+- Consent-gated continuation through the `continue_task` MCP write: Codex must show a fresh tool
+  approval before PreviouslyOn creates a task, starts the exact current request with a verified
+  Context Pack, and opens the documented `codex://threads/<thread-id>` deep link.
+- Direct **Open in Codex** recovery links for completed rollovers and observed local tasks.
+
+### Security
+
+- Setup pins only `continue_task` to `approval_mode = "prompt"`; the other five MCP tools remain
+  read-only. Deterministic operation IDs and source-event validation continue to prevent blind
+  duplicate task creation, and the successful PostToolUse result stops the source turn.
+
 ## 0.1.0-alpha.3 - 2026-07-16
 
 This version is a verified source preview only. No `v0.1.0-alpha.3` tag, GitHub Release, or
@@ -48,8 +61,7 @@ crates.io publication is created by this change.
 - AI refresh is beta, disabled by default, and requires a compatible experimental App Server plus
   an unchanged verified managed profile. No real calibration/model call was run for this preview.
 - Agent lineage is local observation, not cloud sync, team access, orchestration, or write-back.
-- No documented desktop focus/open interface is available; use Copy ID and Find in Codex.
-- The automatic continuation policy remains provisional: seven observed compactions or 80%
+- The continuation boundary policy remains provisional: seven observed compactions or 80%
   observed context usage, independently 72 hours plus a relevant code change. It is not benchmark
   validated. The continuation campaign remains 6/864 complete with 858 arms remaining and
   `no_auto_rollover`.

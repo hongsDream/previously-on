@@ -62,6 +62,13 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getByText('Needs review')).toBeInTheDocument();
   });
 
+  it('offers the official Codex deep link as rollover recovery', async () => {
+    render(<App />);
+
+    const link = await screen.findByRole('link', { name: 'Open in Codex' });
+    expect(link).toHaveAttribute('href', 'codex://threads/thread_01HZX4AUTHBOUNDARY03');
+  });
+
   it('keeps rendering bootstrap payloads without timeline extensions', async () => {
     const data = liveWorkspace();
     for (const checkpoint of data.checkpoints) {
@@ -294,7 +301,7 @@ describe('PreviouslyOn review workspace', () => {
     await waitFor(() => expect(pollSignal?.aborted).toBe(true));
   });
 
-  it('renders task-local agent ancestry with explicit degraded states and Copy ID guidance only', async () => {
+  it('renders task-local agent ancestry with direct Codex links and Copy ID fallback', async () => {
     const data = liveWorkspace();
     data.agents = agentLineage(data.tasks[0].id);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
@@ -308,9 +315,8 @@ describe('PreviouslyOn review workspace', () => {
     expect(within(tree).getByText('degraded')).toBeInTheDocument();
     expect(within(tree).getByText('unlinked')).toBeInTheDocument();
     expect(within(tree).getByText('Parent task was not returned by the local App Server.')).toBeInTheDocument();
-    expect(screen.getByText('Find in Codex')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Open/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    const openLink = within(tree).getByRole('link', { name: `Open Codex task ${data.agents[1].threadId}` });
+    expect(openLink).toHaveAttribute('href', `codex://threads/${data.agents[1].threadId}`);
 
     await user.click(within(tree).getByRole('button', { name: `Copy Codex task ID ${data.agents[1].threadId}` }));
     expect(writeText).toHaveBeenCalledWith(data.agents[1].threadId);
