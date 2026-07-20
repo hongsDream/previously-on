@@ -10,7 +10,7 @@ questions:
 2. When the current Codex task becomes an unreliable place to continue, how can the same work move
    to a fresh task without losing state or duplicating execution?
 
-The review UI and Context Pack exist to support that continuation. Automatic fresh-task
+The review UI and Context Pack exist to support that continuation. Consent-gated fresh-task
 continuation is a core product capability, not a benchmark-only feature.
 
 ## Included in the `0.1.0-alpha.3` source preview
@@ -23,9 +23,10 @@ continuation is a core product capability, not a benchmark-only feature.
   or exclude/re-include an entire source session from future Context Packs.
 - **Verified Context Packs:** deterministic ordering, fixed budgets, evidence lineage, Git
   freshness, current validation, coverage warnings, and relevant Regression Contracts.
-- **Automatic continuation:** at the provisional boundary, create a persisted Codex task through
-  the official App Server, start the current request with a verified pack, and block the source
-  prompt only after success. Idempotent operation records prevent blind duplicate creation.
+- **Consent-gated continuation:** at the provisional boundary, require Codex tool approval, create
+  a persisted task through the official App Server, start the exact current request with a verified
+  pack, and open the documented desktop deep link. Idempotent operation records prevent blind
+  duplicate creation.
 - **Failure visibility:** pending, recovered, started, and failed rollover state plus the new Codex
   task ID are visible in the task workspace.
 - **Task integrity controls:** deterministic task title suggestions, explicit task editing, and
@@ -35,7 +36,8 @@ continuation is a core product capability, not a benchmark-only feature.
 - **Opt-in AI fact refresh:** a user-triggered beta that runs only after the managed input-only
   permission profile is verified and produces candidates for explicit review, never Evidence.
 - **Local agent lineage:** read-only same-device interactive and sub-agent observation with
-  capability-gated parentage, degraded missing-parent state, Copy ID, and Find in Codex guidance.
+  capability-gated parentage, degraded missing-parent state, direct Codex links, and Copy ID
+  fallback.
 
 ## Provisional alpha policy
 
@@ -78,17 +80,15 @@ records `no_auto_rollover_recommendation` and keeps the pilot policy explicitly 
 
 ## Next product work
 
-1. **Continuation navigation:** focus/open the new Codex task only if a documented desktop
-   interface is introduced; do not depend on private deep links.
-2. **Relationship expansion:** add dependency edges only when a verified build-system or language
+1. **Relationship expansion:** add dependency edges only when a verified build-system or language
    source can prove them; path co-occurrence, import text, and name similarity remain insufficient.
-3. **AI calibration:** obtain fresh user approval, a compatible App Server, and a verified named
+2. **AI calibration:** obtain fresh user approval, a compatible App Server, and a verified named
    permission profile before any real model call. Runtime capability is reported as `ready`,
    `needs_setup`, `unsupported`, or `blocked`; the real calibration/model call in this source
    preview verification remains unavailable/blocked rather than simulated.
-4. **Team access:** design explicit identity, provenance, and access controls before any cloud sync
+3. **Team access:** design explicit identity, provenance, and access controls before any cloud sync
    or cross-device collaboration. Local agent lineage must not be relabelled as a team feature.
-5. **Public release:** satisfy live compatibility, signing/notarization decisions, name review,
+4. **Public release:** satisfy live compatibility, signing/notarization decisions, name review,
    protected publication environments, and human approval before any tag, GitHub Release, or
    crates.io publication.
 

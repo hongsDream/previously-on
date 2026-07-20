@@ -1,7 +1,7 @@
 # Privacy and data handling
 
 PreviouslyOn is local-first and requires no PreviouslyOn API key. It has no telemetry, cloud
-storage, or independent network integration. Automatic continuation asks the user's already
+storage, or independent network integration. User-approved continuation asks the user's already
 configured local Codex App Server to start a model turn; Codex's own provider connection and
 credentials remain under Codex configuration. Beta AI fact refresh uses that same configured App
 Server only after explicit setup opt-in and an explicit Refresh action; it is never automatic.
@@ -22,10 +22,12 @@ selectors, argv test metadata, the source commit and timestamp, and a SHA-256 ev
 does not contain raw prompts, tool output, raw source code, environment values, or secrets.
 Automatic candidate evidence is reduced to normalized structural metadata before hashing.
 
-At an automatic continuation boundary, the current prompt is redacted, capped at 12,000
-characters, and passed to a short-lived local worker over stdin. The full transient value is not
-written to canonical events, SQLite projections, fallback queues, or the UI. The ordinary stored
-UserPrompt event remains redacted and capped at 500 characters.
+At a continuation boundary, the managed hook provides routing IDs but not the full prompt. After
+the user approves the `continue_task` MCP confirmation, the exact current request is redacted,
+capped at 12,000 characters, and passed to a short-lived local worker over stdin. The full
+transient value is not written to PreviouslyOn canonical events, SQLite projections, fallback
+queues, or the review UI. The ordinary stored UserPrompt event remains redacted and capped at 500
+characters. Codex already holds the request in its source-task transcript.
 
 Redaction is defense in depth, not a guarantee that arbitrary secrets can never appear. Review
 the local inspector before sharing an export.
@@ -99,10 +101,11 @@ as historical evidence, labels them untrusted, and never maps their text to deve
 instructions. MCP tools return data; they do not execute commands from history.
 
 Ordinary resume suggestions contain metadata only, and an approved manual resume still uses the
-read-only `resume_task` MCP tool. Automatic fresh-task continuation is the narrow exception: only
-after the deterministic boundary is reached, PreviouslyOn generates the same verified pack,
-places it in an explicitly data-only untrusted block after the current request, and starts a fresh
-Codex turn. Captured text inside the block is never promoted to system or developer instructions.
+read-only `resume_task` MCP tool. Consent-gated fresh-task continuation is the narrow write
+exception: only after the deterministic boundary and fresh Codex tool approval, PreviouslyOn
+generates the same verified pack, places it in an explicitly data-only untrusted block after the
+current request, and starts a fresh Codex turn. Captured text inside the block is never promoted to
+system or developer instructions.
 
 ## Legacy development data
 

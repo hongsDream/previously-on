@@ -852,18 +852,11 @@ pub fn merge_hooks(
         }
         groups.retain(group_has_hooks);
 
-        let mut hook = json!({
+        let hook = json!({
             "type": "command",
             "command": managed_hook_command(executable, data_dir, event),
             "timeout": if event == "Stop" { 30 } else { 10 }
         });
-        if event == "UserPromptSubmit" {
-            // Automatic rollover creates a durable Context Pack and starts a fresh App Server
-            // thread before it blocks the old prompt. Keep this bounded, but leave enough time
-            // for initialize, thread/start, optional name, and turn/start round trips on a cold
-            // App Server. Each individual RPC still has its own shorter client deadline.
-            hook["timeout"] = json!(60);
-        }
         let mut group = json!({ "hooks": [hook] });
         if event == "SessionStart" {
             group["matcher"] = json!("startup|resume|clear|compact");
@@ -952,6 +945,13 @@ fn merge_config_with_ai_refresh(
     server["args"] = value(args);
     server["startup_timeout_sec"] = value(15);
     server["enabled"] = value(true);
+    let mut tools = Table::new();
+    let mut continue_task = Table::new();
+    // The boundary hook can propose this write, but Codex must always stop for fresh user consent
+    // before PreviouslyOn creates or starts another local task.
+    continue_task["approval_mode"] = value("prompt");
+    tools["continue_task"] = Item::Table(continue_task);
+    server["tools"] = Item::Table(tools);
     let mut env = Table::new();
     env["PREVIOUSLY_ON_MANAGED_ID"] = value(MANAGED_ID);
     env["PREVIOUSLY_ON_DATA_DIR"] = value(data_dir.to_string_lossy().to_string());

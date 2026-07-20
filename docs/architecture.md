@@ -36,7 +36,7 @@ Git regression contracts ──────────────────�
                                                   │
                                ┌──────────────────┴──────────────────┐
                                ▼                                     ▼
-                        read-only MCP                         loopback review UI
+                  MCP: 5 reads + approved continue_task      loopback review UI
 ```
 
 The database runs in WAL mode. Canonical events are insert-only during ingestion. Retention
@@ -86,7 +86,7 @@ contracts. It carries provenance for task/session, observed commit, changed file
 literal symbol, required test, and confirmed agent-parent edges. It does not store a second truth
 or infer dependencies from path co-occurrence, imports, or name similarity.
 
-## Session timeline and automatic continuation
+## Session timeline and consent-gated continuation
 
 The session projection records the source App Server thread ID when available, last observed
 activity, turn count, compaction count, and observed context usage. The UI renders relative age
@@ -110,8 +110,12 @@ Continuation eligibility is deterministic and session-scoped:
 - after 72 hours of inactivity, a relevant Git change makes the session eligible.
 
 The seven/80 rule is a provisional alpha policy rather than a model-general threshold. Eligibility
-is checked before each user prompt. At a boundary, the redacted current prompt is carried over a
-bounded child-process stdin channel and is not written to the canonical event log. The worker then:
+is checked before each user prompt. At a boundary, the hook supplies only deterministic routing
+IDs and asks Codex to invoke `continue_task`. Setup pins that one write tool to
+`approval_mode = "prompt"`, so the Codex client must collect fresh user consent before execution.
+Decline or cancel keeps the original turn in the source task. After approval, the exact current
+request is redacted, bounded, carried over local MCP and child-process stdin, and never written to
+the canonical event log. The worker then:
 
 1. validates the source event and repository identity, then writes a deterministic `pending`
    operation event before any external task can be created;
@@ -121,17 +125,18 @@ bounded child-process stdin channel and is not written to the canonical event lo
    records its task ID before doing anything else;
 4. links the new App Server session to the existing PreviouslyOn task, sets a display name on a
    best-effort basis, and calls `turn/start` with the current request plus a bounded verified pack;
-5. records `started`, then returns a UserPromptSubmit `block` decision for only the source prompt.
+5. records `started`; the successful `PostToolUse` hook returns `continue: false` so the source
+   turn stops before it can repeat the work.
 
 The operation ID and all transition event IDs are deterministic. A repeated hook invocation reuses
 the recorded result. If a task ID was durably recorded, recovery resumes that task; if an attempt
 stopped before the ID was recorded, PreviouslyOn refuses to create a possible duplicate. Any App
-Server or validation failure records `failed` and leaves the source request unblocked.
+Server or validation failure records `failed` and leaves the source request available in the
+original turn.
 
-The public App Server interface creates a persisted task but does not expose a way for PreviouslyOn
-to force the Codex desktop UI to focus or open it. The new ID and rollover state are shown in the
-review UI. Local agent rows likewise provide Copy ID and Find in Codex guidance only; no private
-deep link or synthetic Open button is generated.
+After `turn/start`, PreviouslyOn opens the documented `codex://threads/<thread-id>` desktop deep
+link. If the operating-system opener is unavailable, continuation still succeeds and returns the
+same link; the review UI keeps an **Open in Codex** recovery action next to the task ID.
 
 ## Attribution
 
@@ -155,9 +160,9 @@ separates the checkpoint baseline (Then), intervening file changes (Since), curr
 renames, deletions, divergence, and relevant edits are surfaced explicitly. Invalid, superseded,
 stale, broken, or unsupported facts remain excluded by default.
 
-Ordinary user-approved resume remains behind the read-only MCP call. The only automatic pack
-delivery is the boundary-triggered fresh-task flow above; it uses the same verified builder and
-labels the pack as data-only untrusted history.
+Ordinary user-approved resume remains behind the read-only MCP call. The only write-backed pack
+delivery is the boundary-triggered, separately approved fresh-task flow above; it uses the same
+verified builder and labels the pack as data-only untrusted history.
 
 ## Opt-in AI fact refresh
 

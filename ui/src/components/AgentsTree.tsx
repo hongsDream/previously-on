@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Bot, Check, Clipboard, GitFork, Search } from 'lucide-react';
+import { Bot, Check, Clipboard, ExternalLink, GitFork } from 'lucide-react';
 import type { AgentV1, Task } from '../types';
 
 interface AgentsTreeProps {
@@ -48,8 +48,8 @@ export function AgentsTree({ task, agents }: AgentsTreeProps) {
       ) : <p className="agents-empty">No local App Server agent lineage is linked to this task.</p>}
 
       <aside className="find-codex-guide" aria-labelledby="find-codex-title">
-        <Search size={16} />
-        <span><strong id="find-codex-title">Find in Codex</strong>Copy the unique task ID, then paste it into Codex task search. No public desktop focus or open interface is available, so PreviouslyOn does not create a private deep link or an Open button.</span>
+        <ExternalLink size={16} />
+        <span><strong id="find-codex-title">Open in Codex</strong>Use the documented task link directly. Copy the unique task ID only when you need a search fallback.</span>
       </aside>
       <p className="sr-only" aria-live="polite">{copyMessage}</p>
     </section>
@@ -82,6 +82,7 @@ function AgentTreeItem({
         </header>
         <div className="agent-task-id">
           <span><small>Codex task ID</small><code title={agent.threadId}>{agent.threadId}</code></span>
+          <a className="secondary-button" href={codexThreadUrl(agent.threadId)} aria-label={`Open Codex task ${agent.threadId}`}><ExternalLink size={13} /> Open</a>
           <button className="secondary-button" type="button" onClick={() => void onCopy(agent.threadId)} aria-label={`Copy Codex task ID ${agent.threadId}`}>
             {copiedId === agent.threadId ? <Check size={13} /> : <Clipboard size={13} />} {copiedId === agent.threadId ? 'Copied' : 'Copy ID'}
           </button>
@@ -127,6 +128,10 @@ function buildAgentTree(agents: AgentV1[]) {
 
 function shortId(value: string) {
   return value.length > 18 ? `${value.slice(0, 9)}…${value.slice(-6)}` : value;
+}
+
+function codexThreadUrl(threadId: string) {
+  return `codex://threads/${encodeURIComponent(threadId)}`;
 }
 
 function roleLabel(value: string) {

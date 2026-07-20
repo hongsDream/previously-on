@@ -90,10 +90,10 @@ pub enum Commands {
     /// Run the local Unix-socket ingestion daemon.
     #[command(hide = true, alias = "server")]
     Daemon,
-    /// Run the read-only MCP server over stdio.
+    /// Run the MCP server over stdio. Its single local write requires Codex approval.
     #[command(hide = true)]
     Mcp,
-    /// Create a verified fresh-task continuation. Invoked only by the managed prompt hook.
+    /// Create a verified fresh-task continuation. Invoked only after MCP user approval.
     #[command(hide = true)]
     AutoRollover,
 }

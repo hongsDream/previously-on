@@ -7,7 +7,7 @@ claim: this work does not create a tag, GitHub Release, or crates.io publication
 evidence cannot be relabelled for `alpha.3`, and the existing 60 authenticated compatibility
 workflows are not rerun by this product implementation task.
 
-## Alpha.3 App Server capability boundary
+## Alpha.3 App Server and Unreleased desktop boundary
 
 The release regression suite uses fake App Servers to verify the documented experimental request
 shapes without starting a real model turn. `permissionProfile/list` must report the managed
@@ -22,9 +22,10 @@ Agent import requests the documented interactive and sub-agent `sourceKinds` wit
 uses experimental `parentThreadId` only when it is present. Unsupported methods, a blocked
 profile, malformed pagination, cross-repository threads, or missing parents degrade or fail closed;
 `thread/read` must also return the requested ID and same logical repository, and unsafe file paths
-are dropped. These cases are never converted into inferred compatibility. No public Codex desktop
-focus/open interface has been verified, so the source preview exposes Copy ID and Find in Codex
-guidance only.
+are dropped. These cases are never converted into inferred compatibility. The Unreleased
+continuation path uses the documented `codex://threads/<thread-id>` link only after `turn/start`
+succeeds; automatic opening is best-effort and the review UI retains the exact link plus Copy ID
+as recovery actions.
 
 An actual AI calibration/model call remains unavailable in this non-interactive release task. It
 requires a compatible App Server, a verified permission profile, and fresh user approval at the
@@ -34,8 +35,9 @@ expose it.
 The contract references are the official [App Server API overview](https://learn.chatgpt.com/docs/app-server#api-overview),
 [thread start/resume](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread),
 [turn start](https://learn.chatgpt.com/docs/app-server#start-a-turn), and
-[permissions](https://learn.chatgpt.com/docs/permissions) documentation. No private API or
-undocumented desktop deep link is part of this preview.
+[permissions](https://learn.chatgpt.com/docs/permissions) documentation, plus Codex's documented
+[supported links](https://learn.chatgpt.com/docs/reference/commands#supported-links). No private
+API or undocumented desktop deep link is used.
 
 The repository contains a local mapped-regression matrix with five categories and six entries each:
 
