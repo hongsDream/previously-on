@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -23,7 +24,9 @@ use crate::store::Store;
 use crate::APP_VERSION;
 
 pub const TESTED_CODEX_VERSION: &str = "0.144.3";
-pub const SUPPORTED_CODEX_VERSIONS: [&str; 2] = ["0.144.3", "0.144.2"];
+pub const TESTED_CODEX_VERSIONS: [&str; 2] = ["0.144.3", "0.144.2"];
+#[deprecated(note = "Codex versions are provenance only; use feature capability reports")]
+pub const SUPPORTED_CODEX_VERSIONS: [&str; 2] = TESTED_CODEX_VERSIONS;
 const MAX_PAGES: usize = 1_000;
 pub const MAX_APP_SERVER_RPC_BYTES: usize = 8 * 1024 * 1024;
 const MALFORMED_TOKEN_USAGE_WARNING: &str =
@@ -47,6 +50,29 @@ pub enum AppServerCapabilityStatus {
     Unsupported,
 }
 
+impl Default for AppServerCapabilityStatus {
+    fn default() -> Self {
+        Self::Unsupported
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerFeatureCapabilitiesV1 {
+    #[serde(default)]
+    pub core_import: AppServerCapabilityStatus,
+    #[serde(default)]
+    pub continuation: AppServerCapabilityStatus,
+    #[serde(default)]
+    pub experimental_refresh: AppServerCapabilityStatus,
+}
+
+#[derive(Debug)]
+struct AppServerSchemaProbe {
+    supported_methods: Vec<String>,
+    capabilities: AppServerFeatureCapabilitiesV1,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppServerCapabilityReport {
@@ -55,6 +81,8 @@ pub struct AppServerCapabilityReport {
     pub tested_codex_version: String,
     pub detected_codex_version: Option<String>,
     pub app_server_user_agent: Option<String>,
+    #[serde(default)]
+    pub capabilities: AppServerFeatureCapabilitiesV1,
     pub supported_methods: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -67,6 +95,7 @@ impl AppServerCapabilityReport {
             tested_codex_version: TESTED_CODEX_VERSION.to_string(),
             detected_codex_version: None,
             app_server_user_agent: None,
+            capabilities: AppServerFeatureCapabilitiesV1::default(),
             supported_methods: Vec::new(),
             warnings: vec![reason.into()],
         }
@@ -885,6 +914,7 @@ struct ThreadPage {
 }
 
 pub struct AppServerClient {
+    program: PathBuf,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -916,7 +946,8 @@ impl AppServerClient {
         program: impl AsRef<Path>,
         experimental_api: bool,
     ) -> Result<Self> {
-        let mut command = Command::new(program.as_ref());
+        let program = program.as_ref().to_path_buf();
+        let mut command = Command::new(&program);
         command
             .arg("app-server")
             .arg("--stdio")
@@ -931,7 +962,7 @@ impl AppServerClient {
         }
         let mut child = command
             .spawn()
-            .with_context(|| format!("start {} app-server", program.as_ref().display()))?;
+            .with_context(|| format!("start {} app-server", program.display()))?;
         let stdin = child
             .stdin
             .take()
@@ -941,6 +972,7 @@ impl AppServerClient {
             .take()
             .context("Codex app-server stdout unavailable")?;
         let mut client = Self {
+            program,
             child,
             stdin,
             stdout: BufReader::new(stdout),
@@ -981,45 +1013,86 @@ impl AppServerClient {
     }
 
     pub async fn capability_report(&mut self) -> AppServerCapabilityReport {
-        let detected_codex_version = codex_version().await.ok();
+        let detected_codex_version = codex_version_with_program(&self.program).await.ok();
         let app_server_user_agent = self
             .initialize_result
             .get("userAgent")
             .and_then(Value::as_str)
             .map(str::to_string);
         let mut warnings = Vec::new();
-        let status = match detected_codex_version.as_deref() {
-            Some(version) if SUPPORTED_CODEX_VERSIONS.contains(&version) => {
-                AppServerCapabilityStatus::Complete
-            }
-            Some(version) => {
+        if let Some(version) = detected_codex_version.as_deref() {
+            if !TESTED_CODEX_VERSIONS.contains(&version) {
                 warnings.push(format!(
-                    "Codex {version} differs from supported schemas {}",
-                    SUPPORTED_CODEX_VERSIONS.join(", ")
+                    "Codex {version} differs from tested provenance {}; readiness is determined by probed App Server contracts",
+                    TESTED_CODEX_VERSIONS.join(", ")
                 ));
-                AppServerCapabilityStatus::Degraded
             }
-            None => {
-                warnings.push("unable to determine Codex version".to_string());
-                AppServerCapabilityStatus::Degraded
+        } else {
+            warnings.push(
+                "unable to determine Codex version; readiness is determined by probed App Server contracts"
+                    .to_string(),
+            );
+        }
+
+        let (mut supported_methods, mut capabilities) =
+            match probe_app_server_schema(&self.program).await {
+                Ok(probe) => (probe.supported_methods, probe.capabilities),
+                Err(error) => {
+                    warnings.push(crate::redaction::redact_excerpt(&format!(
+                        "App Server schema probe was unavailable: {error}"
+                    )));
+                    (
+                        vec!["initialize".to_string(), "initialized".to_string()],
+                        AppServerFeatureCapabilitiesV1 {
+                            core_import: AppServerCapabilityStatus::Degraded,
+                            continuation: AppServerCapabilityStatus::Degraded,
+                            experimental_refresh: AppServerCapabilityStatus::Degraded,
+                        },
+                    )
+                }
+            };
+        match self
+            .request_timed(
+                "thread/list",
+                json!({
+                    "limit": 1,
+                    "sortKey": "created_at",
+                    "sortDirection": "desc",
+                    "useStateDbOnly": false
+                }),
+            )
+            .await
+        {
+            Ok(result) if result.get("data").and_then(Value::as_array).is_some() => {
+                if !supported_methods
+                    .iter()
+                    .any(|method| method == "thread/list")
+                {
+                    supported_methods.push("thread/list".to_string());
+                }
             }
-        };
+            Ok(_) => {
+                capabilities.core_import = AppServerCapabilityStatus::Degraded;
+                warnings.push("thread/list readiness probe omitted a data array".to_string());
+            }
+            Err(error) => {
+                capabilities.core_import = AppServerCapabilityStatus::Degraded;
+                warnings.push(crate::redaction::redact_excerpt(&format!(
+                    "thread/list readiness probe failed: {error}"
+                )));
+            }
+        }
+        supported_methods.sort();
+        supported_methods.dedup();
+        let status = aggregate_capability_status(&capabilities);
         AppServerCapabilityReport {
             schema_version: 1,
             status,
             tested_codex_version: TESTED_CODEX_VERSION.to_string(),
             detected_codex_version,
             app_server_user_agent,
-            supported_methods: vec![
-                "initialize".to_string(),
-                "initialized".to_string(),
-                "thread/list".to_string(),
-                "thread/read".to_string(),
-                "thread/start".to_string(),
-                "thread/resume".to_string(),
-                "thread/name/set".to_string(),
-                "turn/start".to_string(),
-            ],
+            capabilities,
+            supported_methods,
             warnings,
         }
     }
@@ -1538,8 +1611,7 @@ impl AppServerClient {
                     );
                 }
             }
-            let (thread, mut thread_coverage) =
-                normalize_and_assess_thread(thread, &summary.cli_version);
+            let (thread, mut thread_coverage) = normalize_and_assess_thread(thread);
             self.apply_collector_warnings(&mut thread_coverage);
             let coverage = CoverageV1::merge([&summary.coverage, &thread_coverage]);
             if coverage.status != CoverageStatus::Complete {
@@ -2043,18 +2115,8 @@ fn is_deleted_thread_error(error: &AppServerRpcError) -> bool {
         || evidence.contains("thread_not_found")
 }
 
-fn normalize_and_assess_thread(mut thread: Value, cli_version: &str) -> (Value, CoverageV1) {
+fn normalize_and_assess_thread(mut thread: Value) -> (Value, CoverageV1) {
     let mut coverage = complete_coverage(["thread/read"]);
-    if !SUPPORTED_CODEX_VERSIONS.contains(&cli_version) {
-        degrade(
-            &mut coverage,
-            "tested App Server version",
-            format!(
-                "thread was recorded by Codex {cli_version}; supported versions are {}",
-                SUPPORTED_CODEX_VERSIONS.join(", ")
-            ),
-        );
-    }
 
     if thread.get("compacted").and_then(Value::as_bool) == Some(true)
         || value_contains_marker(thread.get("status"), &["compact", "incomplete"])
@@ -2179,12 +2241,155 @@ fn is_known_thread_item_type(item_type: &str) -> bool {
     )
 }
 
-pub async fn codex_version() -> Result<String> {
-    let output = Command::new("codex")
+fn aggregate_capability_status(
+    capabilities: &AppServerFeatureCapabilitiesV1,
+) -> AppServerCapabilityStatus {
+    if capabilities.core_import == AppServerCapabilityStatus::Unsupported {
+        AppServerCapabilityStatus::Unsupported
+    } else if capabilities.core_import == AppServerCapabilityStatus::Complete
+        && capabilities.continuation == AppServerCapabilityStatus::Complete
+        && capabilities.experimental_refresh == AppServerCapabilityStatus::Complete
+    {
+        AppServerCapabilityStatus::Complete
+    } else {
+        AppServerCapabilityStatus::Degraded
+    }
+}
+
+async fn probe_app_server_schema(program: &Path) -> Result<AppServerSchemaProbe> {
+    let output_dir =
+        std::env::temp_dir().join(format!("previously-app-server-schema-{}", Uuid::now_v7()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&output_dir)
+            .with_context(|| {
+                format!(
+                    "create private App Server schema directory {}",
+                    output_dir.display()
+                )
+            })?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(&output_dir).with_context(|| {
+            format!(
+                "create private App Server schema directory {}",
+                output_dir.display()
+            )
+        })?;
+    }
+
+    let result = async {
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Command::new(program)
+                .args([
+                    "app-server",
+                    "generate-json-schema",
+                    "--experimental",
+                    "--out",
+                ])
+                .arg(&output_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status(),
+        )
+        .await
+        .context("Codex App Server schema generation timed out")??;
+        if !status.success() {
+            bail!("Codex App Server schema generation exited with {status}");
+        }
+
+        let methods = [
+            ("thread/list", "ThreadList"),
+            ("thread/read", "ThreadRead"),
+            ("thread/start", "ThreadStart"),
+            ("thread/resume", "ThreadResume"),
+            ("thread/name/set", "ThreadSetName"),
+            ("turn/start", "TurnStart"),
+            ("permissionProfile/list", "PermissionProfileList"),
+        ];
+        let v2 = output_dir.join("v2");
+        let confirmed = methods
+            .iter()
+            .filter_map(|(method, schema)| {
+                (v2.join(format!("{schema}Params.json")).is_file()
+                    && v2.join(format!("{schema}Response.json")).is_file())
+                .then_some(*method)
+            })
+            .collect::<BTreeSet<_>>();
+
+        let mut supported_methods = vec!["initialize".to_string(), "initialized".to_string()];
+        supported_methods.extend(confirmed.iter().map(|method| (*method).to_string()));
+
+        let core_import = status_for_required_methods(&confirmed, &["thread/list", "thread/read"]);
+        let continuation = status_for_required_methods(
+            &confirmed,
+            &[
+                "thread/start",
+                "thread/resume",
+                "thread/name/set",
+                "turn/start",
+            ],
+        );
+        let refresh_methods = ["permissionProfile/list", "thread/start", "turn/start"];
+        let mut experimental_refresh = status_for_required_methods(&confirmed, &refresh_methods);
+        if experimental_refresh == AppServerCapabilityStatus::Complete {
+            let thread_start = read_schema(&v2.join("ThreadStartParams.json"))?;
+            let turn_start = read_schema(&v2.join("TurnStartParams.json"))?;
+            let thread_properties = thread_start.get("properties").and_then(Value::as_object);
+            let turn_properties = turn_start.get("properties").and_then(Value::as_object);
+            let exact_fields = thread_properties.is_some_and(|properties| {
+                properties.contains_key("permissions") && properties.contains_key("approvalPolicy")
+            }) && turn_properties
+                .is_some_and(|properties| properties.contains_key("outputSchema"));
+            if !exact_fields {
+                experimental_refresh = AppServerCapabilityStatus::Degraded;
+            }
+        }
+
+        Ok(AppServerSchemaProbe {
+            supported_methods,
+            capabilities: AppServerFeatureCapabilitiesV1 {
+                core_import,
+                continuation,
+                experimental_refresh,
+            },
+        })
+    }
+    .await;
+    fs::remove_dir_all(&output_dir).ok();
+    result
+}
+
+fn status_for_required_methods(
+    confirmed: &BTreeSet<&str>,
+    required: &[&str],
+) -> AppServerCapabilityStatus {
+    if required.iter().all(|method| confirmed.contains(method)) {
+        AppServerCapabilityStatus::Complete
+    } else if required.iter().any(|method| confirmed.contains(method)) {
+        AppServerCapabilityStatus::Degraded
+    } else {
+        AppServerCapabilityStatus::Unsupported
+    }
+}
+
+fn read_schema(path: &Path) -> Result<Value> {
+    let bytes = fs::read(path).with_context(|| format!("read schema {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse schema {}", path.display()))
+}
+
+async fn codex_version_with_program(program: &Path) -> Result<String> {
+    let output = Command::new(program)
         .arg("--version")
         .output()
         .await
-        .context("run codex --version")?;
+        .with_context(|| format!("run {} --version", program.display()))?;
     if !output.status.success() {
         bail!("codex --version exited with {}", output.status);
     }
@@ -2194,6 +2399,10 @@ pub async fn codex_version() -> Result<String> {
         .last()
         .map(str::to_string)
         .context("codex --version returned no version")
+}
+
+pub async fn codex_version() -> Result<String> {
+    codex_version_with_program(Path::new("codex")).await
 }
 
 #[cfg(test)]

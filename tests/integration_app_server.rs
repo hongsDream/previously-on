@@ -490,6 +490,155 @@ async fn rejects_an_oversized_unterminated_app_server_frame() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn capability_readiness_comes_from_schema_and_safe_runtime_not_version() {
+    use previously_on::app_server::{AppServerCapabilityStatus, AppServerClient};
+
+    let (_temp, fake) = fake_codex(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'codex-cli 9.9.9'
+  exit 0
+fi
+if [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ]; then
+  out="$5"
+  mkdir -p "$out/v2"
+  for schema in ThreadList ThreadRead ThreadStart ThreadResume ThreadSetName TurnStart PermissionProfileList; do
+    printf '%s\n' '{}' > "$out/v2/${schema}Params.json"
+    printf '%s\n' '{}' > "$out/v2/${schema}Response.json"
+  done
+  printf '%s\n' '{"properties":{"permissions":{},"approvalPolicy":{}}}' > "$out/v2/ThreadStartParams.json"
+  printf '%s\n' '{"properties":{"outputSchema":{}}}' > "$out/v2/TurnStartParams.json"
+  exit 0
+fi
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/9.9.9"}}'
+IFS= read -r initialized
+IFS= read -r list
+case "$list" in *'"method":"thread/list"'*) ;; *) exit 10 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[],"nextCursor":null}}'
+"#,
+    );
+
+    let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
+    let report = client.capability_report().await;
+    assert_eq!(report.status, AppServerCapabilityStatus::Complete);
+    assert_eq!(
+        report.capabilities.core_import,
+        AppServerCapabilityStatus::Complete
+    );
+    assert_eq!(
+        report.capabilities.continuation,
+        AppServerCapabilityStatus::Complete
+    );
+    assert_eq!(
+        report.capabilities.experimental_refresh,
+        AppServerCapabilityStatus::Complete
+    );
+    assert_eq!(report.detected_codex_version.as_deref(), Some("9.9.9"));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("tested provenance")));
+    assert_eq!(
+        report.supported_methods,
+        [
+            "initialize",
+            "initialized",
+            "permissionProfile/list",
+            "thread/list",
+            "thread/name/set",
+            "thread/read",
+            "thread/resume",
+            "thread/start",
+            "turn/start",
+        ]
+    );
+    client.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn capability_probe_degrades_incomplete_schema_and_malformed_runtime_list() {
+    use previously_on::app_server::{AppServerCapabilityStatus, AppServerClient};
+
+    let (_temp, fake) = fake_codex(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'codex-cli 0.144.3'
+  exit 0
+fi
+if [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ]; then
+  out="$5"
+  mkdir -p "$out/v2"
+  printf '%s\n' '{}' > "$out/v2/ThreadListParams.json"
+  printf '%s\n' '{}' > "$out/v2/ThreadListResponse.json"
+  exit 0
+fi
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
+IFS= read -r initialized
+IFS= read -r list
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":"malformed"}}'
+"#,
+    );
+
+    let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
+    let report = client.capability_report().await;
+    assert_eq!(report.status, AppServerCapabilityStatus::Degraded);
+    assert_eq!(
+        report.capabilities.core_import,
+        AppServerCapabilityStatus::Degraded
+    );
+    assert_eq!(
+        report.capabilities.continuation,
+        AppServerCapabilityStatus::Unsupported
+    );
+    assert_eq!(
+        report.capabilities.experimental_refresh,
+        AppServerCapabilityStatus::Unsupported
+    );
+    assert_eq!(
+        report.supported_methods,
+        ["initialize", "initialized", "thread/list"]
+    );
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("omitted a data array")));
+    client.shutdown().await.unwrap();
+}
+
+#[test]
+fn capability_report_defaults_new_feature_fields_when_reading_legacy_json() {
+    use previously_on::app_server::{AppServerCapabilityReport, AppServerCapabilityStatus};
+    use serde_json::json;
+
+    let report: AppServerCapabilityReport = serde_json::from_value(json!({
+        "schemaVersion": 1,
+        "status": "degraded",
+        "testedCodexVersion": "0.144.3",
+        "detectedCodexVersion": "0.144.2",
+        "appServerUserAgent": "codex-cli/0.144.2",
+        "supportedMethods": ["thread/list"],
+        "warnings": []
+    }))
+    .unwrap();
+    assert_eq!(
+        report.capabilities.core_import,
+        AppServerCapabilityStatus::Unsupported
+    );
+    assert_eq!(
+        report.capabilities.continuation,
+        AppServerCapabilityStatus::Unsupported
+    );
+    assert_eq!(
+        report.capabilities.experimental_refresh,
+        AppServerCapabilityStatus::Unsupported
+    );
+}
+
+#[cfg(unix)]
 fn fake_codex(script: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -713,9 +862,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-missing-
 #[cfg(unix)]
 #[tokio::test]
 async fn isolates_deleted_and_degraded_threads_and_preserves_rpc_error_fields() {
-    use previously_on::app_server::{
-        AppServerClient, ThreadImportDisposition, TESTED_CODEX_VERSION,
-    };
+    use previously_on::app_server::{AppServerClient, ThreadImportDisposition};
     use previously_on::domain::CoverageStatus;
 
     let (_repo_temp, repo) = git_repository();
@@ -774,11 +921,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-good","c
         .find(|thread| thread.id == "thread-compact")
         .unwrap();
     assert_eq!(compact.coverage.status, CoverageStatus::Degraded);
-    assert!(compact
+    assert!(!compact
         .coverage
         .warnings
         .iter()
-        .any(|warning| warning.contains(TESTED_CODEX_VERSION)));
+        .any(|warning| warning.contains("supported versions")));
     assert!(compact.thread["turns"][0]["id"]
         .as_str()
         .unwrap()
