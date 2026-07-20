@@ -18,6 +18,9 @@ must be bound to the reviewed commit. Any public-release item in the final secti
       request fields, no sandbox/permissions conflict, strict/malformed output, timeout/restart,
       idempotency, prompt injection/redaction, unavailable metrics, lineage pagination,
       cross-repository skips, and missing-parent degradation.
+- [ ] Latest and previous stable Codex CLI probes generate official App Server schemas and confirm
+      feature-level core import, continuation, experimental refresh, initialize, and read-only list
+      contracts without a model call or task creation. Version strings remain provenance only.
 - [ ] Secret scan and a focused security review find no unresolved critical/high issue in the
       grouping, graph, AI refresh, lineage, setup, or loopback API changes.
 - [ ] `./scripts/build-release.sh` completes packaging, extracted-source offline installation,

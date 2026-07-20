@@ -18,6 +18,14 @@ inherited rather than hard-coded. A single initialized client performs profile v
 execution from a minimal allowlisted environment; concurrent operation/candidate claims are
 transactional and cannot fan out duplicate calls.
 
+App Server readiness is capability-based rather than version-gated. The detected CLI version and
+the `0.144.3`/`0.144.2` test provenance are reported as warnings only. Core import, continuation,
+and experimental refresh are evaluated separately from the installed binary's official
+`generate-json-schema` output; a bounded read-only `thread/list` also verifies the live result
+shape. `supportedMethods` contains only schema-confirmed methods plus methods observed through that
+safe runtime probe. `previously doctor` performs these checks without creating a thread, starting a
+turn, or invoking a model.
+
 Agent import requests the documented interactive and sub-agent `sourceKinds` with pagination and
 uses experimental `parentThreadId` only when it is present. Unsupported methods, a blocked
 profile, malformed pagination, cross-repository threads, or missing parents degrade or fail closed;
@@ -60,7 +68,12 @@ regression traceability, not evidence that 30 real Codex workflows ran.
 scripts/run-compatibility.sh --codex-app-current <build> --codex-app-previous <build>
 ```
 
-By default the driver queries npm, selects the two stable CLI versions, installs them in a temporary directory, probes their documented `initialize` and `thread/list` App Server shapes, then runs all 30 mapped local regressions for both version slots. It writes exact versions and results to `outputs/mapped-compatibility-results.json`.
+By default the driver queries npm, selects the two stable CLI versions, installs them in a temporary
+directory, validates their official experimental JSON schemas, then probes documented `initialize`
+and read-only `thread/list` App Server shapes. It requires core import, continuation, and
+experimental refresh schema contracts to be complete before running all 30 mapped local
+regressions for both version slots. It writes exact versions and results to
+`outputs/mapped-compatibility-results.json`.
 
 The result deliberately separates:
 

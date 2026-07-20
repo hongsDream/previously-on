@@ -20,7 +20,30 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$STAGE/home" "$STAGE/data" "$STAGE/repo" "$STAGE/bin"
-printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "codex-cli 0.0.0-offline"' > "$STAGE/bin/codex"
+cat > "$STAGE/bin/codex" <<'FAKE_CODEX'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s\n' "codex-cli 0.0.0-offline"
+  exit 0
+fi
+if [[ "${1:-}" == "app-server" && "${2:-}" == "generate-json-schema" ]]; then
+  out="${5:?missing schema output directory}"
+  mkdir -p "$out/v2"
+  for schema in ThreadList ThreadRead ThreadStart ThreadResume ThreadSetName TurnStart PermissionProfileList; do
+    printf '%s\n' '{}' > "$out/v2/${schema}Params.json"
+    printf '%s\n' '{}' > "$out/v2/${schema}Response.json"
+  done
+  printf '%s\n' '{"properties":{"permissions":{},"approvalPolicy":{}}}' > "$out/v2/ThreadStartParams.json"
+  printf '%s\n' '{"properties":{"outputSchema":{}}}' > "$out/v2/TurnStartParams.json"
+  exit 0
+fi
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.0.0-offline"}}'
+IFS= read -r initialized
+IFS= read -r list
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[],"nextCursor":null}}'
+FAKE_CODEX
 chmod 0755 "$STAGE/bin/codex"
 git -C "$STAGE/repo" init -q
 git -C "$STAGE/repo" config user.name PreviouslyOn

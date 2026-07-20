@@ -12,7 +12,9 @@ use directories::BaseDirs;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::app_server::{codex_version, AppServerClient, SUPPORTED_CODEX_VERSIONS};
+use crate::app_server::{
+    codex_version, inspect_capabilities, AppServerCapabilityStatus, AppServerClient,
+};
 use crate::domain::{CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind};
 use crate::hook::{HookEvent, HookIngressConfig};
 use crate::setup::{self, SetupPaths, MANAGED_ID};
@@ -455,14 +457,7 @@ async fn doctor(config: &AppConfig) -> DoctorReport {
         Ok(version) => checks.push(DoctorCheck {
             name: "codex",
             ok: true,
-            detail: if SUPPORTED_CODEX_VERSIONS.contains(&version.as_str()) {
-                version
-            } else {
-                format!(
-                    "{version}; degraded compatibility until probed (supported: {})",
-                    SUPPORTED_CODEX_VERSIONS.join(", ")
-                )
-            },
+            detail: version,
         }),
         Err(error) => checks.push(DoctorCheck {
             name: "codex",
@@ -470,6 +465,42 @@ async fn doctor(config: &AppConfig) -> DoctorReport {
             detail: error.to_string(),
         }),
     }
+
+    let app_server = inspect_capabilities().await;
+    let warnings = if app_server.warnings.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", app_server.warnings.join("; "))
+    };
+    let capability_status = |status| match status {
+        AppServerCapabilityStatus::Complete => "complete",
+        AppServerCapabilityStatus::Degraded => "degraded",
+        AppServerCapabilityStatus::Unsupported => "unsupported",
+    };
+    checks.push(DoctorCheck {
+        name: "Codex core import",
+        ok: app_server.capabilities.core_import == AppServerCapabilityStatus::Complete,
+        detail: format!(
+            "{}{warnings}",
+            capability_status(app_server.capabilities.core_import)
+        ),
+    });
+    checks.push(DoctorCheck {
+        name: "Codex continuation",
+        ok: app_server.capabilities.continuation == AppServerCapabilityStatus::Complete,
+        detail: format!(
+            "{}{warnings}",
+            capability_status(app_server.capabilities.continuation)
+        ),
+    });
+    checks.push(DoctorCheck {
+        name: "Codex experimental refresh",
+        ok: true,
+        detail: format!(
+            "{} (optional){warnings}",
+            capability_status(app_server.capabilities.experimental_refresh)
+        ),
+    });
 
     let setup = setup::read_manifest(&config.setup_paths().manifest_path());
     checks.push(match setup {

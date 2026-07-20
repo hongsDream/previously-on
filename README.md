@@ -81,6 +81,11 @@ previously contracts validate
 previously contracts check --base origin/main --execute --json
 ```
 
+`previously doctor` is read-only: it generates the installed App Server's official JSON schema,
+performs `initialize` and a bounded `thread/list`, and reports readiness separately for core
+import, continuation, and optional experimental refresh. The detected Codex version is provenance,
+not a feature gate; doctor never creates a task or starts a model turn.
+
 AI fact refresh is beta and disabled by default. To install the managed input-only profile, opt in
 explicitly, restart Codex, and use the review UI's **Refresh** button:
 
