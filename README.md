@@ -1,13 +1,41 @@
 # PreviouslyOn
 
-PreviouslyOn is a local-first, verifiable project-memory and continuation layer for Codex. It
-connects captured sessions to the codebase, Git state, test evidence, decisions, and open work. At
-a continuation boundary it can start the current request in a fresh Codex task with a verified,
-bounded Context Pack.
+PreviouslyOn is a local Apple Silicon macOS companion for Codex that turns captured coding work
+into reviewable checkpoints and bounded Context Packs. It helps a fresh Codex task continue with
+Git-validated project context without replaying chats, syncing a cloud account, or treating saved
+history as instructions.
 
 Version `0.1.0-alpha.3` is a verified source preview. This change does not create a tag, GitHub
 Release, or crates.io publication. Historical evidence is always untrusted data, not an
 instruction and not a replacement for checking the current source.
+
+## First checkpoint in about five minutes
+
+With the reviewed `previously` binary installed, use one real repository and work normally—no
+synthetic demo data is required:
+
+```bash
+previously setup codex --repo '/absolute/path/to/your repository'
+previously doctor
+```
+
+Restart Codex manually once so it loads the managed Hooks and MCP server, then start the first
+captured session:
+
+```bash
+previously run codex --repo '/absolute/path/to/your repository' --
+```
+
+Finish that Codex session normally, then check and open the local review UI:
+
+```bash
+previously status
+previously ui
+```
+
+The first useful result is a local checkpoint connected to observed Git changes and evidence. If
+it does not appear, run `previously doctor`; it performs only schema and read-only App Server
+checks and does not create a task or call a model.
 
 ## What the alpha includes
 
@@ -130,8 +158,8 @@ already uses that command name.
 5. On a later first prompt, Codex may show a small resume candidate. Nothing is loaded until the
    user approves it and `resume_task` is called through MCP.
 6. The project overview shows active tasks, recent source task IDs, decisions, open items, code
-   areas, and an evidence-backed relationship graph with an equivalent table. Task sessions can be moved,
-   merged, split, or undone through previewed append-only operations. The task inspector shows
+   areas, and an evidence-backed relationship graph with an equivalent table. Task sessions can
+   be moved, merged, split, or undone through previewed append-only operations. The task inspector shows
    Codebase Lineage, local agent lineage, checkpoints, and why facts were selected. Facts can be
    edited, deprecated after a Git commit, confirmed, pinned, invalidated, or superseded; a
    captured session can be excluded from future packs.

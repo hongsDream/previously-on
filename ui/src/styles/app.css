@@ -805,6 +805,10 @@
 .setup-command-list li > span:nth-child(2) { min-width: 0; display: grid; gap: 7px; }
 .setup-command-list strong { font-size: 12px; }
 .setup-command-list code { min-width: 0; display: flex; align-items: center; gap: 8px; overflow-x: auto; color: #314159; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.setup-manual-step { color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.registered-empty-actions { text-align: left; }
+.registered-empty-actions .setup-command-list { margin-top: 0; }
+.registered-empty-actions .refresh-bootstrap-button { display: flex; align-items: center; gap: 7px; margin: 18px auto 0; }
 .setup-copy-error { margin: 12px 0 0; color: var(--danger); font-size: 12px; }
 .degraded-empty-state code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
