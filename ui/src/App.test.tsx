@@ -138,6 +138,12 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getAllByText('Active tasks').length).toBeGreaterThan(0);
     expect(screen.getByText('Evidence-backed relationship graph')).toBeInTheDocument();
 
+    const preview = screen.getByRole('button', { name: 'Preview context pack' });
+    preview.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('heading', { name: 'Refactor authentication boundary' })).toBeInTheDocument();
+    expect(screen.getByText('Needs review')).toBeInTheDocument();
+
     await user.click(screen.getAllByRole('button', { name: 'Sessions' })[0]);
     expect(screen.getByText('Recent sessions')).toBeInTheDocument();
     expect(screen.getByText('thread_01HZX4AUTHBOUNDARY03')).toBeInTheDocument();
@@ -151,6 +157,7 @@ describe('PreviouslyOn review workspace', () => {
     await screen.findByRole('heading', { name: 'Refactor authentication boundary' });
     const taskButtons = screen.getAllByRole('button', { name: 'Tasks' });
     const sessionButtons = screen.getAllByRole('button', { name: 'Sessions' });
+    const evidenceButtons = screen.getAllByRole('button', { name: 'Evidence' });
     const settingsButtons = screen.getAllByRole('button', { name: 'Settings' });
     expect(taskButtons).toHaveLength(2);
     expect(sessionButtons).toHaveLength(2);
@@ -168,6 +175,10 @@ describe('PreviouslyOn review workspace', () => {
     await user.click(settingsButtons[1]);
     expect(settingsButtons[1]).toHaveClass('active');
     expect(screen.getByRole('heading', { name: 'AI-assisted fact refresh' })).toBeInTheDocument();
+
+    await user.click(evidenceButtons[1]);
+    expect(screen.getByLabelText('Evidence inspector')).toHaveClass('mobile-open');
+    expect(screen.getByRole('heading', { name: 'Refactor authentication boundary' })).toBeInTheDocument();
   });
 
   it.each([
@@ -584,26 +595,39 @@ describe('PreviouslyOn review workspace', () => {
   });
 
   it('renders a connected empty workspace when the API has no tasks', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        repository: { name: 'new-repo', path: '/tmp/new-repo', branch: 'main', connected: true, state: 'registered-empty', captureHealth: 'good' },
+        repository: { name: 'new-repo', path: '/tmp/My Repo', branch: 'main', connected: true, state: 'registered-empty', captureHealth: 'good' },
         tasks: [],
         checkpoints: [],
         facts: [],
         evidence: [],
         contextPacks: {},
       }),
-    }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
 
     const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'new-repo is connected' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Regression contracts' })).toBeInTheDocument();
     expect(screen.getByText('Readiness unavailable')).toBeInTheDocument();
-    expect(screen.getByText(/ready to capture the next Codex session/)).toBeInTheDocument();
+    expect(screen.getByText(/Start one captured Codex session/)).toBeInTheDocument();
+    expect(screen.getByText("previously run codex --repo '/tmp/My Repo' --")).toBeInTheDocument();
+    expect(screen.getByText('previously doctor')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview context pack' })).toBeDisabled();
+    expect(screen.getAllByRole('button', { name: 'Evidence' }).every((button) => button.hasAttribute('disabled'))).toBe(true);
     expect(screen.queryByText(/sample workspace/)).not.toBeInTheDocument();
+
+    const copyRun = screen.getByRole('button', { name: 'Copy Start a captured Codex session' });
+    copyRun.focus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("previously run codex --repo '/tmp/My Repo' --"));
+    await user.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
     const settings = screen.getAllByRole('button', { name: 'Settings' });
     await user.click(settings.at(-1)!);
@@ -658,11 +682,42 @@ describe('PreviouslyOn review workspace', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith([
       "previously setup codex --repo '/tmp/My Repo'",
       'previously doctor',
-      'Restart Codex',
       "previously run codex --repo '/tmp/My Repo' --",
     ].join('\n')));
+    expect(screen.getByText('Restart Codex manually')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy Restart Codex manually' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copied all' })).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables pack and evidence controls when an active task has neither', async () => {
+    const data = liveWorkspace();
+    data.contextPacks = {};
+    data.evidence = [];
+    data.facts = [];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Refactor authentication boundary' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview context pack' })).toBeDisabled();
+    expect(screen.getAllByRole('button', { name: 'Evidence' }).every((button) => button.hasAttribute('disabled'))).toBe(true);
+    expect(screen.queryByLabelText('Evidence inspector')).not.toBeInTheDocument();
+  });
+
+  it('renders the actual evidence sequence for arbitrary evidence IDs', async () => {
+    const data = liveWorkspace();
+    data.evidence[1].id = 'evidence-arbitrary-42';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await screen.findByLabelText('Evidence item');
+    await user.selectOptions(screen.getByLabelText('Evidence item'), 'evidence-arbitrary-42');
+    expect(await screen.findByText('Evidence ID: evidence-arbitrary-42')).toBeInTheDocument();
+    expect(screen.getByText('E-2')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('E-2-LMN');
   });
 
   it.each([

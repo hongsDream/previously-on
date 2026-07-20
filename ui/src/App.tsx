@@ -2,7 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { AppHeader } from './components/AppHeader';
 import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
-import { FirstRunSetup } from './components/FirstRunSetup';
+import { FirstRunSetup, RegisteredEmptyActions } from './components/FirstRunSetup';
 import { ProjectOverview } from './components/ProjectOverview';
 import { Sidebar } from './components/Sidebar';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -122,6 +122,24 @@ export function App() {
     }
   };
 
+  async function handleBootstrapRefresh() {
+    if (offlineFallback || mutationPending) return;
+    setMutationPending(true);
+    setActionError('');
+    try {
+      const normalized = normalizeBootstrap(await fetchBootstrap());
+      const selection = resolveTaskSelection(normalized, selectedTaskId, selectedCheckpointId, selectedEvidenceId);
+      setData(normalized);
+      setSelectedTaskId(selection.taskId);
+      setSelectedCheckpointId(selection.checkpointId);
+      setSelectedEvidenceId(selection.evidenceId);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'The local status could not be refreshed.');
+    } finally {
+      setMutationPending(false);
+    }
+  }
+
   async function handleExport() {
     if (offlineFallback || isUnregistered || mutationPending) return;
     setActionError('');
@@ -237,7 +255,7 @@ export function App() {
           onExport={() => void handleExport()}
           onPurge={() => void handlePurge()}
           actionsDisabled={offlineFallback || isUnregistered || mutationPending}
-          previewDisabled={isUnregistered}
+          previewDisabled
         />
         {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
         <div className="app-body empty-app-body">
@@ -252,6 +270,7 @@ export function App() {
             activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
             onOverviewOpen={() => setWorkspaceView('task')}
             onEvidenceOpen={() => setMobileInspectorOpen(true)}
+            evidenceEnabled={false}
             onSettingsOpen={() => setWorkspaceView('settings')}
           />
           {workspaceView === 'settings' ? <SettingsPanel capability={data.aiRefreshCapability} /> : <main className="repository-empty-workspace">
@@ -269,12 +288,18 @@ export function App() {
             />
             {isUnregistered ? null : data.repository.state === 'degraded'
               ? <DegradedWorkspace repositoryName={data.repository.name} />
-              : <EmptyWorkspace repositoryName={data.repository.name} />}
+              : <EmptyWorkspace
+                  repositoryName={data.repository.name}
+                  repositoryPath={data.repository.path}
+                  refreshPending={mutationPending}
+                  onRefresh={() => void handleBootstrapRefresh()}
+                />}
           </main>}
         </div>
         <BottomNavigation
           activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
           sessionsEnabled={false}
+          evidenceEnabled={false}
           onTasksOpen={() => setWorkspaceView('task')}
           onSessionsOpen={() => undefined}
           onEvidenceOpen={() => setMobileInspectorOpen(true)}
@@ -290,6 +315,7 @@ export function App() {
     .filter((checkpoint): checkpoint is Checkpoint => Boolean(checkpoint));
   const selectedCheckpoint = taskCheckpoints.find((checkpoint) => checkpoint.id === selectedCheckpointId) ?? taskCheckpoints[0];
   const explicitlySelectedEvidence = data.evidence.find((evidence) => evidence.id === selectedEvidenceId);
+  const taskEvidence = data.evidence.filter((evidence) => selectedTask.checkpointIds.includes(evidence.checkpointId));
   const selectedEvidence = selectedCheckpoint
     ? (explicitlySelectedEvidence?.checkpointId === selectedCheckpoint.id && selectedTask.checkpointIds.includes(explicitlySelectedEvidence.checkpointId)
         ? explicitlySelectedEvidence
@@ -297,6 +323,7 @@ export function App() {
     : undefined;
   const selectedFact = data.facts.find((fact) => fact.id === selectedEvidence?.factId && fact.taskId === selectedTask.id)
     ?? data.facts.find((fact) => fact.taskId === selectedTask.id);
+  const evidenceAvailable = Boolean(selectedEvidence && selectedFact);
   const resumeCandidate = data.resumeCandidate?.taskId === selectedTask.id ? data.resumeCandidate : undefined;
   const selectedContractEvaluation = data.contractEvaluations.find(
     (evaluation) => evaluation.taskId === selectedTask.id,
@@ -320,6 +347,18 @@ export function App() {
   const openSettings = () => {
     setWorkspaceView('settings');
     setMobileInspectorOpen(false);
+  };
+
+  const openContextPack = () => {
+    if (!selectedCheckpoint || !data.contextPacks[selectedTask.id]) return;
+    setWorkspaceView('task');
+    setContextPackExpanded(true);
+  };
+
+  const openEvidence = () => {
+    if (!selectedEvidence) return;
+    setWorkspaceView('task');
+    setMobileInspectorOpen(true);
   };
 
   const selectCheckpoint = (checkpoint: Checkpoint) => {
@@ -517,10 +556,11 @@ export function App() {
     <div className="app-shell">
       <AppHeader
         repository={data.repository}
-        onPreview={() => setContextPackExpanded(true)}
+        onPreview={openContextPack}
         onExport={() => void handleExport()}
         onPurge={() => void handlePurge()}
         actionsDisabled={offlineFallback || mutationPending}
+        previewDisabled={!selectedCheckpoint || !data.contextPacks[selectedTask.id]}
       />
       {offlineFallback ? <div className="sample-banner" role="status">Local API unavailable · read-only sample workspace · changes are disabled</div> : null}
       {!offlineFallback && data.repository.state === 'degraded' ? <div className="degraded-banner" role="status">Capture degraded · review missing evidence before trusting this workspace</div> : null}
@@ -536,7 +576,8 @@ export function App() {
           onTaskSelect={selectTask}
           activeNavigation={workspaceView === 'overview' ? overviewFocus : workspaceView}
           onOverviewOpen={openOverview}
-          onEvidenceOpen={() => setMobileInspectorOpen(true)}
+          onEvidenceOpen={openEvidence}
+          evidenceEnabled={evidenceAvailable}
           onSettingsOpen={openSettings}
         />
         {workspaceView === 'settings' ? <SettingsPanel capability={data.aiRefreshCapability} /> : workspaceView === 'overview' ? (
@@ -591,7 +632,7 @@ export function App() {
         {workspaceView === 'task' && selectedEvidence && selectedFact ? (
           <EvidenceInspector
             evidence={selectedEvidence}
-            availableEvidence={data.evidence.filter((evidence) => selectedTask.checkpointIds.includes(evidence.checkpointId))}
+            availableEvidence={taskEvidence}
             fact={selectedFact}
             replacementFacts={data.facts.filter((fact) => fact.taskId === selectedTask.id && fact.id !== selectedFact.id && !['invalid', 'superseded'].includes(fact.status))}
             mutationPending={mutationPending}
@@ -608,9 +649,10 @@ export function App() {
       <BottomNavigation
         activeNavigation={workspaceView === 'settings' ? 'settings' : workspaceView === 'overview' ? overviewFocus : 'tasks'}
         sessionsEnabled={data.sessions.length > 0}
+        evidenceEnabled={evidenceAvailable}
         onTasksOpen={() => openOverview('tasks')}
         onSessionsOpen={() => openOverview('sessions')}
-        onEvidenceOpen={() => setMobileInspectorOpen(true)}
+        onEvidenceOpen={openEvidence}
         onSettingsOpen={openSettings}
       />
     </div>
@@ -636,17 +678,18 @@ function LoadingScreen() {
   );
 }
 
-function EmptyWorkspace({ repositoryName }: { repositoryName: string }) {
+function EmptyWorkspace({ repositoryName, repositoryPath, refreshPending, onRefresh }: {
+  repositoryName: string;
+  repositoryPath: string;
+  refreshPending: boolean;
+  onRefresh: () => void;
+}) {
   return (
     <section className="repository-empty-state">
       <span className="empty-lineage-mark" aria-hidden="true" />
       <h1>{repositoryName} is connected</h1>
-      <p>PreviouslyOn is ready to capture the next Codex session. Start a task in this repository, then return here to review its first verified checkpoint.</p>
-      <ol>
-        <li><strong>Start Codex</strong><span>Work normally in the connected repository.</span></li>
-        <li><strong>Finish the session</strong><span>A local checkpoint is created from captured events and Git state.</span></li>
-        <li><strong>Review evidence</strong><span>Confirm facts before they can enter a context pack.</span></li>
-      </ol>
+      <p>Start one captured Codex session, finish it normally, then refresh this screen to review the first checkpoint and its evidence.</p>
+      <RegisteredEmptyActions repositoryPath={repositoryPath} refreshPending={refreshPending} onRefresh={onRefresh} />
     </section>
   );
 }

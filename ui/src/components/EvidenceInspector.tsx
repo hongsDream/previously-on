@@ -27,6 +27,8 @@ const capturedFormatter = new Intl.DateTimeFormat('en-US', {
 });
 
 export function EvidenceInspector({ evidence, availableEvidence, fact, replacementFacts, mutationPending, mobileOpen, onClose, onEvidenceSelect, onStatusChange, onFactUpdate, onSessionExcludedChange, onRevalidate }: EvidenceInspectorProps) {
+  const evidenceIndex = availableEvidence.findIndex((item) => item.id === evidence.id);
+  const evidenceSequence = evidenceIndex >= 0 ? evidenceIndex + 1 : 1;
   return (
     <aside className={`evidence-inspector ${mobileOpen ? 'mobile-open' : ''}`} aria-label="Evidence inspector">
       <div className="sheet-handle mobile-only" aria-hidden="true" />
@@ -41,7 +43,7 @@ export function EvidenceInspector({ evidence, availableEvidence, fact, replaceme
       </div>
 
       <section className="mobile-fact-summary mobile-only">
-        <span>Evidence &nbsp; <b>{evidence.id.replace('ev_01HZX4C9Y7T2R6D8F3G1K8', 'E-2-')}</b></span>
+        <span>Evidence &nbsp; <b>E-{evidenceSequence}</b></span>
         <h2>{fact.text}</h2>
       </section>
 

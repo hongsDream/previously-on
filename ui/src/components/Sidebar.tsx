@@ -19,10 +19,11 @@ interface SidebarProps {
   activeNavigation: 'tasks' | 'sessions' | 'task' | 'settings';
   onOverviewOpen: (focus: 'tasks' | 'sessions') => void;
   onEvidenceOpen: () => void;
+  evidenceEnabled: boolean;
   onSettingsOpen: () => void;
 }
 
-export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation, onQueryChange, onStatusChange, onTaskSelect, onOverviewOpen, onEvidenceOpen, onSettingsOpen }: SidebarProps) {
+export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation, onQueryChange, onStatusChange, onTaskSelect, onOverviewOpen, onEvidenceOpen, evidenceEnabled, onSettingsOpen }: SidebarProps) {
   return (
     <aside className="sidebar">
       <nav aria-label="Primary navigation">
@@ -31,6 +32,7 @@ export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation
             key={label}
             className={(label === 'Tasks' && activeNavigation === 'tasks') || (label === 'Sessions' && activeNavigation === 'sessions') || (label === 'Settings' && activeNavigation === 'settings') ? 'nav-item active' : 'nav-item'}
             type="button"
+            disabled={label === 'Evidence' && !evidenceEnabled}
             onClick={label === 'Tasks' ? () => onOverviewOpen('tasks') : label === 'Sessions' ? () => onOverviewOpen('sessions') : label === 'Evidence' ? onEvidenceOpen : onSettingsOpen}
           >
             <Icon size={19} strokeWidth={1.7} />
