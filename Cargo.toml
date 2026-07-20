@@ -24,6 +24,7 @@ include = [
     "/docs/compatibility.md",
     "/docs/live-compatibility-evidence.md",
     "/docs/privacy.md",
+    "/docs/pilot-checklist.md",
     "/docs/product-roadmap.md",
     "/docs/release-checklist.md",
     "/fixtures/**/*.json",

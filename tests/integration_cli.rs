@@ -34,6 +34,7 @@ fn parses_public_cli_surface() {
     for args in [
         vec!["previously", "status"],
         vec!["previously", "doctor"],
+        vec!["previously", "diagnostics", "--repo", "/tmp/repo"],
         vec!["previously", "ui"],
         vec!["previously", "export", "--format", "json"],
         vec!["previously", "purge", "--repo", "/tmp/repo"],

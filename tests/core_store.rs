@@ -70,6 +70,27 @@ fn event(kind: EventKind, time: i64, payload: serde_json::Value) -> EventEnvelop
 }
 
 #[test]
+fn read_only_store_reads_existing_data_and_rejects_writes() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("previously.sqlite3");
+    let store = Store::open(&database).unwrap();
+    store.upsert_task(&task()).unwrap();
+    drop(store);
+
+    let read_only = Store::open_read_only(&database).unwrap();
+    assert_eq!(read_only.list_tasks(Some("repo-1")).unwrap(), vec![task()]);
+    let error = read_only
+        .insert_event(&event(
+            EventKind::UserPrompt,
+            2,
+            json!({"prompt": "private"}),
+        ))
+        .unwrap_err();
+    assert!(error.to_string().contains("readonly"));
+    assert!(Store::open_read_only(temp.path().join("missing.sqlite3")).is_err());
+}
+
+#[test]
 fn fact_origin_defaults_to_captured_and_replays_explicit_origin() {
     let legacy = json!({
         "schema_version": SCHEMA_VERSION_V1,

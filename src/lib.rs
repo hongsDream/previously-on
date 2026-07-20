@@ -5,6 +5,7 @@ pub mod config;
 pub mod context_pack;
 pub mod continuation;
 pub mod contracts;
+pub mod diagnostics;
 pub mod domain;
 pub mod git;
 pub mod graph;

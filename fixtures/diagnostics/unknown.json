@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "appVersion": "0.1.0-alpha.3",
+  "codexVersion": null,
+  "os": "macos",
+  "arch": "aarch64",
+  "setupToFirstCheckpointSeconds": 12,
+  "counts": {
+    "sessions": 1,
+    "checkpoints": 1,
+    "coverage": { "complete": 0, "degraded": 0, "unsupported": 2 }
+  },
+  "continuations": {
+    "suggested": 0,
+    "started": 0,
+    "failed": 0,
+    "pending": 0,
+    "open": 0,
+    "unknown": 1
+  },
+  "contracts": {
+    "readiness": { "ready": 0, "contractBlocked": 0, "unknown": 0 },
+    "tests": { "passed": 0, "failed": 0, "missing": 0, "stale": 0, "unknown": 0 }
+  }
+}

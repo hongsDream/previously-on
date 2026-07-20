@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, ExitCode, Stdio};
 
 use anyhow::{bail, Context, Result};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::BaseDirs;
 use serde::Serialize;
@@ -46,6 +46,11 @@ pub enum Commands {
     Status,
     /// Check local prerequisites and installation integrity.
     Doctor,
+    /// Print a privacy-bounded, read-only pilot report as schemaVersion 1 JSON.
+    Diagnostics {
+        #[arg(long)]
+        repo: PathBuf,
+    },
     /// Open the local review interface.
     Ui {
         #[arg(long, default_value = "127.0.0.1:43129")]
@@ -246,6 +251,10 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
                 bail!("one or more doctor checks failed");
             }
         }
+        Commands::Diagnostics { repo } => {
+            let report = diagnostics(&config, &repo).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Commands::Ui { bind, no_open } => {
             crate::server::serve_ui(config.data_dir, bind, !no_open).await?;
         }
@@ -346,6 +355,44 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+async fn diagnostics(
+    config: &AppConfig,
+    repo: &Path,
+) -> Result<crate::diagnostics::PilotDiagnosticsV1> {
+    let requested = crate::git::repository_identity(repo)?;
+    let manifest = setup::read_manifest(&config.setup_paths().manifest_path())?;
+    let registered = crate::git::repository_identity(&manifest.repository)?;
+    if requested.id != registered.id {
+        bail!("diagnostics repository does not match the registered repository");
+    }
+    let setup_at = DateTime::parse_from_rfc3339(&manifest.installed_at)
+        .context("parse setup installation timestamp")?
+        .with_timezone(&Utc);
+    let store = Store::open_read_only(&config.database_path)?;
+    let sessions = store.list_sessions(Some(&requested.id))?;
+    let tasks = store.list_tasks(Some(&requested.id))?;
+    let mut checkpoints = Vec::new();
+    for task in tasks {
+        checkpoints.extend(store.list_checkpoints(&task.id)?);
+    }
+    let events = store.list_events(Some(&requested.id))?;
+    let contract_evaluations = store.list_contract_evaluations(Some(&requested.id))?;
+    let codex_version = codex_version().await.ok();
+    Ok(crate::diagnostics::build_diagnostics(
+        crate::diagnostics::DiagnosticsInputV1 {
+            app_version: crate::APP_VERSION.to_string(),
+            codex_version,
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            setup_at,
+            sessions,
+            checkpoints,
+            events,
+            contract_evaluations,
+        },
+    ))
 }
 
 async fn run_contract_check(
