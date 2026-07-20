@@ -23,7 +23,10 @@ mod unix {
         let log = fixture.temp.path().join("turn-request.json");
         let fake = fake_codex(
             fixture.temp.path(),
-            &successful_app_server_script(log.to_string_lossy().as_ref()),
+            &successful_app_server_script(
+                log.to_string_lossy().as_ref(),
+                fixture.repository.to_string_lossy().as_ref(),
+            ),
         );
         let request =
             fixture.request("Continue this change safely. password=super-secret-rollover-value");
@@ -116,9 +119,103 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"thread 
         assert!(!repeated.message.contains("server-secret"));
     }
 
+    #[tokio::test]
+    async fn fresh_rollover_validates_thread_identity_and_worktree_before_turn_start() {
+        let fixture = Fixture::new();
+        let fake = fake_codex(
+            fixture.temp.path(),
+            &format!(
+                r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"userAgent":"codex-cli/0.144.3"}}}}'
+IFS= read -r initialized
+IFS= read -r start
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"thread":{{"id":"thread-fresh","sessionId":"session-fresh"}}}}}}'
+IFS= read -r read_thread
+case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-fresh"'*) ;; *) exit 20 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"thread":{{"id":"thread-other","cwd":"{}","turns":[]}}}}}}'
+IFS= read -r unexpected && exit 21
+"#,
+                fixture.repository.display()
+            ),
+        );
+        let request = fixture.request("Continue this change safely");
+
+        let first =
+            execute_automatic_rollover_with_program(&fixture.database, request.clone(), &fake)
+                .await
+                .unwrap();
+        assert_eq!(first.status, AutomaticRolloverStatusV1::Failed);
+        assert_eq!(first.new_thread_id.as_deref(), Some("thread-fresh"));
+        assert!(first.message.contains("different thread.id"));
+
+        fs::remove_file(&fake).unwrap();
+        let repeated = execute_automatic_rollover_with_program(
+            &fixture.database,
+            request,
+            fixture.temp.path().join("deleted-fake-codex").as_path(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated.status, AutomaticRolloverStatusV1::Failed);
+        assert_eq!(repeated.new_thread_id.as_deref(), Some("thread-fresh"));
+    }
+
+    #[tokio::test]
+    async fn recovery_resumes_then_reads_and_validates_before_starting_the_turn() {
+        let fixture = Fixture::new();
+        let request = fixture.request("Continue this change safely");
+        fixture.record_rollover_status(&request, "pending", json!({}));
+        fixture.record_rollover_status(
+            &request,
+            "thread_created",
+            json!({
+                "new_thread_id": "thread-recovered",
+                "new_session_id": "session-recovered"
+            }),
+        );
+        let log = fixture.temp.path().join("recovery-turn.json");
+        let fake = fake_codex(
+            fixture.temp.path(),
+            &format!(
+                r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"userAgent":"codex-cli/0.144.3"}}}}'
+IFS= read -r initialized
+IFS= read -r resume
+case "$resume" in *'"method":"thread/resume"'*'"threadId":"thread-recovered"'*) ;; *) exit 20 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"thread":{{"id":"thread-recovered","sessionId":"session-recovered"}}}}}}'
+IFS= read -r read_thread
+case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-recovered"'*) ;; *) exit 21 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"thread":{{"id":"thread-recovered","cwd":"{}","turns":[]}}}}}}'
+IFS= read -r name
+case "$name" in *'"method":"thread/name/set"'*) ;; *) exit 22 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
+IFS= read -r turn
+case "$turn" in *'"method":"turn/start"'*'"threadId":"thread-recovered"'*) ;; *) exit 23 ;; esac
+printf '%s\n' "$turn" > '{}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn-recovered"}}}}}}'
+"#,
+                fixture.repository.display(),
+                log.display()
+            ),
+        );
+
+        let result = execute_automatic_rollover_with_program(&fixture.database, request, &fake)
+            .await
+            .unwrap();
+        assert_eq!(result.status, AutomaticRolloverStatusV1::Started);
+        assert_eq!(result.new_thread_id.as_deref(), Some("thread-recovered"));
+        assert_eq!(result.new_turn_id.as_deref(), Some("turn-recovered"));
+        assert!(fs::read_to_string(log)
+            .unwrap()
+            .contains(r#""method":"turn/start""#));
+    }
+
     struct Fixture {
         temp: TempDir,
         database: PathBuf,
+        repository: PathBuf,
         repository_id: String,
     }
 
@@ -184,6 +281,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"thread 
             Self {
                 temp,
                 database,
+                repository,
                 repository_id: identity.id,
             }
         }
@@ -198,9 +296,49 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"thread 
                 current_prompt: current_prompt.into(),
             }
         }
+
+        fn record_rollover_status(
+            &self,
+            request: &AutomaticRolloverRequestV1,
+            status: &str,
+            fields: serde_json::Value,
+        ) {
+            let operation_id = previously_on::domain::deterministic_id(
+                "automatic-rollover",
+                &[
+                    &request.repository_id,
+                    &request.task_id,
+                    &request.source_session_id,
+                    &request.source_event_id,
+                ],
+            );
+            let mut payload = json!({
+                "operation_id": operation_id,
+                "status": status,
+                "source_session_id": request.source_session_id,
+                "source_event_id": request.source_event_id
+            });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let mut event = EventEnvelopeV1::new(
+                format!("test-rollover-{status}"),
+                &request.repository_id,
+                &request.source_session_id,
+                EventKind::ContinuationStarted,
+                Utc::now(),
+                payload,
+            );
+            event.task_id = Some(request.task_id.clone());
+            Store::open(&self.database)
+                .unwrap()
+                .insert_event(&event)
+                .unwrap();
+        }
     }
 
-    fn successful_app_server_script(log: &str) -> String {
+    fn successful_app_server_script(log: &str, repository: &str) -> String {
         format!(
             r#"#!/bin/sh
 IFS= read -r initialize
@@ -208,13 +346,16 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"userAgent":"codex-cli/0.144.
 IFS= read -r initialized
 IFS= read -r start
 printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"thread":{{"id":"thread-fresh","sessionId":"session-fresh"}}}}}}'
+IFS= read -r read_thread
+case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-fresh"'*) ;; *) exit 20 ;; esac
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"thread":{{"id":"thread-fresh","cwd":"{}","turns":[]}}}}}}'
 IFS= read -r name
-printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
 IFS= read -r turn
 printf '%s\n' "$turn" > '{}'
-printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"turn":{{"id":"turn-fresh"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn-fresh"}}}}}}'
 "#,
-            log
+            repository, log
         )
     }
 

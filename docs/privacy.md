@@ -88,8 +88,8 @@ and hash mismatches before mutating managed files.
 
 Agent lineage is a read-only projection of same-device Codex App Server metadata. PreviouslyOn
 stores bounded redacted output summaries plus observed file/test metadata, includes only threads
-from the same logical repository, and links parents only from an explicit `parentThreadId`.
-The ID and logical repository returned by `thread/read` are checked again, and unsafe or sensitive
+from the registered concrete worktree, and links parents only from an explicit `parentThreadId`.
+The ID and concrete worktree returned by `thread/read` are checked again, and unsafe or sensitive
 file paths are discarded. Missing parentage is shown as unlinked/degraded rather than guessed.
 Nothing is synced to a cloud or team account, and PreviouslyOn does not orchestrate or write back
 to an agent.

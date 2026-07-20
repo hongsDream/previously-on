@@ -21,11 +21,12 @@ transactional and cannot fan out duplicate calls.
 Agent import requests the documented interactive and sub-agent `sourceKinds` with pagination and
 uses experimental `parentThreadId` only when it is present. Unsupported methods, a blocked
 profile, malformed pagination, cross-repository threads, or missing parents degrade or fail closed;
-`thread/read` must also return the requested ID and same logical repository, and unsafe file paths
+`thread/read` must also return the requested ID and registered concrete worktree, and unsafe file paths
 are dropped. These cases are never converted into inferred compatibility. The Unreleased
 continuation path uses the documented `codex://threads/<thread-id>` link only after `turn/start`
 succeeds; automatic opening is best-effort and the review UI retains the exact link plus Copy ID
-as recovery actions.
+as recovery actions. Recovery resumes the recorded thread, reads it back, and validates its ID and
+concrete worktree before starting another turn.
 
 An actual AI calibration/model call remains unavailable in this non-interactive release task. It
 requires a compatible App Server, a verified permission profile, and fresh user approval at the
