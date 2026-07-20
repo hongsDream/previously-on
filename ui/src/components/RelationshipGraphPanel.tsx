@@ -19,6 +19,7 @@ export function RelationshipGraphPanel({ repositoryId, tasks, summary, refreshVe
   const [graph, setGraph] = useState<RelationshipGraphV1 | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const visibleGraph = useMemo(() => graph ? evidenceBackedGraph(graph) : null, [graph]);
 
   useEffect(() => {
     if (!tasks.some((task) => task.id === taskFilter)) setTaskFilter('');
@@ -63,8 +64,8 @@ export function RelationshipGraphPanel({ repositoryId, tasks, summary, refreshVe
   return (
     <section className="overview-panel relationship-graph-panel" aria-labelledby="relationship-graph-title">
       <header>
-        <span><GitFork size={17} /><strong id="relationship-graph-title">Verified relationship graph</strong></span>
-        <small>{summary.nodeCount} nodes · {summary.verifiedEdgeCount}/{summary.edgeCount} verified edges</small>
+        <span><GitFork size={17} /><strong id="relationship-graph-title">Evidence-backed relationship graph</strong></span>
+        <small>{visibleGraph?.nodes.length ?? summary.nodeCount} nodes · {visibleGraph?.edges.length ?? summary.edgeCount} provenance-backed edges</small>
       </header>
       <div className="graph-toolbar">
         <label htmlFor="relationship-task-filter">Task filter
@@ -79,12 +80,12 @@ export function RelationshipGraphPanel({ repositoryId, tasks, summary, refreshVe
         </div>
       </div>
 
-      {loading ? <p className="graph-state" role="status">Loading verified relationships…</p> : null}
+      {loading ? <p className="graph-state" role="status">Loading evidence-backed relationships…</p> : null}
       {!loading && error ? <p className="graph-state graph-error" role="alert">{error}</p> : null}
-      {!loading && !error && graph ? (
-        graph.nodes.length || graph.edges.length ? (
-          view === 'graph' ? <GraphVisual graph={graph} /> : <GraphList graph={graph} />
-        ) : <p className="graph-state">No verified relationships match this filter.</p>
+      {!loading && !error && visibleGraph ? (
+        visibleGraph.nodes.length || visibleGraph.edges.length ? (
+          view === 'graph' ? <GraphVisual graph={visibleGraph} /> : <GraphList graph={visibleGraph} />
+        ) : <p className="graph-state">No evidence-backed relationships match this filter.</p>
       ) : null}
     </section>
   );
@@ -95,14 +96,14 @@ function GraphVisual({ graph }: { graph: RelationshipGraphV1 }) {
   const nodesById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
   return (
     <div className="graph-visual-wrap">
-      <p className="sr-only">Visual overview of {graph.nodes.length} nodes and {graph.edges.length} explicit verified relationships. Use List view for complete relationship details.</p>
+      <p className="sr-only">Visual overview of {graph.nodes.length} nodes and {graph.edges.length} explicit evidence-backed relationships. Use List view for complete relationship details.</p>
       <svg className="relationship-graph-visual" viewBox={`0 0 920 ${layout.height}`} role="img" aria-label={`Relationship graph with ${graph.nodes.length} nodes and ${graph.edges.length} edges`}>
         <g className="graph-edges" aria-hidden="true">
           {graph.edges.map((edge) => {
             const from = layout.positions.get(edge.from);
             const to = layout.positions.get(edge.to);
             if (!from || !to) return null;
-            return <line key={edge.id} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className={edge.verified ? 'verified' : 'unverified'}><title>{edgeLabel(edge.kind, nodesById.get(edge.from), nodesById.get(edge.to))}</title></line>;
+            return <line key={edge.id} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="evidence-backed"><title>{edgeLabel(edge.kind, nodesById.get(edge.from), nodesById.get(edge.to))}</title></line>;
           })}
         </g>
         <g className="graph-nodes" aria-hidden="true">
@@ -134,7 +135,7 @@ function GraphList({ graph }: { graph: RelationshipGraphV1 }) {
       <div className="graph-table-scroll">
         <table>
           <caption>Explicit relationship edges and provenance</caption>
-          <thead><tr><th scope="col">Relationship</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Provenance</th><th scope="col">Source</th><th scope="col">Observed</th><th scope="col">Verified</th></tr></thead>
+          <thead><tr><th scope="col">Relationship</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Provenance</th><th scope="col">Source</th><th scope="col">Observed</th></tr></thead>
           <tbody>{graph.edges.map((edge) => (
             <tr key={edge.id}>
               <th scope="row">{edge.kind}</th>
@@ -143,13 +144,23 @@ function GraphList({ graph }: { graph: RelationshipGraphV1 }) {
               <td><ul>{edge.provenanceIds.map((id) => <li key={id}><code>{id}</code></li>)}</ul></td>
               <td>{edge.sourceKind}</td>
               <td>{formatObservedAt(edge.observedAt)}</td>
-              <td><span className={edge.verified ? 'graph-verified' : 'graph-unverified'}>{edge.verified ? 'Verified' : 'Unverified'}</span></td>
             </tr>
           ))}</tbody>
         </table>
       </div>
     </div>
   );
+}
+
+function evidenceBackedGraph(graph: RelationshipGraphV1): RelationshipGraphV1 {
+  const nodeIds = new Set(graph.nodes.map((node) => node.id));
+  return {
+    ...graph,
+    edges: graph.edges.filter((edge) => edge.verified !== false
+      && edge.provenanceIds.length > 0
+      && nodeIds.has(edge.from)
+      && nodeIds.has(edge.to)),
+  };
 }
 
 function graphLayout(nodes: GraphNodeV1[]) {

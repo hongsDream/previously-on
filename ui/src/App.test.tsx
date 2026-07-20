@@ -136,7 +136,7 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getByRole('main', { name: 'Project overview' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'What this codebase remembers' })).toBeInTheDocument();
     expect(screen.getAllByText('Active tasks').length).toBeGreaterThan(0);
-    expect(screen.getByText('Verified relationship graph')).toBeInTheDocument();
+    expect(screen.getByText('Evidence-backed relationship graph')).toBeInTheDocument();
 
     await user.click(screen.getAllByRole('button', { name: 'Sessions' })[0]);
     expect(screen.getByText('Recent sessions')).toBeInTheDocument();
@@ -163,7 +163,7 @@ describe('PreviouslyOn review workspace', () => {
 
     await user.click(taskButtons[1]);
     expect(taskButtons[1]).toHaveClass('active');
-    expect(screen.getByText('Verified relationship graph')).toBeInTheDocument();
+    expect(screen.getByText('Evidence-backed relationship graph')).toBeInTheDocument();
 
     await user.click(settingsButtons[1]);
     expect(settingsButtons[1]).toHaveClass('active');
@@ -491,8 +491,29 @@ describe('PreviouslyOn review workspace', () => {
     const table = await screen.findByRole('table', { name: 'Explicit relationship edges and provenance' });
     expect(within(table).getByText('task-has-session')).toBeInTheDocument();
     expect(within(table).getByText('canonical_event')).toBeInTheDocument();
-    expect(within(table).getAllByText('Verified', { selector: 'span' })).toHaveLength(2);
+    expect(within(table).getByText('event-task-session')).toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: 'Verified' })).not.toBeInTheDocument();
     expect(screen.queryByText(/similarity/i)).not.toBeInTheDocument();
+  });
+
+  it('defensively hides legacy graph edges marked unverified', async () => {
+    const data = liveWorkspace();
+    const graph = relationshipGraph(data.tasks[0].id);
+    graph.edges[1].verified = false;
+    data.graphSummary = { nodeCount: 3, edgeCount: 2, verifiedEdgeCount: 1 };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input) === '/api/bootstrap'
+      ? { ok: true, json: async () => data }
+      : { ok: true, json: async () => graph }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click((await screen.findAllByRole('button', { name: 'Tasks' }))[0]);
+    expect(await screen.findByRole('img', { name: /Relationship graph with 3 nodes and 1 edges/ })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'List' }));
+    const table = await screen.findByRole('table', { name: 'Explicit relationship edges and provenance' });
+    expect(within(table).getByText('task-has-session')).toBeInTheDocument();
+    expect(within(table).queryByText('session-changed-file')).not.toBeInTheDocument();
+    expect(within(table).queryByText('Unverified')).not.toBeInTheDocument();
   });
 
   it('defaults the relationship graph to the list fallback on narrow viewports', async () => {

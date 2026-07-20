@@ -476,6 +476,7 @@ pub struct GraphEdgeV1 {
     pub provenance_ids: Vec<String>,
     pub source_kind: GraphSourceKindV1,
     pub observed_at: DateTime<Utc>,
+    /// Deprecated V1 compatibility field. Presence of bounded provenance is authoritative.
     pub verified: bool,
 }
 

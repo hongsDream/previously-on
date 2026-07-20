@@ -139,6 +139,68 @@ fn deduplicates_and_replays_reordered_events_deterministically() {
 }
 
 #[test]
+fn equal_instants_with_different_rfc3339_offsets_replay_by_sequence() {
+    let offset = chrono::DateTime::parse_from_rfc3339("2023-11-14T23:13:20.123456+01:00")
+        .unwrap()
+        .with_timezone(&Utc);
+    let zulu = chrono::DateTime::parse_from_rfc3339("2023-11-14T22:13:20.123456Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    assert_eq!(offset, zulu);
+
+    let temp = TempDir::new().unwrap();
+    let database_path = temp.path().join("previously.sqlite3");
+    let store = Store::open(&database_path).unwrap();
+    let mut first_task = task();
+    first_task.title = "first by sequence".into();
+    first_task.updated_at = offset;
+    let mut second_task = first_task.clone();
+    second_task.title = "second by sequence".into();
+
+    let mut first = EventEnvelopeV1::new(
+        "offset-first",
+        "repo-1",
+        "session-1",
+        EventKind::TaskUpdated,
+        offset,
+        json!({ "task": first_task }),
+    );
+    first.task_id = Some("task-1".into());
+    first.sequence = Some(1);
+    first.received_at = offset;
+    let mut second = EventEnvelopeV1::new(
+        "zulu-second",
+        "repo-1",
+        "session-1",
+        EventKind::TaskUpdated,
+        zulu,
+        json!({ "task": second_task }),
+    );
+    second.task_id = Some("task-1".into());
+    second.sequence = Some(2);
+    second.received_at = zulu;
+
+    store.insert_event(&second).unwrap();
+    store.insert_event(&first).unwrap();
+    store.rebuild_projections().unwrap();
+    assert_eq!(
+        store.get_task("task-1").unwrap().unwrap().title,
+        "second by sequence"
+    );
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let stored = connection
+        .query_row(
+            "SELECT COUNT(DISTINCT occurred_at), MIN(occurred_at) FROM canonical_events",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored.0, 1);
+    assert_eq!(stored.1, "2023-11-14T22:13:20.123456Z");
+}
+
+#[test]
 fn redacts_before_canonical_persistence_and_rebuilds_fact_projection() {
     let temp = TempDir::new().unwrap();
     let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();

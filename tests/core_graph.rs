@@ -139,7 +139,19 @@ fn graph_is_deterministic_provenanced_redacted_and_never_infers_edges() {
         Some("task-graph"),
         EventKind::Checkpoint,
         3,
-        json!({ "checkpoint": checkpoint }),
+        json!({ "checkpoint": checkpoint.clone() }),
+    );
+    let mut repeated_checkpoint = checkpoint;
+    repeated_checkpoint.id = "checkpoint-graph-repeat".into();
+    repeated_checkpoint.created_at = at(6);
+    repeated_checkpoint.git_after.captured_at = at(6);
+    insert(
+        &store,
+        "session-graph",
+        Some("task-graph"),
+        EventKind::Checkpoint,
+        6,
+        json!({ "checkpoint": repeated_checkpoint }),
     );
 
     let secret = "contract-secret-12345";
@@ -201,6 +213,29 @@ fn graph_is_deterministic_provenanced_redacted_and_never_infers_edges() {
         json!({ "contractEvaluation": evaluation }),
     );
 
+    let other_task = TaskV1 {
+        schema_version: SCHEMA_VERSION_V1,
+        id: "task-other".into(),
+        repository_id: "repo-graph".into(),
+        title: "Other task".into(),
+        goal: None,
+        lifecycle: TaskLifecycle::Active,
+        branch: Some("main".into()),
+        created_at: at(7),
+        updated_at: at(7),
+    };
+    insert(
+        &store,
+        "other-ui",
+        Some(&other_task.id),
+        EventKind::TaskUpdated,
+        7,
+        json!({ "task": other_task }),
+    );
+
+    let all =
+        derive_relationship_graph(&store, "repo-graph", None, std::slice::from_ref(&contract))
+            .unwrap();
     let first = derive_relationship_graph(
         &store,
         "repo-graph",
@@ -220,7 +255,7 @@ fn graph_is_deterministic_provenanced_redacted_and_never_infers_edges() {
         serde_json::to_vec(&second).unwrap()
     );
     assert!(first.edges.iter().all(|edge| {
-        edge.verified && !edge.provenance_ids.is_empty() && edge.observed_at <= at(5)
+        edge.verified && !edge.provenance_ids.is_empty() && edge.observed_at <= at(6)
     }));
     assert!(first.edges.iter().any(|edge| {
         edge.kind == GraphEdgeKindV1::TaskRelevantContract
@@ -232,6 +267,51 @@ fn graph_is_deterministic_provenanced_redacted_and_never_infers_edges() {
     }));
     let contract_node = deterministic_id("contract", &["contract-auth"]);
     let observed_file = deterministic_id("file", &["src/unrelated_verify_auth.rs"]);
+    let session_node = deterministic_id("session", &["session-graph"]);
+    let repeated_file_edges = first
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == GraphEdgeKindV1::SessionChangedFile
+                && edge.from == session_node
+                && edge.to == observed_file
+                && edge.source_kind == GraphSourceKindV1::Projection
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(repeated_file_edges.len(), 1);
+    assert_eq!(
+        repeated_file_edges[0].provenance_ids,
+        vec!["checkpoint-graph", "checkpoint-graph-repeat"]
+    );
+    assert_eq!(repeated_file_edges[0].observed_at, at(6));
+    assert_eq!(
+        repeated_file_edges[0].id,
+        deterministic_id(
+            "edge",
+            &[
+                "session-changed-file",
+                &session_node,
+                &observed_file,
+                "projection"
+            ]
+        )
+    );
+    assert!(all
+        .edges
+        .iter()
+        .any(|edge| edge.id == repeated_file_edges[0].id));
+    assert!(!first
+        .nodes
+        .iter()
+        .any(|node| node.task_id.as_deref() == Some("task-other")));
+    let node_ids = first
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(first.edges.iter().all(|edge| {
+        node_ids.contains(edge.from.as_str()) && node_ids.contains(edge.to.as_str())
+    }));
     assert!(!first
         .edges
         .iter()

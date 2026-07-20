@@ -1,7 +1,7 @@
 # Compatibility
 
 The last public tag is `0.1.0-alpha.1`; the alpha.2 code line was merged to `main` without a public
-version tag. The `0.1.0-alpha.3` source preview adds task grouping, a verified relationship graph,
+version tag. The `0.1.0-alpha.3` source preview adds task grouping, an evidence-backed relationship graph,
 beta AI candidate refresh, and same-device local agent lineage. It is not a new public release
 claim: this work does not create a tag, GitHub Release, or crates.io publication. Historical
 evidence cannot be relabelled for `alpha.3`, and the existing 60 authenticated compatibility

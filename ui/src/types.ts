@@ -166,6 +166,7 @@ export interface GraphEdgeV1 {
   provenanceIds: string[];
   sourceKind: GraphSourceKindV1;
   observedAt: string;
+  /** @deprecated V1 compatibility field. Use provenanceIds and sourceKind. */
   verified: boolean;
 }
 
@@ -180,6 +181,7 @@ export interface RelationshipGraphV1 {
 export interface RelationshipGraphSummaryV1 {
   nodeCount: number;
   edgeCount: number;
+  /** @deprecated V1 compatibility field. It mirrors evidence-backed edges in V1. */
   verifiedEdgeCount: number;
 }
 

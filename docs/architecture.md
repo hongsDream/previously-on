@@ -84,7 +84,11 @@ with the exact required argv when readiness is blocked; persisted evaluation sta
 The relationship graph is a deterministic view over canonical events, projections, and approved
 contracts. It carries provenance for task/session, observed commit, changed file, contract,
 literal symbol, required test, and confirmed agent-parent edges. It does not store a second truth
-or infer dependencies from path co-occurrence, imports, or name similarity.
+or infer dependencies from path co-occurrence, imports, or name similarity. Edge identity uses the
+serialized relationship kind, endpoints, and source kind rather than observation time. Repeated
+observations merge sorted provenance and retain the latest observation time. Edges without
+provenance or existing endpoint nodes are omitted. The V1 `verified` and `verifiedEdgeCount`
+fields remain as deprecated compatibility mirrors only.
 
 ## Session timeline and consent-gated continuation
 

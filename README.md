@@ -130,7 +130,7 @@ already uses that command name.
 5. On a later first prompt, Codex may show a small resume candidate. Nothing is loaded until the
    user approves it and `resume_task` is called through MCP.
 6. The project overview shows active tasks, recent source task IDs, decisions, open items, code
-   areas, and a verified relationship graph with an equivalent table. Task sessions can be moved,
+   areas, and an evidence-backed relationship graph with an equivalent table. Task sessions can be moved,
    merged, split, or undone through previewed append-only operations. The task inspector shows
    Codebase Lineage, local agent lineage, checkpoints, and why facts were selected. Facts can be
    edited, deprecated after a Git commit, confirmed, pinned, invalidated, or superseded; a
