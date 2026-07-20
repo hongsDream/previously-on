@@ -139,10 +139,12 @@ already uses that command name.
    next user prompt offers **Continue in a fresh task?** Codex must show its approval UI before the
    `continue_task` MCP write can run. Approval revalidates Git and Regression Contracts, creates a
    persisted task with the official Codex App Server, starts the exact current request with a
-   verified Context Pack, opens `codex://threads/<thread-id>`, and stops the source turn after the
-   successful tool result to prevent duplicate work. Decline, cancel, or failure keeps the request
-   in the source task. A session inactive for at least 72 hours also offers this flow only when
-   relevant code changed.
+   verified Context Pack plus a current-worktree Contract evaluation, opens
+   `codex://threads/<thread-id>`, and stops the source turn after the successful tool result to
+   prevent duplicate work. Required tests are reported as passed, failed, stale, or missing from
+   existing same-fingerprint evidence and are never auto-run during handoff. Decline, cancel, or
+   failure keeps the request in the source task. A session inactive for at least 72 hours also
+   offers this flow only when relevant code changed.
 
 The seven-compaction/80% rule is an explicit provisional alpha policy, not a benchmark-derived or
 model-general threshold. It will be replaced only after the continuation benchmark described in
