@@ -197,10 +197,10 @@ token, and latency fields remain unavailable unless the App Server exposes them.
 
 When the experimental App Server supports it, import/list/read collects paginated interactive,
 subAgent, subAgentReview, subAgentCompact, subAgentThreadSpawn, and subAgentOther thread metadata.
-Only threads from the same logical repository are projected. A parent/child edge is emitted only
+Only threads from the registered concrete worktree are projected. A parent/child edge is emitted only
 from an explicit `parentThreadId`; missing parents remain unlinked/degraded and fork/name/path
 similarity is not used as a substitute. Both list and read results must agree on thread ID and
-logical repository, and unsafe, absolute, traversal, or sensitive file paths are discarded.
+concrete worktree, and unsafe, absolute, traversal, or sensitive file paths are discarded.
 Bounded redacted summaries, observed files, and tests are read-only local observations. There is
 no cloud sync, team account, orchestration, or write-back.
 

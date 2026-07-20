@@ -1225,6 +1225,22 @@ impl AppServerClient {
             .context("Codex thread/read response omitted `thread`")
     }
 
+    pub(crate) async fn read_thread_in_worktree(
+        &mut self,
+        thread_id: &str,
+        expected_worktree: &Path,
+    ) -> Result<Value> {
+        let registered = repository_identity(expected_worktree).with_context(|| {
+            format!(
+                "identify expected Git worktree before Codex thread/read: {}",
+                expected_worktree.display()
+            )
+        })?;
+        let thread = self.read_thread(thread_id).await?;
+        validate_thread_read(&thread, thread_id, &registered)?;
+        Ok(thread)
+    }
+
     /// Starts a persisted Codex task through the documented App Server interface.
     ///
     /// Approval and sandbox fields are intentionally omitted so the new task inherits the user's
@@ -1328,6 +1344,9 @@ impl AppServerClient {
             .filter(|value| !value.is_empty())
             .context("Codex thread/resume response omitted `thread.id`")?
             .to_string();
+        if id != thread_id {
+            bail!("Codex thread/resume returned a different thread.id")
+        }
         let session_id = thread
             .get("sessionId")
             .and_then(Value::as_str)
@@ -1492,6 +1511,25 @@ impl AppServerClient {
                     continue;
                 }
             };
+            if let Err(warning) = validate_thread_read(&thread, &summary.id, &registered_repository)
+            {
+                let mut coverage = summary.coverage.clone();
+                degrade(
+                    &mut coverage,
+                    "matching thread/read identity and worktree",
+                    warning.to_string(),
+                );
+                self.apply_collector_warnings(&mut coverage);
+                coverages.push(coverage.clone());
+                notices.push(ThreadImportNoticeV1 {
+                    thread_id: Some(summary.id),
+                    disposition: ThreadImportDisposition::Skipped,
+                    message: coverage.warnings.join("; "),
+                    coverage,
+                    rpc_error: None,
+                });
+                continue;
+            }
             if let Some(notification) = self.token_usage_notifications.remove(&summary.id) {
                 if let Some(object) = thread.as_object_mut() {
                     object.insert(
@@ -1667,16 +1705,40 @@ fn is_experimental_environment_allowed(name: &OsStr) -> bool {
 
 fn validate_thread_repository(cwd: &Path, registered: &RepositoryIdentity) -> Result<()> {
     if !cwd.is_absolute() {
-        bail!("Codex thread/list returned a non-absolute cwd; thread skipped")
+        bail!("Codex App Server returned a non-absolute cwd; thread skipped")
     }
     let returned = repository_identity(cwd)
-        .context("Codex thread/list cwd is not a readable Git worktree; thread skipped")?;
+        .context("Codex App Server cwd is not a readable Git worktree; thread skipped")?;
     if returned.common_dir != registered.common_dir {
         bail!(
-            "Codex thread/list returned a cwd owned by a different logical Git repository; thread skipped"
+            "Codex App Server returned a cwd owned by a different logical Git repository; thread skipped"
         )
     }
+    if returned.root != registered.root {
+        bail!("Codex App Server returned a cwd owned by a different Git worktree; thread skipped")
+    }
     Ok(())
+}
+
+fn validate_thread_read(
+    thread: &Value,
+    expected_thread_id: &str,
+    registered: &RepositoryIdentity,
+) -> Result<()> {
+    let returned_id = thread
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Codex thread/read omitted thread.id; thread skipped")?;
+    if returned_id != expected_thread_id {
+        bail!("Codex thread/read returned a different thread.id; thread skipped")
+    }
+    let cwd = thread
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Codex thread/read omitted cwd; thread skipped")?;
+    validate_thread_repository(Path::new(cwd), registered)
 }
 
 pub async fn inspect_capabilities() -> AppServerCapabilityReport {
@@ -1824,20 +1886,7 @@ fn validate_lineage_thread_read(
     expected_thread_id: &str,
     registered: &RepositoryIdentity,
 ) -> Result<()> {
-    let returned_id = thread
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .context("Codex thread/read omitted thread.id; agent skipped")?;
-    if returned_id != expected_thread_id {
-        bail!("Codex thread/read returned a different thread.id; agent skipped")
-    }
-    let cwd = thread
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .context("Codex thread/read omitted cwd; agent skipped")?;
-    validate_thread_repository(Path::new(cwd), registered)
+    validate_thread_read(thread, expected_thread_id, registered)
 }
 
 fn extract_agent_observation(thread: &Value) -> (Option<String>, Vec<String>, Vec<String>) {

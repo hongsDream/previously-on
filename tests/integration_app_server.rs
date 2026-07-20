@@ -111,6 +111,28 @@ printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-fresh","
 
 #[cfg(unix)]
 #[tokio::test]
+async fn resume_rejects_a_different_returned_thread_id() {
+    use previously_on::app_server::AppServerClient;
+
+    let (_temp, fake) = fake_codex(
+        r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
+IFS= read -r initialized
+IFS= read -r resume
+case "$resume" in *'"method":"thread/resume"'*'"threadId":"thread-expected"'*) ;; *) exit 10 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thread-other","sessionId":"session-other"}}}'
+"#,
+    );
+
+    let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
+    let error = client.resume_thread("thread-expected").await.unwrap_err();
+    assert!(error.to_string().contains("different thread.id"));
+    client.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn experimental_permission_profile_and_structured_turn_use_exact_fail_closed_fields() {
     use previously_on::app_server::AppServerClient;
     use serde_json::json;
@@ -496,7 +518,7 @@ fn git_repository() -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn import_verifies_returned_cwd_and_accepts_only_the_registered_logical_repository() {
+async fn import_verifies_returned_cwd_and_accepts_only_the_registered_worktree() {
     use std::process::Command;
 
     use previously_on::app_server::{AppServerClient, ThreadImportDisposition};
@@ -557,13 +579,14 @@ IFS= read -r initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
 IFS= read -r initialized
 IFS= read -r list
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":4,"cwd":"__NESTED__","id":"thread-nested","preview":"wrong repository","sessionId":"session-nested","updatedAt":5},{"cliVersion":"0.144.3","createdAt":3,"cwd":"relative/repository","id":"thread-relative","preview":"relative","sessionId":"session-relative","updatedAt":4},{"cliVersion":"0.144.3","createdAt":2,"id":"thread-missing","preview":"missing cwd","sessionId":"session-missing","updatedAt":3},{"cliVersion":"0.144.3","createdAt":1,"cwd":"__LINKED__","id":"thread-linked","preview":"same logical repository","sessionId":"session-linked","updatedAt":2}],"nextCursor":null}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":5,"cwd":"__NESTED__","id":"thread-nested","preview":"wrong repository","sessionId":"session-nested","updatedAt":6},{"cliVersion":"0.144.3","createdAt":4,"cwd":"relative/repository","id":"thread-relative","preview":"relative","sessionId":"session-relative","updatedAt":5},{"cliVersion":"0.144.3","createdAt":3,"id":"thread-missing","preview":"missing cwd","sessionId":"session-missing","updatedAt":4},{"cliVersion":"0.144.3","createdAt":2,"cwd":"__LINKED__","id":"thread-linked","preview":"sibling worktree","sessionId":"session-linked","updatedAt":3},{"cliVersion":"0.144.3","createdAt":1,"cwd":"__REPO__","id":"thread-primary","preview":"registered worktree","sessionId":"session-primary","updatedAt":2}],"nextCursor":null}}'
 IFS= read -r read_thread
-case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-linked"'*) ;; *) exit 20 ;; esac
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"turns":[{"id":"turn-linked","items":[],"status":"completed"}]}}}'
+case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-primary"'*) ;; *) exit 20 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-primary","cwd":"__REPO__","turns":[{"id":"turn-primary","items":[],"status":"completed"}]}}}'
 "#
     .replace("__NESTED__", nested.to_str().unwrap())
-    .replace("__LINKED__", linked.to_str().unwrap());
+    .replace("__LINKED__", linked.to_str().unwrap())
+    .replace("__REPO__", repo.to_str().unwrap());
     let (_fake_temp, fake) = fake_codex(&script);
 
     let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
@@ -571,8 +594,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"turns":[{"id":"turn-
 
     assert_eq!(report.coverage.status, CoverageStatus::Degraded);
     assert_eq!(report.threads.len(), 1);
-    assert_eq!(report.threads[0].id, "thread-linked");
-    assert_eq!(report.threads[0].cwd, linked);
+    assert_eq!(report.threads[0].id, "thread-primary");
+    assert_eq!(report.threads[0].cwd, repo);
     assert!(report
         .threads
         .iter()
@@ -589,11 +612,101 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"turns":[{"id":"turn-
         notice.thread_id.as_deref() == Some("thread-relative")
             && notice.message.contains("non-absolute cwd")
     }));
+    assert!(report.notices.iter().any(|notice| {
+        notice.thread_id.as_deref() == Some("thread-linked")
+            && notice.message.contains("different Git worktree")
+    }));
     assert!(report
         .coverage
         .warnings
         .iter()
         .any(|warning| warning.contains("omitted non-empty `cwd`")));
+    client.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn import_rejects_thread_read_identity_and_worktree_drift() {
+    use std::process::Command;
+
+    use previously_on::app_server::{AppServerClient, ThreadImportDisposition};
+
+    let (_repo_temp, repo) = git_repository();
+    std::fs::write(repo.join("tracked.txt"), "baseline\n").unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "tracked.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args([
+            "-c",
+            "user.email=tests@previously.local",
+            "-c",
+            "user.name=PreviouslyOn Tests",
+            "commit",
+            "--quiet",
+            "-m",
+            "baseline",
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let linked = _repo_temp.path().join("linked-read");
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&linked)
+        .arg("HEAD")
+        .status()
+        .unwrap()
+        .success());
+
+    let script = r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex-cli/0.144.3"}}'
+IFS= read -r initialized
+IFS= read -r list
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":3,"cwd":"__REPO__","id":"thread-id-drift","preview":"id drift","sessionId":"session-id-drift","updatedAt":4},{"cliVersion":"0.144.3","createdAt":2,"cwd":"__REPO__","id":"thread-worktree-drift","preview":"worktree drift","sessionId":"session-worktree-drift","updatedAt":3},{"cliVersion":"0.144.3","createdAt":1,"cwd":"__REPO__","id":"thread-missing-cwd","preview":"missing cwd","sessionId":"session-missing-cwd","updatedAt":2}],"nextCursor":null}}'
+IFS= read -r id_drift
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-other","cwd":"__REPO__","turns":[]}}}'
+IFS= read -r worktree_drift
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"id":"thread-worktree-drift","cwd":"__LINKED__","turns":[]}}}'
+IFS= read -r missing_cwd
+printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-missing-cwd","turns":[]}}}'
+"#
+    .replace("__REPO__", repo.to_str().unwrap())
+    .replace("__LINKED__", linked.to_str().unwrap());
+    let (_temp, fake) = fake_codex(&script);
+
+    let mut client = AppServerClient::connect_with_program(&fake).await.unwrap();
+    let report = client.import_threads_report(&repo).await.unwrap();
+    assert!(report.threads.is_empty());
+    assert_eq!(
+        report
+            .notices
+            .iter()
+            .filter(|notice| notice.disposition == ThreadImportDisposition::Skipped)
+            .count(),
+        3
+    );
+    assert!(report
+        .notices
+        .iter()
+        .any(|notice| notice.message.contains("different thread.id")));
+    assert!(report
+        .notices
+        .iter()
+        .any(|notice| notice.message.contains("different Git worktree")));
+    assert!(report
+        .notices
+        .iter()
+        .any(|notice| notice.message.contains("omitted cwd")));
     client.shutdown().await.unwrap();
 }
 
@@ -616,9 +729,9 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3"
 IFS= read -r deleted
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32004,"message":"thread not found; password=super-secret-rpc-password","data":{"kind":"thread_not_found","threadId":"thread-deleted","authorization":"Bearer super-secret-rpc-bearer","nested":{"password":"super-secret-rpc-data"}}}}'
 IFS= read -r compact
-printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"compacted":true,"status":{"type":"incomplete"},"turns":[{"items":[{"type":"futureItem","payload":"untrusted"}],"status":"interrupted"}]}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"id":"thread-compact","cwd":"__REPO__","compacted":true,"status":{"type":"incomplete"},"turns":[{"items":[{"type":"futureItem","payload":"untrusted"}],"status":"interrupted"}]}}}'
 IFS= read -r good
-printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"turns":[{"id":"turn-good","items":[{"id":"item-good","type":"agentMessage"}],"status":"completed"}]}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-good","cwd":"__REPO__","turns":[{"id":"turn-good","items":[{"id":"item-good","type":"agentMessage"}],"status":"completed"}]}}}'
 "#
         .replace("__REPO__", repo.to_str().unwrap());
     let (_temp, fake) = fake_codex(&script);
@@ -766,7 +879,7 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":1,"cwd":"__REPO__","id":"thread-1","preview":"one","sessionId":"session-1","updatedAt":2}],"nextCursor":null}}'
 IFS= read -r read_thread
 printf '%s\n' '{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"last":{"cachedInputTokens":10,"inputTokens":20,"outputTokens":30,"reasoningOutputTokens":40,"totalTokens":100},"total":{"cachedInputTokens":100,"inputTokens":200,"outputTokens":300,"reasoningOutputTokens":400,"totalTokens":1000},"modelContextWindow":128000}}}'
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"turns":[{"id":"turn-1","items":[],"status":"completed"}]}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-1","cwd":"__REPO__","turns":[{"id":"turn-1","items":[],"status":"completed"}]}}}'
 "#
         .replace("__REPO__", repo.to_str().unwrap());
     let (_temp, fake) = fake_codex(&script);

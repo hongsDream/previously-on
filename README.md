@@ -173,9 +173,9 @@ The experimental App Server child starts from a cleared environment and receives
 verifies the allowed profile performs the refresh start, closing the verification/execution gap.
 
 Agent lineage imports paginated interactive and sub-agent thread metadata from the same local
-Codex App Server. It includes a thread only when it belongs to the same logical repository and
+Codex App Server. It includes a thread only when it belongs to the registered concrete worktree and
 links a parent only when `parentThreadId` is present. Missing parentage stays unlinked/degraded;
-every `thread/read` ID and repository is revalidated, and unsafe or sensitive file paths are
+every `thread/read` ID and concrete worktree is revalidated, and unsafe or sensitive file paths are
 discarded. Names, paths, and similarity are never used to guess a relationship. This is
 same-device local observation, not cloud sync, team access, orchestration, or write-back.
 

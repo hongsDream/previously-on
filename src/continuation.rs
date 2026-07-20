@@ -212,6 +212,20 @@ pub async fn execute_automatic_rollover_with_program(
         }
     };
 
+    if let Err(error) = client
+        .read_thread_in_worktree(&thread_id, &repository.root)
+        .await
+    {
+        return record_failure(
+            &store,
+            &request,
+            &operation_id,
+            &task.title,
+            Some(thread_id),
+            error,
+        );
+    }
+
     link_new_session(
         &store,
         &request,
