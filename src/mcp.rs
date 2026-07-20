@@ -105,6 +105,24 @@ impl StoreMcpBackend {
         task_id: &str,
         token_budget: Option<u32>,
     ) -> Result<ContextPackV1> {
+        self.verified_context_pack_inner(task_id, token_budget, None)
+    }
+
+    pub(crate) fn verified_context_pack_for_worktree(
+        &self,
+        task_id: &str,
+        token_budget: Option<u32>,
+        worktree: &std::path::Path,
+    ) -> Result<ContextPackV1> {
+        self.verified_context_pack_inner(task_id, token_budget, Some(worktree))
+    }
+
+    fn verified_context_pack_inner(
+        &self,
+        task_id: &str,
+        token_budget: Option<u32>,
+        worktree: Option<&std::path::Path>,
+    ) -> Result<ContextPackV1> {
         let task = self
             .store
             .get_task(task_id)?
@@ -112,6 +130,16 @@ impl StoreMcpBackend {
         if task.repository_id != self.repository_id {
             bail!("task does not belong to the registered repository");
         }
+        let worktree = worktree
+            .map(crate::git::repository_identity)
+            .transpose()?
+            .map(|identity| {
+                if identity.id != task.repository_id {
+                    bail!("continuation worktree belongs to a different repository");
+                }
+                Ok(identity.root.to_string_lossy().into_owned())
+            })
+            .transpose()?;
         let task_events = self.store.list_task_events(&self.repository_id, task_id)?;
         let mut excluded_sessions = std::collections::BTreeMap::<String, bool>::new();
         let mut deprecated_facts = std::collections::BTreeMap::<String, String>::new();
@@ -192,24 +220,30 @@ impl StoreMcpBackend {
             ));
         }
         let registered_repository_path = self.repository_path();
-        let repository_path = checkpoints
-            .last()
-            .map(|checkpoint| checkpoint.git_after.root.as_str())
-            .filter(|path| !path.is_empty())
-            .unwrap_or(&registered_repository_path);
+        let repository_path = worktree.as_deref().unwrap_or_else(|| {
+            checkpoints
+                .last()
+                .map(|checkpoint| checkpoint.git_after.root.as_str())
+                .filter(|path| !path.is_empty())
+                .unwrap_or(&registered_repository_path)
+        });
         let temporal = crate::git::revalidate_task(
             repository_path,
             checkpoints.last().map(|checkpoint| &checkpoint.git_after),
             &files,
         )?;
         for fact in &mut facts {
-            fact.freshness = fact_freshness(
-                &registered_repository_path,
-                fact,
-                &evidence,
-                &checkpoints,
-                &files,
-            );
+            fact.freshness = if worktree.is_some() {
+                fact_freshness_in_worktree(repository_path, fact, &evidence, &checkpoints, &files)
+            } else {
+                fact_freshness(
+                    &registered_repository_path,
+                    fact,
+                    &evidence,
+                    &checkpoints,
+                    &files,
+                )
+            };
             if let (Some(commit), Some(current_head)) = (
                 deprecated_facts.get(&fact.id),
                 temporal.current_head.as_deref(),
@@ -367,6 +401,27 @@ pub(crate) fn fact_freshness(
     checkpoints: &[crate::domain::CheckpointV1],
     files: &[crate::domain::FileChangeV1],
 ) -> Freshness {
+    fact_freshness_with_root(repository_path, fact, evidence, checkpoints, files, true)
+}
+
+fn fact_freshness_in_worktree(
+    repository_path: &str,
+    fact: &FactV1,
+    evidence: &[EvidenceV1],
+    checkpoints: &[crate::domain::CheckpointV1],
+    files: &[crate::domain::FileChangeV1],
+) -> Freshness {
+    fact_freshness_with_root(repository_path, fact, evidence, checkpoints, files, false)
+}
+
+fn fact_freshness_with_root(
+    repository_path: &str,
+    fact: &FactV1,
+    evidence: &[EvidenceV1],
+    checkpoints: &[crate::domain::CheckpointV1],
+    files: &[crate::domain::FileChangeV1],
+    prefer_baseline_worktree: bool,
+) -> Freshness {
     let evidence_sessions = fact
         .evidence_ids
         .iter()
@@ -388,10 +443,14 @@ pub(crate) fn fact_freshness(
     } else {
         &scoped_files
     };
-    let validation_root = baseline
-        .map(|snapshot| snapshot.root.as_str())
-        .filter(|path| !path.is_empty())
-        .unwrap_or(repository_path);
+    let validation_root = if prefer_baseline_worktree {
+        baseline
+            .map(|snapshot| snapshot.root.as_str())
+            .filter(|path| !path.is_empty())
+            .unwrap_or(repository_path)
+    } else {
+        repository_path
+    };
     crate::git::assess_task_freshness(validation_root, baseline, scoped_files)
         .unwrap_or(Freshness::Stale)
 }

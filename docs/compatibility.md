@@ -36,6 +36,13 @@ succeeds; automatic opening is best-effort and the review UI retains the exact l
 as recovery actions. Recovery resumes the recorded thread, reads it back, and validates its ID and
 concrete worktree before starting another turn.
 
+Immediately before a fresh or recovered continuation starts a turn, PreviouslyOn reevaluates the
+exact source worktree, task changes, active Contract relevance, content fingerprint, and retained
+test evidence. The internal handoff wraps the unchanged public Context Pack together with that
+Contract evaluation. It does not execute required tests. A blocked Contract is handed off for the
+new task to resolve, while invalid Contract JSON, repository mismatch, fingerprint failure, or an
+oversized handoff records a durable failure before any new turn is started.
+
 An actual AI calibration/model call remains unavailable in this non-interactive release task. It
 requires a compatible App Server, a verified permission profile, and fresh user approval at the
 time of execution. No token, model, or latency metric is fabricated when the App Server does not

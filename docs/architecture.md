@@ -119,12 +119,14 @@ the canonical event log. The worker then:
 
 1. validates the source event and repository identity, then writes a deterministic `pending`
    operation event before any external task can be created;
-2. revalidates current Git state, fact freshness, excluded sessions, fact deprecation commits, and
-   relevant Regression Contracts into a bounded Context Pack;
+2. revalidates the exact source worktree, task-observed and current file changes, fact freshness,
+   excluded sessions, fact deprecation commits, Contract relevance, the current content
+   fingerprint, and previously recorded test evidence;
 3. calls the documented Codex App Server `thread/start` method for a persisted task and durably
    records its task ID before doing anything else;
 4. links the new App Server session to the existing PreviouslyOn task, sets a display name on a
-   best-effort basis, and calls `turn/start` with the current request plus a bounded verified pack;
+   best-effort basis, and calls `turn/start` with the current request plus a bounded internal
+   `ContinuationHandoffV1` containing the existing `ContextPackV1` and `ContractEvaluationV1`;
 5. records `started`; the successful `PostToolUse` hook returns `continue: false` so the source
    turn stops before it can repeat the work.
 
@@ -132,7 +134,11 @@ The operation ID and all transition event IDs are deterministic. A repeated hook
 the recorded result. If a task ID was durably recorded, recovery resumes that task; if an attempt
 stopped before the ID was recorded, PreviouslyOn refuses to create a possible duplicate. Any App
 Server or validation failure records `failed` and leaves the source request available in the
-original turn.
+original turn. Invalid Contract JSON, repository/worktree mismatch, fingerprint failure, and an
+oversized handoff fail before `thread/start`; a preflight error cannot remain only `pending`.
+`contract_blocked` is carried into the new task so it can be resolved there. Required tests are
+never auto-executed at this boundary: only a prior pass or failure for the same fingerprint is
+reused, an older pass becomes `stale`, and all other evidence stays `missing`.
 
 After `turn/start`, PreviouslyOn opens the documented `codex://threads/<thread-id>` desktop deep
 link. If the operating-system opener is unavailable, continuation still succeeds and returns the
@@ -150,6 +156,9 @@ renames, and unobserved tool paths are recorded as `observed_changed_in`.
 1,200 tokens and the hard limit is 2,000 tokens including the JSON/MCP envelope. Mandatory
 source, coverage, and freshness fields are never truncated; lower-ranked whole items are
 removed first.
+
+The public `resume_task` result and `ContextPackV1` JSON remain unchanged. The richer Contract
+evaluation wrapper exists only inside the consented automatic-continuation turn input.
 
 Historical evidence is enclosed and labelled as untrusted data. A context pack is an index for
 live verification, not authority over the current repository.
