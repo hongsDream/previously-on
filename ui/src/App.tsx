@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { useDeferredValue, useMemo, useState } from 'react';
 import { AppHeader } from './components/AppHeader';
 import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
@@ -8,12 +8,12 @@ import { Sidebar } from './components/Sidebar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { TaskWorkspace } from './components/TaskWorkspace';
 import { RegressionContractsPanel } from './components/RegressionContractsPanel';
-import { fallbackData } from './data/fallback';
+import { useBootstrap } from './hooks/useBootstrap';
+import { useWorkspaceNavigation } from './hooks/useWorkspaceNavigation';
 import {
   exportRepository,
   fetchFactRefresh,
   fetchBootstrap,
-  ApiUnavailableError,
   approveContractCandidate,
   applyTaskGrouping,
   createContractCandidate,
@@ -31,6 +31,11 @@ import {
   updateTask,
 } from './lib/api';
 import type { ContractMutationResponse, FactCandidateReviewResponse } from './lib/api';
+import {
+  emptyWorkspaceSelection,
+  resolveTaskSelection,
+  selectWorkspace,
+} from './lib/workspace';
 import type {
   AiFactRefreshOperationV1,
   BootstrapData,
@@ -46,51 +51,35 @@ import type {
 } from './types';
 
 export function App() {
-  const [data, setData] = useState<BootstrapData | null>(null);
-  const [offlineFallback, setOfflineFallback] = useState(false);
-  const [fatalError, setFatalError] = useState('');
-  const [selectedTaskId, setSelectedTaskId] = useState('');
-  const [selectedCheckpointId, setSelectedCheckpointId] = useState('');
-  const [selectedEvidenceId, setSelectedEvidenceId] = useState('');
-  const [workspaceView, setWorkspaceView] = useState<'overview' | 'task' | 'settings'>('task');
-  const [overviewFocus, setOverviewFocus] = useState<'tasks' | 'sessions'>('tasks');
+  const {
+    data,
+    setData,
+    offlineFallback,
+    fatalError,
+    selection,
+    setSelection,
+    installBootstrap,
+  } = useBootstrap();
+  const {
+    workspaceView,
+    overviewFocus,
+    contextPackExpanded,
+    mobileInspectorOpen,
+    openTask,
+    openOverview,
+    openSettings,
+    showContextPack,
+    toggleContextPack,
+    showEvidence,
+    openInspector,
+    closeInspector,
+  } = useWorkspaceNavigation();
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<TaskStatus | 'all'>('all');
-  const [contextPackExpanded, setContextPackExpanded] = useState(() => (
-    typeof window.matchMedia !== 'function' || !window.matchMedia('(max-width: 900px)').matches
-  ));
-  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(true);
   const [mutationPending, setMutationPending] = useState(false);
   const [actionError, setActionError] = useState('');
   const [graphRefreshVersion, setGraphRefreshVersion] = useState(0);
   const deferredQuery = useDeferredValue(query);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchBootstrap(controller.signal)
-      .then((bootstrap) => {
-        const normalized = normalizeBootstrap(bootstrap);
-        const selection = resolveTaskSelection(normalized);
-        setData(normalized);
-        setSelectedTaskId(selection.taskId);
-        setSelectedCheckpointId(selection.checkpointId);
-        setSelectedEvidenceId(selection.evidenceId);
-      })
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === 'AbortError') return;
-        if (!(error instanceof ApiUnavailableError)) {
-          setFatalError(error instanceof Error ? error.message : 'The local API returned an invalid response.');
-          return;
-        }
-        const selection = resolveTaskSelection(fallbackData);
-        setOfflineFallback(true);
-        setData(fallbackData);
-        setSelectedTaskId(selection.taskId);
-        setSelectedCheckpointId(selection.checkpointId);
-        setSelectedEvidenceId(selection.evidenceId);
-      });
-    return () => controller.abort();
-  }, []);
 
   const filteredTasks = useMemo(() => {
     if (!data) return [];
@@ -127,12 +116,7 @@ export function App() {
     setMutationPending(true);
     setActionError('');
     try {
-      const normalized = normalizeBootstrap(await fetchBootstrap());
-      const selection = resolveTaskSelection(normalized, selectedTaskId, selectedCheckpointId, selectedEvidenceId);
-      setData(normalized);
-      setSelectedTaskId(selection.taskId);
-      setSelectedCheckpointId(selection.checkpointId);
-      setSelectedEvidenceId(selection.evidenceId);
+      installBootstrap(await fetchBootstrap(), selection);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'The local status could not be refreshed.');
     } finally {
@@ -183,9 +167,7 @@ export function App() {
         resumeCandidate: undefined,
         contextPacks: {},
       } : current);
-      setSelectedTaskId('');
-      setSelectedCheckpointId('');
-      setSelectedEvidenceId('');
+      setSelection(emptyWorkspaceSelection);
     }
   }
 
@@ -268,10 +250,10 @@ export function App() {
             onStatusChange={setStatus}
             onTaskSelect={() => undefined}
             activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
-            onOverviewOpen={() => setWorkspaceView('task')}
-            onEvidenceOpen={() => setMobileInspectorOpen(true)}
+            onOverviewOpen={openTask}
+            onEvidenceOpen={openInspector}
             evidenceEnabled={false}
-            onSettingsOpen={() => setWorkspaceView('settings')}
+            onSettingsOpen={openSettings}
           />
           {workspaceView === 'settings' ? <SettingsPanel capability={data.aiRefreshCapability} /> : <main className="repository-empty-workspace">
             {isUnregistered ? <FirstRunSetup /> : null}
@@ -300,80 +282,64 @@ export function App() {
           activeNavigation={workspaceView === 'settings' ? 'settings' : 'tasks'}
           sessionsEnabled={false}
           evidenceEnabled={false}
-          onTasksOpen={() => setWorkspaceView('task')}
+          onTasksOpen={openTask}
           onSessionsOpen={() => undefined}
-          onEvidenceOpen={() => setMobileInspectorOpen(true)}
-          onSettingsOpen={() => setWorkspaceView('settings')}
+          onEvidenceOpen={openInspector}
+          onSettingsOpen={openSettings}
         />
       </div>
     );
   }
 
-  const selectedTask = data.tasks.find((task) => task.id === selectedTaskId) ?? filteredTasks[0] ?? data.tasks[0];
-  const taskCheckpoints = selectedTask.checkpointIds
-    .map((id) => data.checkpoints.find((checkpoint) => checkpoint.id === id))
-    .filter((checkpoint): checkpoint is Checkpoint => Boolean(checkpoint));
-  const selectedCheckpoint = taskCheckpoints.find((checkpoint) => checkpoint.id === selectedCheckpointId) ?? taskCheckpoints[0];
-  const explicitlySelectedEvidence = data.evidence.find((evidence) => evidence.id === selectedEvidenceId);
-  const taskEvidence = data.evidence.filter((evidence) => selectedTask.checkpointIds.includes(evidence.checkpointId));
-  const selectedEvidence = selectedCheckpoint
-    ? (explicitlySelectedEvidence?.checkpointId === selectedCheckpoint.id && selectedTask.checkpointIds.includes(explicitlySelectedEvidence.checkpointId)
-        ? explicitlySelectedEvidence
-        : data.evidence.find((evidence) => evidence.checkpointId === selectedCheckpoint.id))
-    : undefined;
-  const selectedFact = data.facts.find((fact) => fact.id === selectedEvidence?.factId && fact.taskId === selectedTask.id)
-    ?? data.facts.find((fact) => fact.taskId === selectedTask.id);
-  const evidenceAvailable = Boolean(selectedEvidence && selectedFact);
-  const resumeCandidate = data.resumeCandidate?.taskId === selectedTask.id ? data.resumeCandidate : undefined;
-  const selectedContractEvaluation = data.contractEvaluations.find(
-    (evaluation) => evaluation.taskId === selectedTask.id,
-  ) ?? (data.contractEvaluation?.taskId === selectedTask.id ? data.contractEvaluation : null);
+  const workspace = selectWorkspace(data, selection, filteredTasks)!;
+  const {
+    selectedTask,
+    taskCheckpoints,
+    selectedCheckpoint,
+    selectedEvidence,
+    taskEvidence,
+    selectedFact,
+    evidenceAvailable,
+    resumeCandidate,
+    selectedContractEvaluation,
+  } = workspace;
 
   const selectTask = (taskId: string) => {
     const selection = resolveTaskSelection(data, taskId, data.tasks.find((item) => item.id === taskId)?.checkpointIds[0]);
     if (!selection.taskId) return;
-    setSelectedTaskId(selection.taskId);
-    setSelectedCheckpointId(selection.checkpointId);
-    setSelectedEvidenceId(selection.evidenceId);
-    setWorkspaceView('task');
-  };
-
-  const openOverview = (focus: 'tasks' | 'sessions') => {
-    setOverviewFocus(focus);
-    setWorkspaceView('overview');
-    setMobileInspectorOpen(false);
-  };
-
-  const openSettings = () => {
-    setWorkspaceView('settings');
-    setMobileInspectorOpen(false);
+    setSelection(selection);
+    openTask();
   };
 
   const openContextPack = () => {
     if (!selectedCheckpoint || !data.contextPacks[selectedTask.id]) return;
-    setWorkspaceView('task');
-    setContextPackExpanded(true);
+    showContextPack();
   };
 
   const openEvidence = () => {
     if (!selectedEvidence) return;
-    setWorkspaceView('task');
-    setMobileInspectorOpen(true);
+    showEvidence();
   };
 
   const selectCheckpoint = (checkpoint: Checkpoint) => {
-    setSelectedCheckpointId(checkpoint.id);
     const matchingEvidence = data.evidence.find((evidence) => evidence.checkpointId === checkpoint.id);
-    if (matchingEvidence) setSelectedEvidenceId(matchingEvidence.id);
-    setMobileInspectorOpen(true);
+    setSelection((current) => ({
+      ...current,
+      checkpointId: checkpoint.id,
+      evidenceId: matchingEvidence?.id ?? current.evidenceId,
+    }));
+    openInspector();
   };
 
   const selectEvidence = (evidenceId: string) => {
     const evidence = data.evidence.find((item) => item.id === evidenceId);
     if (!evidence || !selectedTask.checkpointIds.includes(evidence.checkpointId)) return;
-    setSelectedEvidenceId(evidence.id);
-    if (evidence.checkpointId) setSelectedCheckpointId(evidence.checkpointId);
-    setMobileInspectorOpen(true);
+    setSelection((current) => ({
+      ...current,
+      evidenceId: evidence.id,
+      checkpointId: evidence.checkpointId || current.checkpointId,
+    }));
+    openInspector();
   };
 
   const handleFactStatus = async (nextStatus: FactStatus, supersedesFactId?: string) => {
@@ -440,7 +406,7 @@ export function App() {
     if (!resumeCandidate) return;
     const recommended = taskCheckpoints.find((checkpoint) => checkpoint.sequence === 2) ?? taskCheckpoints[0];
     if (recommended) selectCheckpoint(recommended);
-    setContextPackExpanded(true);
+    showContextPack();
   };
 
   const handleRevalidate = async () => {
@@ -459,12 +425,11 @@ export function App() {
   };
 
   const installRefreshedBootstrap = (next: BootstrapData, preferredTaskId = selectedTask.id) => {
-    const normalized = normalizeBootstrap(next);
-    const selection = resolveTaskSelection(normalized, preferredTaskId, selectedCheckpointId, selectedEvidenceId);
-    setData(normalized);
-    setSelectedTaskId(selection.taskId);
-    setSelectedCheckpointId(selection.checkpointId);
-    setSelectedEvidenceId(selection.evidenceId);
+    installBootstrap(next, {
+      taskId: preferredTaskId,
+      checkpointId: selection.checkpointId,
+      evidenceId: selection.evidenceId,
+    });
     setGraphRefreshVersion((version) => version + 1);
   };
 
@@ -613,7 +578,7 @@ export function App() {
           onCheckpointSelect={selectCheckpoint}
           onReviewResume={reviewCandidate}
           onDismissResume={dismissCandidate}
-          onToggleContextPack={() => setContextPackExpanded((expanded) => !expanded)}
+          onToggleContextPack={toggleContextPack}
           onTaskUpdate={handleTaskUpdate}
           onGroupingPreview={handleGroupingPreview}
           onGroupingApply={handleGroupingApply}
@@ -637,7 +602,7 @@ export function App() {
             replacementFacts={data.facts.filter((fact) => fact.taskId === selectedTask.id && fact.id !== selectedFact.id && !['invalid', 'superseded'].includes(fact.status))}
             mutationPending={mutationPending}
             mobileOpen={mobileInspectorOpen}
-            onClose={() => setMobileInspectorOpen(false)}
+            onClose={closeInspector}
             onEvidenceSelect={selectEvidence}
             onStatusChange={(nextStatus, supersedesFactId) => void handleFactStatus(nextStatus, supersedesFactId)}
             onFactUpdate={handleFactUpdate}
@@ -704,47 +669,6 @@ function DegradedWorkspace({ repositoryName }: { repositoryName: string }) {
   );
 }
 
-function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
-  const repositoryState = bootstrap.repository.state ?? inferRepositoryState(bootstrap);
-  return {
-    ...bootstrap,
-    repository: { ...bootstrap.repository, state: repositoryState },
-    contracts: bootstrap.contracts ?? [],
-    contractCandidates: bootstrap.contractCandidates ?? [],
-    contractEvaluation: bootstrap.contractEvaluation ?? null,
-    contractEvaluations: bootstrap.contractEvaluations ?? [],
-    taskGroupingOperations: bootstrap.taskGroupingOperations ?? [],
-    graphSummary: bootstrap.graphSummary ?? { nodeCount: 0, edgeCount: 0, verifiedEdgeCount: 0 },
-    aiRefreshCapability: bootstrap.aiRefreshCapability ?? {
-      status: 'blocked',
-      profileName: 'previously-input-only',
-      reason: 'The local API did not provide a verified AI refresh capability.',
-    },
-    factRefreshOperations: bootstrap.factRefreshOperations ?? [],
-    agents: bootstrap.agents ?? [],
-    sessions: bootstrap.sessions ?? [],
-    facts: (bootstrap.facts ?? []).map((fact) => ({
-      ...fact,
-      taskId: fact.taskId ?? bootstrap.tasks[0]?.id ?? '',
-      kind: fact.kind ?? 'note',
-      relatedFiles: fact.relatedFiles ?? [],
-      mixedProvenance: fact.mixedProvenance ?? false,
-      provenanceSessionIds: fact.provenanceSessionIds ?? [],
-    })),
-    evidence: (bootstrap.evidence ?? []).map((evidence) => ({
-      ...evidence,
-      sessionId: evidence.sessionId ?? '',
-      excludedSession: evidence.excludedSession ?? false,
-    })),
-  };
-}
-
-function inferRepositoryState(bootstrap: BootstrapData): BootstrapData['repository']['state'] {
-  if (!bootstrap.repository.connected) return 'unregistered';
-  if (bootstrap.repository.captureHealth === 'degraded' || bootstrap.repository.captureHealth === 'offline') return 'degraded';
-  return bootstrap.checkpoints?.length > 0 ? 'active' : 'registered-empty';
-}
-
 function latestFactRefreshOperation(operations: AiFactRefreshOperationV1[], taskId: string) {
   return operations
     .filter((operation) => operation.taskId === taskId)
@@ -766,26 +690,6 @@ function normalizeReviewedFact(fact: FactCandidateReviewResponse['fact']): Fact 
     mixedProvenance: false,
     provenanceSessionIds: [],
   };
-}
-
-function resolveTaskSelection(
-  data: BootstrapData,
-  preferredTaskId?: string,
-  preferredCheckpointId?: string,
-  preferredEvidenceId?: string,
-) {
-  const task = data.tasks.find((candidate) => candidate.id === preferredTaskId) ?? data.tasks[0];
-  if (!task) return { taskId: '', checkpointId: '', evidenceId: '' };
-  const checkpointId = preferredCheckpointId && task.checkpointIds.includes(preferredCheckpointId)
-    ? preferredCheckpointId
-    : task.checkpointIds[1] ?? task.checkpointIds[0] ?? '';
-  const taskCheckpointIds = new Set(task.checkpointIds);
-  const preferredEvidence = data.evidence.find((evidence) => evidence.id === preferredEvidenceId);
-  const evidence = preferredEvidence && taskCheckpointIds.has(preferredEvidence.checkpointId)
-    ? preferredEvidence
-    : data.evidence.find((candidate) => candidate.checkpointId === checkpointId)
-      ?? data.evidence.find((candidate) => taskCheckpointIds.has(candidate.checkpointId));
-  return { taskId: task.id, checkpointId, evidenceId: evidence?.id ?? '' };
 }
 
 function mergeContractMutation(current: BootstrapData, response: ContractMutationResponse): BootstrapData {
