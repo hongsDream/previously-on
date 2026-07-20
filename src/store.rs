@@ -26,6 +26,7 @@ const PURGE_TOMBSTONE_VERSION: u32 = 1;
 #[derive(Debug, Clone)]
 pub struct Store {
     path: PathBuf,
+    read_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,10 +184,47 @@ impl Store {
         )?;
         ensure_private_regular_file(&path, "PreviouslyOn database")?;
         validate_database_companions(&path)?;
-        let store = Self { path };
+        let store = Self {
+            path,
+            read_only: false,
+        };
         let mut connection = store.connect()?;
         store.migrate(&mut connection)?;
         store.recover_purge_if_ready()?;
+        Ok(store)
+    }
+
+    /// Open an existing database without creating files, migrating schemas, recovering journals,
+    /// or enabling SQLite write paths. Intended for user-reviewed local diagnostics.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let requested_path = path.as_ref();
+        let parent = requested_path
+            .parent()
+            .context("database path has no parent")?;
+        validate_private_directory(parent, "PreviouslyOn data directory")?;
+        let file_name = requested_path
+            .file_name()
+            .context("database path has no file name")?;
+        let path = parent
+            .canonicalize()
+            .with_context(|| format!("canonicalize database directory {}", parent.display()))?
+            .join(file_name);
+        if !validate_private_regular_file(&path, "PreviouslyOn database")? {
+            bail!("PreviouslyOn database does not exist");
+        }
+        validate_database_companions(&path)?;
+        let store = Self {
+            path,
+            read_only: true,
+        };
+        let connection = store.connect()?;
+        let schema_version: i64 =
+            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version != DATABASE_SCHEMA_VERSION {
+            bail!(
+                "unsupported database schema version {schema_version}; expected {DATABASE_SCHEMA_VERSION}"
+            );
+        }
         Ok(store)
     }
 
@@ -1568,28 +1606,49 @@ impl Store {
 
     fn connect(&self) -> Result<Connection> {
         let parent = self.path.parent().context("database path has no parent")?;
-        ensure_private_directory(parent, "PreviouslyOn data directory")?;
-        ensure_private_regular_file(&self.path, "PreviouslyOn database")?;
+        if self.read_only {
+            validate_private_directory(parent, "PreviouslyOn data directory")?;
+            if !validate_private_regular_file(&self.path, "PreviouslyOn database")? {
+                bail!("PreviouslyOn database does not exist");
+            }
+        } else {
+            ensure_private_directory(parent, "PreviouslyOn data directory")?;
+            ensure_private_regular_file(&self.path, "PreviouslyOn database")?;
+        }
         let companions = database_companion_paths(&self.path);
         let existed = companions
             .iter()
             .map(|(path, label)| validate_private_regular_file(path, label))
             .collect::<Result<Vec<_>>>()?;
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let flags = if self.read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW
+        };
         let connection = Connection::open_with_flags(&self.path, flags)
             .with_context(|| format!("open PreviouslyOn database {}", self.path.display()))?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        connection.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = FULL;
-             PRAGMA temp_store = MEMORY;",
-        )?;
+        if self.read_only {
+            connection.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA query_only = ON;
+                 PRAGMA temp_store = MEMORY;",
+            )?;
+        } else {
+            connection.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = FULL;
+                 PRAGMA temp_store = MEMORY;",
+            )?;
+        }
         for ((path, label), existed) in companions.iter().zip(existed) {
-            if !existed && fs::symlink_metadata(path).is_ok() {
+            if !self.read_only && !existed && fs::symlink_metadata(path).is_ok() {
                 secure_new_private_file(path, label)?;
             }
             validate_private_regular_file(path, label)?;

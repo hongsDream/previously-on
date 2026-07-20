@@ -32,6 +32,19 @@ characters. Codex already holds the request in its source-task transcript.
 Redaction is defense in depth, not a guarantee that arbitrary secrets can never appear. Review
 the local inspector before sharing an export.
 
+## Pilot diagnostics
+
+`previously diagnostics --repo <path>` opens the existing database in SQLite read-only/query-only
+mode and prints one `schemaVersion: 1` JSON object to stdout. It does not save a report, upload
+data, enable telemetry, create a Codex task, or invoke a model. The only Codex process call is the
+read-only `codex --version` check.
+
+The report is built from an allowlist: normalized app/Codex version, OS/architecture, relative
+setup-to-first-checkpoint seconds, and aggregate session, checkpoint, coverage, continuation, and
+Contract/test-state counts. Repository names and paths, prompts, source text, file names, commands,
+task/session/thread/event IDs, secrets, and absolute timestamps are never fields in the diagnostic
+DTO. Review the JSON before choosing to share it manually.
+
 ## Retention
 
 - Unpinned evidence: 90 days by default.

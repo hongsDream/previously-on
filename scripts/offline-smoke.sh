@@ -142,6 +142,18 @@ assert_ui_state unregistered
 offline "$BINARY" setup codex --repo "$REPO_CANONICAL"
 offline "$BINARY" status
 offline "$BINARY" doctor
+offline "$BINARY" diagnostics --repo "$REPO_CANONICAL" >"$STAGE/diagnostics-empty.json"
+node -e '
+  const fs = require("node:fs");
+  const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (value.schemaVersion !== 1 || value.counts?.sessions !== 0 || value.counts?.checkpoints !== 0) {
+    throw new Error(`unexpected empty diagnostics: ${JSON.stringify(value)}`);
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized.includes(process.argv[2]) || serialized.includes("offline-session")) {
+    throw new Error("diagnostics leaked a repository path or identifier");
+  }
+' "$STAGE/diagnostics-empty.json" "$REPO_CANONICAL"
 
 assert_ui_state registered-empty
 
@@ -164,7 +176,7 @@ node -e '
     session_id: "offline-session",
     turn_id: "turn-1",
     cwd: process.argv[2],
-    timestamp: "2026-07-13T00:00:00Z",
+    timestamp: new Date().toISOString(),
   })}\n`);
 ' "$STAGE/hook.json" "$REPO_CANONICAL"
 offline "$BINARY" hook SessionStart <"$STAGE/hook.json" >"$STAGE/hook-response.json"
@@ -180,7 +192,7 @@ node -e '
     session_id: "offline-session",
     turn_id: "turn-1",
     cwd: process.argv[2],
-    timestamp: "2026-07-13T00:00:01Z",
+    timestamp: new Date(Date.now() + 1000).toISOString(),
   };
   fs.writeFileSync(process.argv[1], `${JSON.stringify({...base, prompt: "Create the first synthetic checkpoint"})}\n`);
 ' "$STAGE/prompt.json" "$REPO_CANONICAL"
@@ -191,7 +203,7 @@ node -e '
     session_id: "offline-session",
     turn_id: "turn-1",
     cwd: process.argv[2],
-    timestamp: "2026-07-13T00:00:02Z",
+    timestamp: new Date(Date.now() + 2000).toISOString(),
     last_assistant_message: "Created the first synthetic checkpoint.",
   })}\n`);
 ' "$STAGE/stop.json" "$REPO_CANONICAL"
@@ -199,6 +211,22 @@ offline "$BINARY" hook Stop <"$STAGE/stop.json" >"$STAGE/stop-response.json"
 
 assert_ui_state active
 stop_ui
+
+offline "$BINARY" diagnostics --repo "$REPO_CANONICAL" >"$STAGE/diagnostics-active.json"
+node -e '
+  const fs = require("node:fs");
+  const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (value.schemaVersion !== 1 || value.counts?.sessions < 1 || value.counts?.checkpoints < 1) {
+    throw new Error(`unexpected active diagnostics: ${JSON.stringify(value)}`);
+  }
+  if (typeof value.setupToFirstCheckpointSeconds !== "number") {
+    throw new Error("diagnostics omitted setup-to-first-checkpoint duration");
+  }
+  const serialized = JSON.stringify(value);
+  for (const privateValue of [process.argv[2], "offline-session", "turn-1", "Create the first synthetic checkpoint"]) {
+    if (serialized.includes(privateValue)) throw new Error(`diagnostics leaked ${privateValue}`);
+  }
+' "$STAGE/diagnostics-active.json" "$REPO_CANONICAL"
 
 offline "$BINARY" export --format json >"$STAGE/export-before-purge.json"
 node -e '
@@ -246,4 +274,4 @@ for managed_file in "$STAGE/home/.codex/hooks.json" "$STAGE/home/.codex/config.t
   [[ ! -e "$managed_file" ]] || ! grep -F 'previously-on-v1' "$managed_file" >/dev/null
 done
 
-echo "offline smoke passed: setup-before -> registered-empty -> first-checkpoint UI transition, daemon/hook, MCP, export, purge, and uninstall with non-loopback outbound denied"
+echo "offline smoke passed: setup-before -> registered-empty -> first-checkpoint UI transition, privacy-bounded diagnostics, daemon/hook, MCP, export, purge, and uninstall with non-loopback outbound denied"
