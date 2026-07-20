@@ -31,8 +31,9 @@ continuation is a core product capability, not a benchmark-only feature.
   task ID are visible in the task workspace.
 - **Task integrity controls:** deterministic task title suggestions, explicit task editing, and
   previewed append-only session move, merge, split, undo, and operation history.
-- **Verified relationship graph:** accessible graph and table views derived from canonical events,
-  projections, and Regression Contracts with source provenance and no guessed dependency edges.
+- **Evidence-backed relationship graph:** accessible graph and table views derived from canonical
+  events, projections, and Regression Contracts with source provenance and no guessed dependency
+  edges.
 - **Opt-in AI fact refresh:** a user-triggered beta that runs only after the managed input-only
   permission profile is verified and produces candidates for explicit review, never Evidence.
 - **Local agent lineage:** read-only same-device interactive and sub-agent observation with

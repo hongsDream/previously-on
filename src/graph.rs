@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct RelationshipGraphSummaryV1 {
     pub node_count: usize,
     pub edge_count: usize,
+    /// Deprecated V1 compatibility field. It mirrors evidence-backed edges in V1.
     pub verified_edge_count: usize,
     pub nodes_by_kind: BTreeMap<String, usize>,
     pub edges_by_kind: BTreeMap<String, usize>,
@@ -337,6 +338,11 @@ pub fn derive_relationship_graph(
         }
     }
 
+    edges.retain(|_, edge| {
+        !edge.provenance_ids.is_empty()
+            && nodes.contains_key(&edge.from)
+            && nodes.contains_key(&edge.to)
+    });
     let mut nodes = nodes.into_values().collect::<Vec<_>>();
     nodes.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
     let mut edges = edges.into_values().collect::<Vec<_>>();
@@ -354,7 +360,7 @@ pub fn compact_summary(graph: &RelationshipGraphV1) -> RelationshipGraphSummaryV
     let mut summary = RelationshipGraphSummaryV1 {
         node_count: graph.nodes.len(),
         edge_count: graph.edges.len(),
-        verified_edge_count: graph.edges.iter().filter(|edge| edge.verified).count(),
+        verified_edge_count: graph.edges.len(),
         ..RelationshipGraphSummaryV1::default()
     };
     for node in &graph.nodes {
@@ -389,25 +395,23 @@ fn insert_edge(
     provenance_ids = provenance_ids
         .into_iter()
         .map(|value| redact_excerpt(&value))
+        .filter(|value| !value.is_empty())
         .collect();
     provenance_ids.sort();
     provenance_ids.dedup();
-    let id = deterministic_id(
-        "edge",
-        &[
-            &format!("{kind:?}"),
-            &from,
-            &to,
-            &format!("{source_kind:?}"),
-            &observed_at.timestamp_micros().to_string(),
-        ],
-    );
+    if provenance_ids.is_empty() {
+        return;
+    }
+    let kind_wire = enum_label(&kind);
+    let source_kind_wire = enum_label(&source_kind);
+    let id = deterministic_id("edge", &[&kind_wire, &from, &to, &source_kind_wire]);
     edges
         .entry(id.clone())
         .and_modify(|edge| {
             edge.provenance_ids.extend(provenance_ids.clone());
             edge.provenance_ids.sort();
             edge.provenance_ids.dedup();
+            edge.observed_at = edge.observed_at.max(observed_at);
         })
         .or_insert(GraphEdgeV1 {
             id,

@@ -342,7 +342,6 @@
 .graph-visual-wrap { padding: 12px; overflow-x: auto; }
 .relationship-graph-visual { display: block; width: 100%; min-width: 760px; min-height: 180px; }
 .graph-edges line { stroke: #c3ccd9; stroke-width: 1.25; }
-.graph-edges line.unverified { stroke: #d3a94a; stroke-dasharray: 4 3; }
 .graph-node rect { fill: var(--surface); stroke: #aab8ca; }
 .graph-node-task rect, .graph-node-regression-contract rect { fill: var(--accent-soft); stroke: #76a4e8; }
 .graph-node text { fill: #36445a; font: 7px ui-sans-serif, sans-serif; text-anchor: middle; }
@@ -364,9 +363,6 @@
 .graph-list-fallback td strong, .graph-list-fallback td code { display: block; }
 .graph-list-fallback td code, .graph-list-fallback td li { color: #526075; font: 7px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .graph-list-fallback td ul { margin: 0; padding: 0; list-style: none; }
-.graph-verified, .graph-unverified { display: inline-block; border: 1px solid currentColor; border-radius: 999px; padding: 3px 5px; font-size: 7px; }
-.graph-verified { color: var(--success); background: var(--success-soft); }
-.graph-unverified { color: #8a5a00; background: var(--warning-soft); }
 
 .fact-refresh-panel > header, .agents-tree-panel > header { min-height: 76px; padding: 14px 15px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .fact-refresh-panel > header > div, .agents-tree-panel > header > div { min-width: 0; }
