@@ -21,12 +21,12 @@ import { CheckpointTimeline } from './CheckpointTimeline';
 import { CodebaseLineage } from './CodebaseLineage';
 import { ContextPackPreview } from './ContextPackPreview';
 import { FactRefreshPanel } from './FactRefreshPanel';
-import { ResumeBanner } from './ResumeBanner';
 import { RegressionContractsPanel } from './RegressionContractsPanel';
+import { ResumeBanner } from './ResumeBanner';
 import { TaskEditor } from './TaskEditor';
 import { TaskGroupingPanel } from './TaskGroupingPanel';
 
-interface TaskWorkspaceProps {
+interface TaskWorkspaceModel {
   task: Task;
   checkpoints: Checkpoint[];
   selectedCheckpoint?: Checkpoint;
@@ -35,7 +35,6 @@ interface TaskWorkspaceProps {
   contracts: BootstrapData['contracts'];
   contractCandidates: BootstrapData['contractCandidates'];
   contractEvaluation: BootstrapData['contractEvaluation'];
-  contextPackExpanded: boolean;
   tasks: Task[];
   sessions: Session[];
   facts: Fact[];
@@ -43,6 +42,9 @@ interface TaskWorkspaceProps {
   aiRefreshCapability: AiRefreshCapabilityV1;
   factRefreshOperation?: AiFactRefreshOperationV1;
   agents: AgentV1[];
+}
+
+interface TaskWorkspaceActions {
   onCheckpointSelect: (checkpoint: Checkpoint) => void;
   onReviewResume: () => void;
   onDismissResume: () => void;
@@ -58,47 +60,58 @@ interface TaskWorkspaceProps {
   onUpdateContractCandidate: (id: string, candidate: RegressionCandidateDraftV1) => Promise<boolean>;
   onApproveContractCandidate: (id: string) => Promise<boolean>;
   onSupersedeContract: (id: string, supersededBy: string) => Promise<boolean>;
-  contractMutationsDisabled: boolean;
-  mutationPending: boolean;
   onBack: () => void;
 }
 
-export function TaskWorkspace({
-  task,
-  checkpoints,
-  selectedCheckpoint,
-  resumeCandidate,
-  contextPack,
-  contracts,
-  contractCandidates,
-  contractEvaluation,
-  contextPackExpanded,
-  tasks,
-  sessions,
-  facts,
-  groupingOperations,
-  aiRefreshCapability,
-  factRefreshOperation,
-  agents,
-  onCheckpointSelect,
-  onReviewResume,
-  onDismissResume,
-  onToggleContextPack,
-  onTaskUpdate,
-  onGroupingPreview,
-  onGroupingApply,
-  onGroupingUndo,
-  onFactRefreshStart,
-  onFactRefreshPoll,
-  onFactRefreshReview,
-  onCreateContractCandidate,
-  onUpdateContractCandidate,
-  onApproveContractCandidate,
-  onSupersedeContract,
-  contractMutationsDisabled,
-  mutationPending,
-  onBack,
-}: TaskWorkspaceProps) {
+interface TaskWorkspaceUiState {
+  contextPackExpanded: boolean;
+  contractMutationsDisabled: boolean;
+  mutationPending: boolean;
+}
+
+interface TaskWorkspaceProps {
+  model: TaskWorkspaceModel;
+  actions: TaskWorkspaceActions;
+  uiState: TaskWorkspaceUiState;
+}
+
+export function TaskWorkspace({ model, actions, uiState }: TaskWorkspaceProps) {
+  const {
+    task,
+    checkpoints,
+    selectedCheckpoint,
+    resumeCandidate,
+    contextPack,
+    contracts,
+    contractCandidates,
+    contractEvaluation,
+    tasks,
+    sessions,
+    facts,
+    groupingOperations,
+    aiRefreshCapability,
+    factRefreshOperation,
+    agents,
+  } = model;
+  const {
+    onCheckpointSelect,
+    onReviewResume,
+    onDismissResume,
+    onToggleContextPack,
+    onTaskUpdate,
+    onGroupingPreview,
+    onGroupingApply,
+    onGroupingUndo,
+    onFactRefreshStart,
+    onFactRefreshPoll,
+    onFactRefreshReview,
+    onCreateContractCandidate,
+    onUpdateContractCandidate,
+    onApproveContractCandidate,
+    onSupersedeContract,
+    onBack,
+  } = actions;
+  const { contextPackExpanded, contractMutationsDisabled, mutationPending } = uiState;
   return (
     <main className="task-workspace">
       <header className="task-header">
