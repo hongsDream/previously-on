@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { GitFork, List, Network } from 'lucide-react';
 import { ApiUnavailableError, fetchRelationshipGraph } from '../lib/api';
 import type { GraphNodeKindV1, GraphNodeV1, RelationshipGraphSummaryV1, RelationshipGraphV1, Task } from '../types';
+import { useI18n } from '../i18n-context';
 
 interface RelationshipGraphPanelProps {
   repositoryId: string;
@@ -14,6 +15,7 @@ interface RelationshipGraphPanelProps {
 const kindOrder: GraphNodeKindV1[] = ['task', 'session', 'commit', 'file', 'regression_contract', 'verified_symbol', 'test', 'agent'];
 
 export function RelationshipGraphPanel({ repositoryId, tasks, summary, refreshVersion, disabled }: RelationshipGraphPanelProps) {
+  const { t } = useI18n();
   const [taskFilter, setTaskFilter] = useState('');
   const [view, setView] = useState<'graph' | 'list'>(() => isCompactViewport() ? 'list' : 'graph');
   const [graph, setGraph] = useState<RelationshipGraphV1 | null>(null);
@@ -39,7 +41,7 @@ export function RelationshipGraphPanel({ repositoryId, tasks, summary, refreshVe
     if (disabled || !repositoryId) {
       setGraph(null);
       setLoading(false);
-      setError(disabled ? 'Relationship details are unavailable in the read-only sample workspace.' : 'Repository identity is unavailable.');
+      setError(disabled ? t('Relationship details are unavailable in the read-only sample workspace.') : t('Repository identity is unavailable.'));
       return;
     }
     const controller = new AbortController();
@@ -50,8 +52,8 @@ export function RelationshipGraphPanel({ repositoryId, tasks, summary, refreshVe
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
         const message = caught instanceof ApiUnavailableError
-          ? 'The local relationship graph is temporarily unavailable.'
-          : caught instanceof Error ? caught.message : 'The relationship graph could not be loaded.';
+          ? t('The local relationship graph is temporarily unavailable.')
+          : caught instanceof Error ? caught.message : t('The relationship graph could not be loaded.');
         setGraph(null);
         setError(message);
       })
@@ -59,51 +61,52 @@ export function RelationshipGraphPanel({ repositoryId, tasks, summary, refreshVe
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [disabled, refreshVersion, repositoryId, taskFilter]);
+  }, [disabled, refreshVersion, repositoryId, taskFilter, t]);
 
   return (
     <section className="overview-panel relationship-graph-panel" aria-labelledby="relationship-graph-title">
       <header>
-        <span><GitFork size={17} /><strong id="relationship-graph-title">Evidence-backed relationship graph</strong></span>
-        <small>{visibleGraph?.nodes.length ?? summary.nodeCount} nodes · {visibleGraph?.edges.length ?? summary.edgeCount} provenance-backed edges</small>
+        <span><GitFork size={17} /><strong id="relationship-graph-title">{t('Evidence-backed relationship graph')}</strong></span>
+        <small>{t('{nodes} nodes · {edges} provenance-backed edges', { nodes: visibleGraph?.nodes.length ?? summary.nodeCount, edges: visibleGraph?.edges.length ?? summary.edgeCount })}</small>
       </header>
       <div className="graph-toolbar">
-        <label htmlFor="relationship-task-filter">Task filter
+        <label htmlFor="relationship-task-filter">{t('Task filter')}
           <select id="relationship-task-filter" value={taskFilter} disabled={disabled || loading} onChange={(event) => setTaskFilter(event.target.value)}>
-            <option value="">All repository tasks</option>
+            <option value="">{t('All repository tasks')}</option>
             {tasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
           </select>
         </label>
-        <div className="graph-view-toggle" role="group" aria-label="Relationship graph view">
-          <button type="button" aria-pressed={view === 'graph'} onClick={() => setView('graph')}><Network size={14} /> Graph</button>
-          <button type="button" aria-pressed={view === 'list'} onClick={() => setView('list')}><List size={14} /> List</button>
+        <div className="graph-view-toggle" role="group" aria-label={t('Relationship graph view')}>
+          <button type="button" aria-pressed={view === 'graph'} onClick={() => setView('graph')}><Network size={14} /> {t('Graph')}</button>
+          <button type="button" aria-pressed={view === 'list'} onClick={() => setView('list')}><List size={14} /> {t('List')}</button>
         </div>
       </div>
 
-      {loading ? <p className="graph-state" role="status">Loading evidence-backed relationships…</p> : null}
+      {loading ? <p className="graph-state" role="status">{t('Loading evidence-backed relationships…')}</p> : null}
       {!loading && error ? <p className="graph-state graph-error" role="alert">{error}</p> : null}
       {!loading && !error && visibleGraph ? (
         visibleGraph.nodes.length || visibleGraph.edges.length ? (
           view === 'graph' ? <GraphVisual graph={visibleGraph} /> : <GraphList graph={visibleGraph} />
-        ) : <p className="graph-state">No evidence-backed relationships match this filter.</p>
+        ) : <p className="graph-state">{t('No evidence-backed relationships match this filter.')}</p>
       ) : null}
     </section>
   );
 }
 
 function GraphVisual({ graph }: { graph: RelationshipGraphV1 }) {
+  const { t } = useI18n();
   const layout = useMemo(() => graphLayout(graph.nodes), [graph.nodes]);
   const nodesById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
   return (
     <div className="graph-visual-wrap">
-      <p className="sr-only">Visual overview of {graph.nodes.length} nodes and {graph.edges.length} explicit evidence-backed relationships. Use List view for complete relationship details.</p>
-      <svg className="relationship-graph-visual" viewBox={`0 0 920 ${layout.height}`} role="img" aria-label={`Relationship graph with ${graph.nodes.length} nodes and ${graph.edges.length} edges`}>
+      <p className="sr-only">{t('Visual overview of {nodes} nodes and {edges} explicit evidence-backed relationships. Use List view for complete relationship details.', { nodes: graph.nodes.length, edges: graph.edges.length })}</p>
+      <svg className="relationship-graph-visual" viewBox={`0 0 920 ${layout.height}`} role="img" aria-label={t('Relationship graph with {nodes} nodes and {edges} edges', { nodes: graph.nodes.length, edges: graph.edges.length })}>
         <g className="graph-edges" aria-hidden="true">
           {graph.edges.map((edge) => {
             const from = layout.positions.get(edge.from);
             const to = layout.positions.get(edge.to);
             if (!from || !to) return null;
-            return <line key={edge.id} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="evidence-backed"><title>{edgeLabel(edge.kind, nodesById.get(edge.from), nodesById.get(edge.to))}</title></line>;
+            return <line key={edge.id} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="evidence-backed"><title>{edgeLabel(edge.kind, nodesById.get(edge.from), nodesById.get(edge.to), t('Unknown'))}</title></line>;
           })}
         </g>
         <g className="graph-nodes" aria-hidden="true">
@@ -112,38 +115,39 @@ function GraphVisual({ graph }: { graph: RelationshipGraphV1 }) {
             return (
               <g key={node.id} transform={`translate(${position.x - 47} ${position.y - 18})`} className={`graph-node graph-node-${node.kind.replaceAll('_', '-')}`}>
                 <rect width="94" height="36" rx="6" />
-                <text x="47" y="14" className="graph-node-kind">{kindLabel(node.kind)}</text>
+                <text x="47" y="14" className="graph-node-kind">{t(kindLabel(node.kind))}</text>
                 <text x="47" y="27"><title>{node.label}</title>{truncate(node.label, 15)}</text>
               </g>
             );
           })}
         </g>
       </svg>
-      <p className="graph-visual-help">Only explicit canonical, projection, and Regression Contract edges are shown. No similarity inference is used.</p>
+      <p className="graph-visual-help">{t('Only explicit canonical, projection, and Regression Contract edges are shown. No similarity inference is used.')}</p>
     </div>
   );
 }
 
 function GraphList({ graph }: { graph: RelationshipGraphV1 }) {
+  const { t, locale } = useI18n();
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
   return (
     <div className="graph-list-fallback">
       <section aria-labelledby="graph-node-list-title">
-        <h3 id="graph-node-list-title">Nodes</h3>
-        <ul className="graph-node-list">{graph.nodes.map((node) => <li key={node.id}><span>{kindLabel(node.kind)}</span><strong>{node.label}</strong><code title={node.id}>{node.id}</code></li>)}</ul>
+        <h3 id="graph-node-list-title">{t('Nodes')}</h3>
+        <ul className="graph-node-list">{graph.nodes.map((node) => <li key={node.id}><span>{t(kindLabel(node.kind))}</span><strong>{node.label}</strong><code title={node.id}>{node.id}</code></li>)}</ul>
       </section>
       <div className="graph-table-scroll">
         <table>
-          <caption>Explicit relationship edges and provenance</caption>
-          <thead><tr><th scope="col">Relationship</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Provenance</th><th scope="col">Source</th><th scope="col">Observed</th></tr></thead>
+          <caption>{t('Explicit relationship edges and provenance')}</caption>
+          <thead><tr><th scope="col">{t('Relationship')}</th><th scope="col">{t('From')}</th><th scope="col">{t('To')}</th><th scope="col">{t('Provenance')}</th><th scope="col">{t('Source')}</th><th scope="col">{t('Observed')}</th></tr></thead>
           <tbody>{graph.edges.map((edge) => (
             <tr key={edge.id}>
-              <th scope="row">{edge.kind}</th>
+              <th scope="row">{t(edge.kind)}</th>
               <td><strong>{nodesById.get(edge.from)?.label ?? edge.from}</strong><code>{edge.from}</code></td>
               <td><strong>{nodesById.get(edge.to)?.label ?? edge.to}</strong><code>{edge.to}</code></td>
               <td><ul>{edge.provenanceIds.map((id) => <li key={id}><code>{id}</code></li>)}</ul></td>
-              <td>{edge.sourceKind}</td>
-              <td>{formatObservedAt(edge.observedAt)}</td>
+              <td>{t(edge.sourceKind)}</td>
+              <td>{formatObservedAt(edge.observedAt, locale, t('Unavailable'))}</td>
             </tr>
           ))}</tbody>
         </table>
@@ -175,8 +179,8 @@ function graphLayout(nodes: GraphNodeV1[]) {
   return { positions, height: Math.max(150, 88 + maxRows * 54) };
 }
 
-function edgeLabel(kind: string, from?: GraphNodeV1, to?: GraphNodeV1) {
-  return `${from?.label ?? 'Unknown'} ${kind} ${to?.label ?? 'Unknown'}`;
+function edgeLabel(kind: string, from: GraphNodeV1 | undefined, to: GraphNodeV1 | undefined, unknown: string) {
+  return `${from?.label ?? unknown} ${kind} ${to?.label ?? unknown}`;
 }
 
 function kindLabel(kind: GraphNodeKindV1) {
@@ -187,9 +191,9 @@ function truncate(value: string, length: number) {
   return value.length > length ? `${value.slice(0, length - 1)}…` : value;
 }
 
-function formatObservedAt(value: string) {
+function formatObservedAt(value: string, locale: string, unavailable: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'Unavailable' : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? unavailable : date.toLocaleString(locale);
 }
 
 function isCompactViewport() {

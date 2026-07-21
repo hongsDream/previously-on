@@ -1,5 +1,6 @@
 import { Bot, CircleAlert, CircleCheck, LockKeyhole, ShieldCheck } from 'lucide-react';
 import type { AiRefreshCapabilityV1 } from '../types';
+import { useI18n } from '../i18n-context';
 
 interface SettingsPanelProps {
   capability: AiRefreshCapabilityV1;
@@ -25,39 +26,58 @@ const statusCopy: Record<AiRefreshCapabilityV1['status'], { title: string; descr
 };
 
 export function SettingsPanel({ capability }: SettingsPanelProps) {
+  const { language, locale, setLanguage, t } = useI18n();
   const copy = statusCopy[capability.status];
   const StatusIcon = capability.status === 'ready' ? CircleCheck : CircleAlert;
   return (
     <main className="settings-workspace" aria-labelledby="settings-title">
       <header className="settings-hero">
-        <span>Local capabilities</span>
-        <h1 id="settings-title">Settings</h1>
-        <p>PreviouslyOn verifies local capabilities before exposing optional actions. History review remains local and available without AI refresh.</p>
+        <span>{t('Local capabilities')}</span>
+        <h1 id="settings-title">{t('Settings')}</h1>
+        <p>{t('PreviouslyOn verifies local capabilities before exposing optional actions. History review remains local and available without AI refresh.')}</p>
       </header>
+
+      <section className="settings-panel language-settings" aria-labelledby="language-settings-title">
+        <header>
+          <span className="settings-icon" aria-hidden="true">가</span>
+          <div>
+            <h2 id="language-settings-title">{t('Interface language')}</h2>
+            <p>{t('Saved on this browser')}</p>
+          </div>
+        </header>
+        <div className="language-settings-body">
+          <label htmlFor="interface-language">{t('Language')}</label>
+          <select id="interface-language" value={language} onChange={(event) => setLanguage(event.target.value as 'en' | 'ko')}>
+            <option value="ko">한국어</option>
+            <option value="en">English</option>
+          </select>
+          <p>{t('Choose the language used for navigation, guidance, and local status messages. Repository content and commands are never translated.')}</p>
+        </div>
+      </section>
 
       <section className="settings-panel" aria-labelledby="ai-refresh-settings-title">
         <header>
           <span className="settings-icon"><Bot size={20} /></span>
           <div>
-            <h2 id="ai-refresh-settings-title">AI-assisted fact refresh</h2>
-            <p>Beta · explicit opt-in · user initiated only</p>
+            <h2 id="ai-refresh-settings-title">{t('AI-assisted fact refresh')}</h2>
+            <p>{t('Beta · explicit opt-in · user initiated only')}</p>
           </div>
-          <span className={`capability-status capability-${capability.status}`}><StatusIcon size={13} /> {capability.status.replace('_', ' ')}</span>
+          <span className={`capability-status capability-${capability.status}`}><StatusIcon size={13} /> {t(capability.status.replace('_', ' '))}</span>
         </header>
         <div className="settings-capability-body">
           <div className="capability-summary">
-            <strong>{copy.title}</strong>
-            <p>{capability.reason || copy.description}</p>
+            <strong>{t(copy.title)}</strong>
+            <p>{capability.reason || t(copy.description)}</p>
           </div>
           <dl>
-            <div><dt>Permission profile</dt><dd><code>{capability.profileName || 'Unavailable'}</code></dd></div>
-            <div><dt>Network</dt><dd>{capability.status === 'ready' ? 'Disabled' : 'Not verified'}</dd></div>
-            <div><dt>Approval policy</dt><dd>{capability.status === 'ready' ? 'Never' : 'Not verified'}</dd></div>
-            <div><dt>Last verified</dt><dd>{formatCheckedAt(capability.checkedAt)}</dd></div>
+            <div><dt>{t('Permission profile')}</dt><dd><code>{capability.profileName || t('Unavailable')}</code></dd></div>
+            <div><dt>{t('Network')}</dt><dd>{capability.status === 'ready' ? t('Disabled') : t('Not verified')}</dd></div>
+            <div><dt>{t('Approval policy')}</dt><dd>{capability.status === 'ready' ? t('Never') : t('Not verified')}</dd></div>
+            <div><dt>{t('Last verified')}</dt><dd>{formatCheckedAt(capability.checkedAt, locale, t('Unavailable'))}</dd></div>
           </dl>
           <ul className="capability-guardrails">
-            <li><ShieldCheck size={15} /><span><strong>Bounded verified input</strong>Only redacted task facts, files, tests, and Regression Contracts can enter the refresh pack.</span></li>
-            <li><LockKeyhole size={15} /><span><strong>Candidate-only output</strong>Model output never becomes Evidence. You must review it before it can become a Fact Candidate.</span></li>
+            <li><ShieldCheck size={15} /><span><strong>{t('Bounded verified input')}</strong>{t('Only redacted task facts, files, tests, and Regression Contracts can enter the refresh pack.')}</span></li>
+            <li><LockKeyhole size={15} /><span><strong>{t('Candidate-only output')}</strong>{t('Model output never becomes Evidence. You must review it before it can become a Fact Candidate.')}</span></li>
           </ul>
         </div>
       </section>
@@ -65,8 +85,8 @@ export function SettingsPanel({ capability }: SettingsPanelProps) {
   );
 }
 
-function formatCheckedAt(value?: string | null) {
-  if (!value) return 'Unavailable';
+function formatCheckedAt(value: string | null | undefined, locale: string, unavailable: string) {
+  if (!value) return unavailable;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'Unavailable' : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? unavailable : date.toLocaleString(locale);
 }

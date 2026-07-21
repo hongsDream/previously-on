@@ -1,5 +1,6 @@
 import { Clock3, FileText, GitBranch, Laptop, List, Search, Settings } from 'lucide-react';
 import type { Task, TaskStatus } from '../types';
+import { useI18n } from '../i18n-context';
 
 const navigation = [
   { label: 'Tasks', icon: List },
@@ -24,9 +25,10 @@ interface SidebarProps {
 }
 
 export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation, onQueryChange, onStatusChange, onTaskSelect, onOverviewOpen, onEvidenceOpen, evidenceEnabled, onSettingsOpen }: SidebarProps) {
+  const { t } = useI18n();
   return (
     <aside className="sidebar">
-      <nav aria-label="Primary navigation">
+      <nav aria-label={t('Primary navigation')}>
         {navigation.map(({ label, icon: Icon }) => (
           <button
             key={label}
@@ -36,13 +38,13 @@ export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation
             onClick={label === 'Tasks' ? () => onOverviewOpen('tasks') : label === 'Sessions' ? () => onOverviewOpen('sessions') : label === 'Evidence' ? onEvidenceOpen : onSettingsOpen}
           >
             <Icon size={19} strokeWidth={1.7} />
-            {label}
+            {t(label)}
           </button>
         ))}
       </nav>
 
       <div className="sidebar-filter">
-        <label htmlFor="task-search">Find a task</label>
+        <label htmlFor="task-search">{t('Find a task')}</label>
         <div className="search-field">
           <Search size={15} aria-hidden="true" />
           <input
@@ -50,18 +52,18 @@ export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation
             type="search"
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="Search tasks"
+            placeholder={t('Search tasks')}
           />
         </div>
-        <label htmlFor="task-status">Status</label>
+        <label htmlFor="task-status">{t('Status')}</label>
         <select id="task-status" value={status} onChange={(event) => onStatusChange(event.target.value as TaskStatus | 'all')}>
-          <option value="all">All tasks</option>
-          <option value="active">Active</option>
-          <option value="completed">Completed</option>
-          <option value="abandoned">Abandoned</option>
+          <option value="all">{t('All tasks')}</option>
+          <option value="active">{t('Active')}</option>
+          <option value="completed">{t('Completed')}</option>
+          <option value="abandoned">{t('Abandoned')}</option>
         </select>
         <div className="task-search-results" aria-live="polite">
-          {tasks.length === 0 ? <span>No matching tasks</span> : tasks.map((task) => (
+          {tasks.length === 0 ? <span>{t('No matching tasks')}</span> : tasks.map((task) => (
             <button
               key={task.id}
               className={task.id === selectedTaskId ? 'active' : ''}
@@ -73,15 +75,15 @@ export function Sidebar({ query, status, tasks, selectedTaskId, activeNavigation
                 <span>{task.codebase.repositoryName}</span>
                 <code><GitBranch size={10} /> {task.codebase.branch}</code>
               </span>
-              <small>{task.status} · {task.checkpointIds.length} checkpoints</small>
+              <small>{t('{status} · {count} checkpoints', { status: t(task.status === 'active' ? 'Active' : task.status === 'completed' ? 'Completed' : 'Abandoned'), count: task.checkpointIds.length })}</small>
             </button>
           ))}
         </div>
       </div>
 
-      <div className="workspace-user" aria-label="Local workspace profile">
+      <div className="workspace-user" aria-label={t('Local workspace profile')}>
         <span className="avatar" aria-hidden="true"><Laptop size={16} /></span>
-        <span><strong>Local device</strong><small>· No cloud account</small></span>
+        <span><strong>{t('Local device')}</strong><small>{t('· No cloud account')}</small></span>
         <Chevron />
       </div>
     </aside>

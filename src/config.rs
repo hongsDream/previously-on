@@ -483,16 +483,16 @@ async fn run_codex(config: &AppConfig, repo: &Path, codex_args: &[OsString]) -> 
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DoctorReport {
-    healthy: bool,
-    checks: Vec<DoctorCheck>,
+pub(crate) struct DoctorReport {
+    pub(crate) healthy: bool,
+    pub(crate) checks: Vec<DoctorCheck>,
 }
 
 #[derive(Debug, Serialize)]
-struct DoctorCheck {
-    name: &'static str,
-    ok: bool,
-    detail: String,
+pub(crate) struct DoctorCheck {
+    pub(crate) name: &'static str,
+    pub(crate) ok: bool,
+    pub(crate) detail: String,
 }
 
 async fn doctor(config: &AppConfig) -> DoctorReport {
@@ -620,6 +620,18 @@ async fn doctor(config: &AppConfig) -> DoctorReport {
         healthy: checks.iter().all(|check| check.ok),
         checks,
     }
+}
+
+pub(crate) async fn doctor_for_setup_paths(paths: &SetupPaths) -> DoctorReport {
+    let config = AppConfig {
+        database_path: paths.data_dir.join("previously.sqlite3"),
+        socket_path: paths.data_dir.join("previously.sock"),
+        queue_path: paths.data_dir.join("queue/events.jsonl"),
+        data_dir: paths.data_dir.clone(),
+        codex_home: paths.codex_home.clone(),
+        executable: paths.executable.clone(),
+    };
+    doctor(&config).await
 }
 
 async fn import_codex_threads(config: &AppConfig, repo: &Path) -> Result<()> {

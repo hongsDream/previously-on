@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use chrono::{SecondsFormat, Utc};
 use rand::distr::{Alphanumeric, SampleString};
 use rust_embed::RustEmbed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -133,6 +133,7 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
 
     let app = Router::new()
         .route("/api/bootstrap", get(bootstrap))
+        .route("/api/setup/codex", post(setup_codex))
         .route("/api/export", get(export_repository))
         .route("/api/repository", delete(purge_repository))
         .route("/api/facts/{id}", patch(update_fact))
@@ -190,6 +191,74 @@ async fn bootstrap(
 ) -> ApiResult<Json<bootstrap::BootstrapResponseV1>> {
     authorize_api_read(&state, &headers)?;
     Ok(Json(bootstrap::build_bootstrap(&state).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetupCodexRequest {
+    repository_path: String,
+    confirmed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupCodexResponse {
+    ok: bool,
+    repository_path: String,
+    restart_required: bool,
+    doctor: crate::config::DoctorReport,
+}
+
+async fn setup_codex(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SetupCodexRequest>,
+) -> ApiResult<Json<SetupCodexResponse>> {
+    authorize_mutation(&state, &headers)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirm the local Codex configuration changes before setup",
+        ));
+    }
+    let repository_path = request.repository_path.trim();
+    if repository_path.is_empty() {
+        return Err(ApiError::bad_request("repository path is required"));
+    }
+    if repository_path.len() > 4096 || repository_path.contains('\0') {
+        return Err(ApiError::bad_request("repository path is invalid"));
+    }
+
+    let setup_paths = server_setup_paths(&state)?;
+    let repository = PathBuf::from(repository_path);
+    if !repository.is_absolute() {
+        return Err(ApiError::bad_request("repository path must be absolute"));
+    }
+    let install_paths = setup_paths.clone();
+    let manifest =
+        tokio::task::spawn_blocking(move || install_codex_from_ui(&install_paths, &repository))
+            .await
+            .map_err(ApiError::internal)??;
+    let doctor = crate::config::doctor_for_setup_paths(&setup_paths).await;
+
+    Ok(Json(SetupCodexResponse {
+        ok: true,
+        repository_path: manifest.repository.to_string_lossy().into_owned(),
+        restart_required: true,
+        doctor,
+    }))
+}
+
+fn install_codex_from_ui(
+    setup_paths: &crate::setup::SetupPaths,
+    repository: &std::path::Path,
+) -> ApiResult<crate::setup::SetupManifestV1> {
+    if std::fs::symlink_metadata(setup_paths.manifest_path()).is_ok() {
+        return Err(ApiError::conflict(
+            "a repository is already registered; review it before changing setup",
+        ));
+    }
+    crate::setup::install_codex_with_options(setup_paths, repository, false)
+        .map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1400,6 +1469,32 @@ mod tests {
         headers
     }
 
+    fn register_test_repository(data_dir: &std::path::Path, repository: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = json!({
+            "version": 1,
+            "managedId": crate::setup::MANAGED_ID,
+            "installedAt": Utc::now().to_rfc3339(),
+            "repository": repository,
+            "executable": std::env::current_exe().unwrap(),
+            "hooksPath": data_dir.join("codex-home/hooks.json"),
+            "configPath": data_dir.join("codex-home/config.toml"),
+            "hooksBackup": { "existed": false, "backupPath": null, "sha256": null },
+            "configBackup": { "existed": false, "backupPath": null, "sha256": null },
+            "installedHooksSha256": "0".repeat(64),
+            "installedConfigSha256": "0".repeat(64),
+            "hooksFeatureBefore": null,
+            "hooksFeatureManaged": false,
+            "aiRefreshEnabled": false,
+            "aiRefreshProfileSha256": null
+        });
+        let path = data_dir.join("setup-manifest.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     #[test]
     fn static_missing_asset_is_not_found_when_bundle_is_absent() {
         let response = asset_response(&"/not-a-real-asset.js".parse().unwrap(), "token");
@@ -1426,6 +1521,150 @@ mod tests {
         assert_eq!(payload["repository"]["captureHealth"], "offline");
         assert!(payload["contractEvaluation"].is_null());
         assert_eq!(payload["tasks"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_uses_registered_repository_instead_of_stale_history() {
+        let temp = TempDir::new().unwrap();
+        let stale_repository = temp.path().join("stale-repository");
+        let registered_repository = temp.path().join("registered-repository");
+        for repository in [&stale_repository, &registered_repository] {
+            std::fs::create_dir_all(repository).unwrap();
+            git(repository, &["init", "-q"]);
+        }
+        register_test_repository(temp.path(), &registered_repository);
+
+        let stale_identity = crate::git::repository_identity(&stale_repository).unwrap();
+        let registered_identity = crate::git::repository_identity(&registered_repository).unwrap();
+        let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
+        let now = Utc::now();
+        for (identity, path) in [
+            (&stale_identity, &stale_repository),
+            (&registered_identity, &registered_repository),
+        ] {
+            store
+                .upsert_repository(&RepositoryV1 {
+                    schema_version: SCHEMA_VERSION_V1,
+                    id: identity.id.clone(),
+                    path: path.to_string_lossy().into_owned(),
+                    remote_url: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        for (id, repository_id) in [
+            ("stale-task", &stale_identity.id),
+            ("registered-task", &registered_identity.id),
+        ] {
+            store
+                .upsert_task(&TaskV1 {
+                    schema_version: SCHEMA_VERSION_V1,
+                    id: id.to_string(),
+                    repository_id: repository_id.clone(),
+                    title: id.to_string(),
+                    goal: None,
+                    lifecycle: TaskLifecycle::Active,
+                    branch: Some("main".to_string()),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        let state = AppState {
+            store,
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+
+        let Json(payload) = bootstrap(State(state), authorized_headers()).await.unwrap();
+        let payload = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(payload["repository"]["name"], "registered-repository");
+        assert_eq!(
+            payload["repository"]["path"],
+            registered_repository.to_string_lossy().as_ref()
+        );
+        assert_eq!(payload["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["tasks"][0]["id"], "registered-task");
+        assert_eq!(payload["tasks"][0]["repositoryId"], registered_identity.id);
+    }
+
+    #[tokio::test]
+    async fn setup_api_requires_same_origin_consent_and_an_absolute_path_before_writes() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState {
+            store: Store::open(temp.path().join("previously.sqlite3")).unwrap(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().join("data")),
+        };
+        let mut cross_origin = authorized_headers();
+        cross_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://example.com"),
+        );
+        let error = setup_codex(
+            State(state.clone()),
+            cross_origin,
+            Json(SetupCodexRequest {
+                repository_path: "/tmp/repository".to_string(),
+                confirmed: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+        let error = setup_codex(
+            State(state.clone()),
+            authorized_headers(),
+            Json(SetupCodexRequest {
+                repository_path: "/tmp/repository".to_string(),
+                confirmed: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        let error = setup_codex(
+            State(state.clone()),
+            authorized_headers(),
+            Json(SetupCodexRequest {
+                repository_path: "relative/repository".to_string(),
+                confirmed: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(!state.data_dir.join("setup-manifest.json").exists());
+    }
+
+    #[test]
+    fn ui_setup_reuses_journaled_install_and_refuses_an_existing_registration() {
+        let temp = TempDir::new().unwrap();
+        let repository = temp.path().join("My Repo");
+        std::fs::create_dir(&repository).unwrap();
+        git(&repository, &["init"]);
+        let setup_paths = crate::setup::SetupPaths {
+            codex_home: temp.path().join("codex-home"),
+            data_dir: temp.path().join("data"),
+            executable: std::env::current_exe().unwrap(),
+        };
+
+        let manifest = install_codex_from_ui(&setup_paths, &repository).unwrap();
+        assert_eq!(manifest.repository, repository.canonicalize().unwrap());
+        assert!(std::fs::read_to_string(setup_paths.hooks_path())
+            .unwrap()
+            .contains(crate::setup::MANAGED_ID));
+        assert!(std::fs::read_to_string(setup_paths.config_path())
+            .unwrap()
+            .contains(crate::setup::MANAGED_ID));
+        assert!(setup_paths.manifest_path().exists());
+
+        let error = install_codex_from_ui(&setup_paths, &repository).unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
     }
 
     #[test]
@@ -2232,6 +2471,7 @@ mod tests {
         let repository = temp.path().join("repo");
         std::fs::create_dir_all(&repository).unwrap();
         git(&repository, &["init", "-q"]);
+        register_test_repository(temp.path(), &repository);
         let identity = crate::git::repository_identity(&repository).unwrap();
         let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
         let now = Utc::now();
@@ -2347,6 +2587,7 @@ mod tests {
         .unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "old auth decision"]);
+        register_test_repository(temp.path(), &repo);
 
         let baseline_a = crate::git::capture_snapshot(&repo).unwrap();
         let repository_id = baseline_a.repository_id.clone();
@@ -2521,13 +2762,18 @@ mod tests {
             ".env.production id_ed25519 credentials.json"
         );
         let temp = TempDir::new().unwrap();
+        let repository = temp.path().join("repo-ui");
+        std::fs::create_dir_all(&repository).unwrap();
+        git(&repository, &["init", "-q"]);
+        register_test_repository(temp.path(), &repository);
+        let repository_id = crate::git::repository_identity(&repository).unwrap().id;
         let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
         let at = Utc::now();
         store
             .upsert_repository(&RepositoryV1 {
                 schema_version: SCHEMA_VERSION_V1,
-                id: "repo-ui".to_string(),
-                path: temp.path().join("repo-ui").to_string_lossy().into_owned(),
+                id: repository_id.clone(),
+                path: repository.to_string_lossy().into_owned(),
                 remote_url: None,
                 created_at: at,
                 updated_at: at,
@@ -2537,7 +2783,7 @@ mod tests {
             .upsert_task(&TaskV1 {
                 schema_version: SCHEMA_VERSION_V1,
                 id: "task-ui".to_string(),
-                repository_id: "repo-ui".to_string(),
+                repository_id: repository_id.clone(),
                 title: INJECTION.to_string(),
                 goal: Some(format!("{INJECTION} {SECRETS}")),
                 lifecycle: TaskLifecycle::Active,
@@ -2548,7 +2794,7 @@ mod tests {
             .unwrap();
         let mut evidence = EvidenceV1::new(
             "evidence-ui",
-            "repo-ui",
+            &repository_id,
             "task-ui",
             "session-ui",
             "source-ui",
@@ -2561,7 +2807,7 @@ mod tests {
             .upsert_fact(&FactV1 {
                 schema_version: SCHEMA_VERSION_V1,
                 id: "fact-ui".to_string(),
-                repository_id: "repo-ui".to_string(),
+                repository_id,
                 task_id: "task-ui".to_string(),
                 kind: FactKind::Decision,
                 lifecycle: FactLifecycle::Confirmed,

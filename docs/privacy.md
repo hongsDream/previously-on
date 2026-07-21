@@ -64,6 +64,13 @@ uninstall can preserve later user edits. Those backups can contain the same sens
 the original Codex configuration and are deleted only when the user removes the local
 PreviouslyOn data directory.
 
+The first-run local UI can perform the normal Codex setup without a terminal command. The setup
+endpoint is available only to the loopback UI session, requires a matching same-origin request and
+an explicit confirmation flag, accepts only an absolute Git worktree path, and refuses to replace
+an existing registration. It calls the same journaled setup implementation used by the CLI, so
+existing Codex configuration is backed up and interrupted writes remain recoverable. The doctor
+checks run after setup without creating a Codex task, starting a model turn, or uploading data.
+
 ## Beta AI fact refresh
 
 AI refresh is disabled by default. `previously setup codex --enable-ai-refresh` installs a managed

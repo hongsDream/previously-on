@@ -15,6 +15,8 @@ import { useMutationRunner } from './hooks/useMutationRunner';
 import { useRefreshActions } from './hooks/useRefreshActions';
 import { useTaskActions } from './hooks/useTaskActions';
 import { useWorkspaceNavigation } from './hooks/useWorkspaceNavigation';
+import { I18nProvider } from './i18n';
+import { useI18n } from './i18n-context';
 import {
   resolveTaskSelection,
   selectWorkspace,
@@ -26,6 +28,11 @@ import type {
 } from './types';
 
 export function App() {
+  return <I18nProvider><AppContent /></I18nProvider>;
+}
+
+function AppContent() {
+  const { t } = useI18n();
   const {
     data,
     setData,
@@ -136,7 +143,12 @@ export function App() {
             onSettingsOpen={openSettings}
           />
           {workspaceView === 'settings' ? <SettingsPanel capability={data.aiRefreshCapability} /> : <main className="repository-empty-workspace">
-            {isUnregistered ? <FirstRunSetup /> : null}
+            {isUnregistered ? (
+              <FirstRunSetup
+                refreshPending={mutationPending}
+                onRefresh={() => void refreshActions.refreshBootstrap()}
+              />
+            ) : null}
             <RegressionContractsPanel
               contracts={data.contracts}
               candidates={data.contractCandidates}
@@ -246,8 +258,8 @@ export function App() {
         actionsDisabled={offlineFallback || mutationPending}
         previewDisabled={!selectedCheckpoint || !data.contextPacks[selectedTask.id]}
       />
-      {offlineFallback ? <div className="sample-banner" role="status">Local API unavailable · read-only sample workspace · changes are disabled</div> : null}
-      {!offlineFallback && data.repository.state === 'degraded' ? <div className="degraded-banner" role="status">Capture degraded · review missing evidence before trusting this workspace</div> : null}
+      {offlineFallback ? <div className="sample-banner" role="status">{t('Local API unavailable · read-only sample workspace · changes are disabled')}</div> : null}
+      {!offlineFallback && data.repository.state === 'degraded' ? <div className="degraded-banner" role="status">{t('Capture degraded · review missing evidence before trusting this workspace')}</div> : null}
       {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
       <div className={`app-body ${workspaceView === 'overview' || workspaceView === 'settings' ? 'overview-app-body' : ''}`}>
         <Sidebar
@@ -350,20 +362,22 @@ export function App() {
 }
 
 function ErrorScreen({ message }: { message: string }) {
+  const { t } = useI18n();
   return (
     <main className="loading-screen" role="alert">
       <span className="loading-mark error-mark" />
-      <h1>PreviouslyOn could not load</h1>
+      <h1>{t('PreviouslyOn could not load')}</h1>
       <p>{message}</p>
     </main>
   );
 }
 
 function LoadingScreen() {
+  const { t } = useI18n();
   return (
     <main className="loading-screen" aria-busy="true">
       <span className="loading-mark" />
-      <p>Loading PreviouslyOn…</p>
+      <p>{t('Loading PreviouslyOn…')}</p>
     </main>
   );
 }
@@ -374,22 +388,24 @@ function EmptyWorkspace({ repositoryName, repositoryPath, refreshPending, onRefr
   refreshPending: boolean;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <section className="repository-empty-state">
       <span className="empty-lineage-mark" aria-hidden="true" />
-      <h1>{repositoryName} is connected</h1>
-      <p>Start one captured Codex session, finish it normally, then refresh this screen to review the first checkpoint and its evidence.</p>
+      <h1>{t('{name} is connected', { name: repositoryName })}</h1>
+      <p>{t('Start one captured Codex session, finish it normally, then refresh this screen to review the first checkpoint and its evidence.')}</p>
       <RegisteredEmptyActions repositoryPath={repositoryPath} refreshPending={refreshPending} onRefresh={onRefresh} />
     </section>
   );
 }
 
 function DegradedWorkspace({ repositoryName }: { repositoryName: string }) {
+  const { t } = useI18n();
   return (
     <section className="repository-empty-state degraded-empty-state">
       <span className="empty-lineage-mark" aria-hidden="true" />
-      <h1>{repositoryName} capture is degraded</h1>
-      <p>PreviouslyOn found the registered repository, but it cannot confirm a complete first checkpoint. Run <code>previously doctor</code>, then start a new captured session after resolving the reported issue.</p>
+      <h1>{t('{name} capture is degraded', { name: repositoryName })}</h1>
+      <p>{t('PreviouslyOn found the registered repository, but it cannot confirm a complete first checkpoint. Run previously doctor, then start a new captured session after resolving the reported issue.')}</p>
     </section>
   );
 }

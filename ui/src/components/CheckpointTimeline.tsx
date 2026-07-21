@@ -11,6 +11,7 @@ import {
 import { useEffect, useState } from 'react';
 import type { Checkpoint, RelatedChange, TemporalStatus } from '../types';
 import { FreshnessBadge } from './StatusBadge';
+import { useI18n } from '../i18n-context';
 
 interface CheckpointTimelineProps {
   checkpoints: Checkpoint[];
@@ -18,16 +19,6 @@ interface CheckpointTimelineProps {
   onSelect: (checkpoint: Checkpoint) => void;
 }
 
-const dateFormatter = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-});
-
-const relativeFormatter = new Intl.RelativeTimeFormat('en-US', { numeric: 'auto' });
 const timeUnits = [
   ['year', 365 * 24 * 60 * 60],
   ['month', 30 * 24 * 60 * 60],
@@ -37,16 +28,17 @@ const timeUnits = [
   ['minute', 60],
 ] as const;
 
-function formatRelativeAge(value: string, now = Date.now()) {
+function formatRelativeAge(value: string, locale: string, unknown: string, justNow: string, now = Date.now()) {
   const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return 'Unknown activity';
+  if (!Number.isFinite(timestamp)) return unknown;
+  const relativeFormatter = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
   const differenceSeconds = (timestamp - now) / 1_000;
   for (const [unit, seconds] of timeUnits) {
     if (Math.abs(differenceSeconds) >= seconds) {
       return relativeFormatter.format(Math.round(differenceSeconds / seconds), unit);
     }
   }
-  return 'just now';
+  return justNow;
 }
 
 function contextUtilization(checkpoint: Checkpoint) {
@@ -55,8 +47,8 @@ function contextUtilization(checkpoint: Checkpoint) {
   return Math.min(100, Math.round((usage.totalTokens / usage.modelContextWindow) * 100));
 }
 
-function shortSha(value: string | undefined) {
-  return value ? value.slice(0, 8) : 'unknown';
+function shortSha(value: string | undefined, unknown: string) {
+  return value ? value.slice(0, 8) : unknown;
 }
 
 function formatChange(change: RelatedChange) {
@@ -66,11 +58,17 @@ function formatChange(change: RelatedChange) {
 }
 
 function TemporalBadge({ status }: { status: TemporalStatus }) {
-  return <span className={`temporal-badge temporal-${status}`}>{status.replaceAll('_', ' ')}</span>;
+  const { t } = useI18n();
+  return <span className={`temporal-badge temporal-${status}`}>{t(status.replaceAll('_', ' '))}</span>;
 }
 
 export function CheckpointTimeline({ checkpoints, selectedId, onSelect }: CheckpointTimelineProps) {
+  const { t, locale } = useI18n();
   const [now, setNow] = useState(() => Date.now());
+  const dateFormatter = new Intl.DateTimeFormat(locale, {
+    month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const relativeAge = (value: string) => formatRelativeAge(value, locale, t('Unknown activity'), t('Just now'), now);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -79,13 +77,13 @@ export function CheckpointTimeline({ checkpoints, selectedId, onSelect }: Checkp
 
   return (
     <section className="timeline" aria-labelledby="timeline-title">
-      <h2 id="timeline-title" className="sr-only">Session checkpoints</h2>
+      <h2 id="timeline-title" className="sr-only">{t('Session checkpoints')}</h2>
       <div className="timeline-columns desktop-only" aria-hidden="true">
-        <span>Session / Activity</span>
-        <span>Git position</span>
-        <span>Changes</span>
-        <span>Tests</span>
-        <span>Context</span>
+        <span>{t('Session / Activity')}</span>
+        <span>{t('Git position')}</span>
+        <span>{t('Changes')}</span>
+        <span>{t('Tests')}</span>
+        <span>{t('Context')}</span>
       </div>
       <ol>
         {checkpoints.map((checkpoint) => {
@@ -105,7 +103,7 @@ export function CheckpointTimeline({ checkpoints, selectedId, onSelect }: Checkp
               <button
                 className="checkpoint-marker"
                 type="button"
-                aria-label={`Select checkpoint ${checkpoint.sequence}`}
+                aria-label={t('Select checkpoint {sequence}', { sequence: checkpoint.sequence })}
                 aria-current={selected ? 'step' : undefined}
                 onClick={() => onSelect(checkpoint)}
               >
@@ -119,57 +117,57 @@ export function CheckpointTimeline({ checkpoints, selectedId, onSelect }: Checkp
                     <span>{checkpoint.sessionTitle}</span>
                   </div>
                   <div className="mobile-only mobile-checkpoint-topline">
-                    <span>{formatRelativeAge(lastActivityAt, now)}</span>
-                    <span><small>SHA</small> <code>{shortSha(currentSha ?? baselineSha).slice(0, 7)}</code></span>
+                    <span>{relativeAge(lastActivityAt)}</span>
+                    <span><small>SHA</small> <code>{shortSha(currentSha ?? baselineSha, t('Unknown')).slice(0, 7)}</code></span>
                     {temporal ? <TemporalBadge status={temporal.status} /> : <FreshnessBadge status={checkpoint.freshness} />}
                     <ChevronRight size={18} />
                   </div>
                   <span className={`session-state desktop-only ${continuationRecommended ? 'continuation-warning' : ''}`}>
                     {continuationRecommended ? <AlertTriangle size={12} /> : checkpoint.state === 'confirmed' ? <Check size={12} /> : <span className="hollow-dot" />}
-                    {continuationRecommended ? 'New thread suggested' : `Checkpoint · ${checkpoint.state === 'confirmed' ? 'Confirmed decision' : 'Draft'}`}
+                    {continuationRecommended ? t('New thread suggested') : t('Checkpoint · {state}', { state: checkpoint.state === 'confirmed' ? t('Confirmed decision') : t('Draft') })}
                   </span>
                   <small className="captured desktop-only">
                     <Clock3 size={11} />
-                    {dateFormatter.format(new Date(lastActivityAt))} · {formatRelativeAge(lastActivityAt, now)}
+                    {dateFormatter.format(new Date(lastActivityAt))} · {relativeAge(lastActivityAt)}
                   </small>
                   <span className="session-counters desktop-only">
-                    {checkpoint.turnCount !== undefined ? <small>{checkpoint.turnCount} turns</small> : null}
-                    {checkpoint.compactionCount !== undefined ? <small>{checkpoint.compactionCount} compactions</small> : null}
-                    {checkpoint.sourceThreadId ? <small title={checkpoint.sourceThreadId}>Thread {checkpoint.sourceThreadId.slice(0, 8)}</small> : null}
+                    {checkpoint.turnCount !== undefined ? <small>{t('{count} turns', { count: checkpoint.turnCount })}</small> : null}
+                    {checkpoint.compactionCount !== undefined ? <small>{t('{count} compactions', { count: checkpoint.compactionCount })}</small> : null}
+                    {checkpoint.sourceThreadId ? <small title={checkpoint.sourceThreadId}>{t('Task {id}', { id: checkpoint.sourceThreadId.slice(0, 8) })}</small> : null}
                   </span>
                   <div className="mobile-only mobile-checkpoint-stats">
-                    <span><FileText size={17} /> {checkpoint.filesChanged} files</span>
-                    <span><MessageSquareText size={17} /> {checkpoint.compactionCount ?? 0} compact</span>
-                    <span className={selected ? 'accent-stat' : ''}>{utilization === null ? `${checkpoint.coverage}% capture` : `${utilization}% context`}</span>
+                    <span><FileText size={17} /> {t('{count} files', { count: checkpoint.filesChanged })}</span>
+                    <span><MessageSquareText size={17} /> {t('{count} compactions', { count: checkpoint.compactionCount ?? 0 })}</span>
+                    <span className={selected ? 'accent-stat' : ''}>{utilization === null ? t('{percent}% capture', { percent: checkpoint.coverage }) : t('{percent}% context', { percent: utilization })}</span>
                   </div>
                 </div>
 
                 <div className="checkpoint-branch desktop-only">
                   <span><GitBranch size={13} /> {checkpoint.branch}</span>
                   <div className="sha-line">
-                    <code>{shortSha(baselineSha)}</code>
-                    {currentSha && currentSha !== baselineSha ? <><span aria-hidden="true">→</span><code>{shortSha(currentSha)}</code></> : null}
+                    <code>{shortSha(baselineSha, t('Unknown'))}</code>
+                    {currentSha && currentSha !== baselineSha ? <><span aria-hidden="true">→</span><code>{shortSha(currentSha, t('Unknown'))}</code></> : null}
                   </div>
                   {temporal ? <TemporalBadge status={temporal.status} /> : <FreshnessBadge status={checkpoint.freshness} />}
                 </div>
                 <div className="metric desktop-only">
-                  <strong>{checkpoint.filesChanged} files</strong>
+                  <strong>{t('{count} files', { count: checkpoint.filesChanged })}</strong>
                   <span><em>+{checkpoint.additions}</em> <b>−{checkpoint.deletions}</b></span>
                   {changes.length > 0 ? (
                     <small className="change-paths" title={changes.map(formatChange).join('\n')}>
                       {formatChange(changes[0])}{changes.length > 1 ? ` +${changes.length - 1}` : ''}
                     </small>
-                  ) : <small>No revalidated delta</small>}
+                  ) : <small>{t('No revalidated delta')}</small>}
                 </div>
                 <div className="metric tests desktop-only">
-                  <strong>{checkpoint.testsFailed === 0 ? <Check size={12} /> : <CircleHelp size={12} />} {checkpoint.testsPassed} passed</strong>
-                  <span className={checkpoint.testsFailed > 0 ? 'negative' : ''}>{checkpoint.testsFailed} failed</span>
-                  <small>{checkpoint.turnCount === undefined ? 'Turns unavailable' : `${checkpoint.turnCount} turns`}</small>
+                  <strong>{checkpoint.testsFailed === 0 ? <Check size={12} /> : <CircleHelp size={12} />} {t('{count} passed', { count: checkpoint.testsPassed })}</strong>
+                  <span className={checkpoint.testsFailed > 0 ? 'negative' : ''}>{t('{count} failed', { count: checkpoint.testsFailed })}</span>
+                  <small>{checkpoint.turnCount === undefined ? t('Turns unavailable') : t('{count} turns', { count: checkpoint.turnCount })}</small>
                 </div>
                 <div className="metric context-metric desktop-only">
-                  <strong>{utilization === null ? `${checkpoint.coverage}% capture` : `${utilization}% used`}</strong>
-                  <span>{checkpoint.compactionCount === undefined ? 'Compactions unavailable' : `${checkpoint.compactionCount} compactions`}</span>
-                  <small>{checkpoint.contextUsage ? `${checkpoint.contextUsage.totalTokens.toLocaleString()} / ${checkpoint.contextUsage.modelContextWindow.toLocaleString()} tokens` : 'Token usage unavailable'}</small>
+                  <strong>{utilization === null ? t('{percent}% capture', { percent: checkpoint.coverage }) : t('{percent}% used', { percent: utilization })}</strong>
+                  <span>{checkpoint.compactionCount === undefined ? t('Compactions unavailable') : t('{count} compactions', { count: checkpoint.compactionCount })}</span>
+                  <small>{checkpoint.contextUsage ? t('{used} / {total} tokens', { used: checkpoint.contextUsage.totalTokens.toLocaleString(locale), total: checkpoint.contextUsage.modelContextWindow.toLocaleString(locale) }) : t('Token usage unavailable')}</small>
                 </div>
                 <ChevronRight className="row-chevron desktop-only" size={19} />
               </button>
@@ -177,7 +175,7 @@ export function CheckpointTimeline({ checkpoints, selectedId, onSelect }: Checkp
           );
         })}
       </ol>
-      <button className="secondary-button load-more desktop-only" type="button">Load more sessions</button>
+      <button className="secondary-button load-more desktop-only" type="button">{t('Load more sessions')}</button>
     </section>
   );
 }

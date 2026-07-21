@@ -213,6 +213,31 @@ describe('PreviouslyOn review workspace', () => {
     }
   });
 
+  it('switches the interface to Korean and stores the browser preference', async () => {
+    const data = liveWorkspace();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click((await screen.findAllByRole('button', { name: 'Settings' }))[0]);
+    await user.selectOptions(screen.getByLabelText('Language'), 'ko');
+
+    expect(screen.getByRole('heading', { name: '설정' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '작업' }).length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading', { name: 'AI 보조 사실 새로고침' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Refactor authentication boundary/ }));
+    expect(screen.getByText('작업 무결성')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '세션 정리' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '로컬 에이전트' })).toBeInTheDocument();
+    expect(screen.queryByText('Task integrity')).not.toBeInTheDocument();
+    expect(screen.queryByText('Session grouping')).not.toBeInTheDocument();
+    expect(document.documentElement).toHaveAttribute('lang', 'ko');
+    expect(JSON.parse(localStorage.getItem('previously-on:preferences:v1') ?? '{}')).toEqual({
+      schemaVersion: 1,
+      language: 'ko',
+    });
+  });
+
   it.each(['needs_setup', 'unsupported', 'blocked'] as const)('keeps Refresh facts disabled when capability is %s', async (status) => {
     const data = liveWorkspace();
     data.aiRefreshCapability = { status, profileName: 'previously-input-only', reason: `${status} reason` };
@@ -637,7 +662,7 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getByRole('heading', { name: 'new-repo is connected' })).toBeInTheDocument();
   });
 
-  it('shows copyable first-run steps without executing commands and disables repository actions', async () => {
+  it('connects Codex only after explicit setup consent and then requires a restart', async () => {
     const data = liveWorkspace();
     data.repository = {
       name: 'No repository',
@@ -657,14 +682,47 @@ describe('PreviouslyOn review workspace', () => {
     data.contractEvaluation = null;
     data.contractEvaluations = [];
     data.contextPacks = {};
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => data });
+    const registered = structuredClone(data);
+    registered.repository = {
+      name: 'My Repo',
+      path: '/tmp/My Repo',
+      branch: 'main',
+      connected: true,
+      state: 'registered-empty',
+      captureHealth: 'good',
+    };
+    let bootstrapReads = 0;
+    const fetchMock = vi.fn().mockImplementation((input, init) => {
+      const path = String(input);
+      if (path === '/api/setup/codex') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ok: true,
+            repositoryPath: '/tmp/My Repo',
+            restartRequired: true,
+            doctor: {
+              healthy: true,
+              checks: [
+                { name: 'git', ok: true, detail: 'git version 2.50' },
+                { name: 'Codex hooks', ok: true, detail: 'managed entry present' },
+              ],
+            },
+          }),
+        });
+      }
+      if (path === '/api/bootstrap') {
+        bootstrapReads += 1;
+        return Promise.resolve({ ok: true, json: async () => bootstrapReads === 1 ? data : registered });
+      }
+      throw new Error(`unexpected request ${path} ${String(init?.method)}`);
+    });
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
-    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
 
     render(<App />);
 
-    expect(await screen.findByRole('heading', { name: 'Connect your first repository' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Connect Codex to your repository' })).toBeInTheDocument();
     expect(screen.getAllByText('Not registered').length).toBeGreaterThan(0);
     expect(screen.queryByText('Connected')).not.toBeInTheDocument();
     expect(screen.queryByText('Ready to complete')).not.toBeInTheDocument();
@@ -675,19 +733,66 @@ describe('PreviouslyOn review workspace', () => {
     expect(screen.getByRole('menuitem', { name: 'Export JSON' })).toBeDisabled();
     expect(screen.getByRole('menuitem', { name: 'Delete repository data' })).toBeDisabled();
 
+    const connect = screen.getByRole('button', { name: 'Connect Codex' });
+    expect(connect).toBeDisabled();
+    await user.type(screen.getByLabelText('Repository path'), 'relative/repo');
+    expect(screen.getByText('Enter an absolute path beginning with /.')).toBeInTheDocument();
+    expect(connect).toBeDisabled();
+    await user.clear(screen.getByLabelText('Repository path'));
     await user.type(screen.getByLabelText('Repository path'), '/tmp/My Repo');
-    const copyAll = screen.getByRole('button', { name: 'Copy all steps' });
-    copyAll.focus();
+    expect(connect).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: /I approve updating my local Codex configuration/ }));
+    expect(connect).toBeEnabled();
+    connect.focus();
     await user.keyboard('{Enter}');
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith([
-      "previously setup codex --repo '/tmp/My Repo'",
-      'previously doctor',
-      "previously run codex --repo '/tmp/My Repo' --",
-    ].join('\n')));
-    expect(screen.getByText('Restart Codex manually')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Copy Restart Codex manually' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Copied all' })).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole('heading', { name: 'Codex connection installed' })).toBeInTheDocument();
+    expect(screen.getByText('Local checks passed')).toBeInTheDocument();
+    expect(screen.getByText('Restart Codex once')).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/setup/codex', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ repositoryPath: '/tmp/My Repo', confirmed: true }),
+    })));
+
+    await user.click(screen.getByRole('button', { name: 'I restarted Codex · Continue' }));
+    expect(await screen.findByRole('heading', { name: 'My Repo is connected' })).toBeInTheDocument();
+    expect(screen.getByText("previously run codex --repo '/tmp/My Repo' --")).toBeInTheDocument();
+  });
+
+  it('keeps first-run setup recoverable when the repository cannot be registered', async () => {
+    const data = liveWorkspace();
+    data.repository = {
+      name: 'No repository',
+      path: '',
+      branch: 'detached',
+      connected: false,
+      state: 'unregistered',
+      captureHealth: 'offline',
+    };
+    data.tasks = [];
+    data.checkpoints = [];
+    data.facts = [];
+    data.evidence = [];
+    data.sessions = [];
+    data.contracts = [];
+    data.contractCandidates = [];
+    data.contractEvaluation = null;
+    data.contractEvaluations = [];
+    data.contextPacks = {};
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((input) => Promise.resolve(
+      String(input) === '/api/setup/codex'
+        ? { ok: false, status: 400, json: async () => ({ error: 'repository is not a Git work tree' }) }
+        : { ok: true, json: async () => data },
+    )));
+    const user = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Connect Codex to your repository' });
+    await user.type(screen.getByLabelText('Repository path'), '/tmp/not-a-repo');
+    await user.click(screen.getByRole('checkbox', { name: /I approve updating my local Codex configuration/ }));
+    await user.click(screen.getByRole('button', { name: 'Connect Codex' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('repository is not a Git work tree');
+    expect(screen.getByRole('button', { name: 'Connect Codex' })).toBeEnabled();
   });
 
   it('disables pack and evidence controls when an active task has neither', async () => {
