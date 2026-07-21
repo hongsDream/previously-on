@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { AlertCircle, ArrowRight, CheckCircle2, Clock3, Code2, GitBranch, ListTodo, MessageSquareText } from 'lucide-react';
 import type { Fact, RelationshipGraphSummaryV1, Session, Task } from '../types';
+import { useI18n } from '../i18n-context';
 import { RelationshipGraphPanel } from './RelationshipGraphPanel';
 
 interface ProjectOverviewProps {
@@ -16,14 +17,9 @@ interface ProjectOverviewProps {
   onTaskSelect: (taskId: string) => void;
 }
 
-const dateFormatter = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  day: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
 export function ProjectOverview({ tasks, graphTasks, sessions, facts, repositoryId, graphSummary, graphRefreshVersion, graphDisabled, focus, onTaskSelect }: ProjectOverviewProps) {
+  const { locale, t } = useI18n();
+  const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }), [locale]);
   const overviewRoot = useRef<HTMLElement>(null);
   const sessionSection = useRef<HTMLElement>(null);
   const activeTasks = tasks.filter((task) => task.status === 'active');
@@ -40,39 +36,39 @@ export function ProjectOverview({ tasks, graphTasks, sessions, facts, repository
   }, [focus]);
 
   return (
-    <main ref={overviewRoot} className="project-overview" aria-label="Project overview">
+    <main ref={overviewRoot} className="project-overview" aria-label={t('Project overview')}>
       <header className="overview-hero">
         <div>
-          <span>Project memory</span>
-          <h1>What this codebase remembers</h1>
-          <p>Tasks, Codex sessions, decisions, open work, and the files they came from—without treating captured history as executable instructions.</p>
+          <span>{t('Project memory')}</span>
+          <h1>{t('What this codebase remembers')}</h1>
+          <p>{t('Tasks, Codex sessions, decisions, open work, and the files they came from—without treating captured history as executable instructions.')}</p>
         </div>
         <dl>
-          <div><dt>Active tasks</dt><dd>{activeTasks.length}</dd></div>
-          <div><dt>Captured sessions</dt><dd>{sessions.length}</dd></div>
-          <div><dt>Verified decisions</dt><dd>{decisions.filter((fact) => ['confirmed', 'pinned'].includes(fact.status)).length}</dd></div>
+          <div><dt>{t('Active tasks')}</dt><dd>{activeTasks.length}</dd></div>
+          <div><dt>{t('Captured sessions')}</dt><dd>{sessions.length}</dd></div>
+          <div><dt>{t('Verified decisions')}</dt><dd>{decisions.filter((fact) => ['confirmed', 'pinned'].includes(fact.status)).length}</dd></div>
         </dl>
       </header>
 
       <section id="overview-tasks" className={`overview-panel overview-tasks ${focus === 'tasks' ? 'overview-focus' : ''}`}>
-        <header><span><ListTodo size={17} /><strong>Active tasks</strong></span><small>{activeTasks.length} active</small></header>
+        <header><span><ListTodo size={17} /><strong>{t('Active tasks')}</strong></span><small>{t('{count} active', { count: activeTasks.length })}</small></header>
         <div className="overview-task-grid">
           {activeTasks.length ? activeTasks.map((task) => (
             <button key={task.id} type="button" onClick={() => onTaskSelect(task.id)}>
               <span className="overview-card-heading"><strong>{task.title}</strong><ArrowRight size={15} /></span>
-              <p>{task.goal || 'No goal captured yet.'}</p>
+              <p>{task.goal || t('No goal captured yet.')}</p>
               <span className="overview-codebase"><Code2 size={13} /> {task.codebase.repositoryName}<GitBranch size={12} /> {task.codebase.branch}</span>
               <span className="overview-card-footer">
-                <small>{task.checkpointIds.length} checkpoints · {task.codebase.sessionCount} sessions</small>
-                {task.rollover?.status ? <em className={`rollover-pill rollover-${task.rollover.status}`}>{rolloverLabel(task.rollover.status)}</em> : null}
+                <small>{t('{checkpoints} checkpoints · {sessions} sessions', { checkpoints: task.checkpointIds.length, sessions: task.codebase.sessionCount })}</small>
+                {task.rollover?.status ? <em className={`rollover-pill rollover-${task.rollover.status}`}>{t(rolloverLabel(task.rollover.status))}</em> : null}
               </span>
             </button>
-          )) : <EmptyCopy text="No active tasks. Completed work remains available in the task list." />}
+          )) : <EmptyCopy text={t('No active tasks. Completed work remains available in the task list.')} />}
         </div>
       </section>
 
       <section ref={sessionSection} id="overview-sessions" className={`overview-panel overview-sessions ${focus === 'sessions' ? 'overview-focus' : ''}`}>
-        <header><span><Clock3 size={17} /><strong>Recent sessions</strong></span><small>Newest first</small></header>
+        <header><span><Clock3 size={17} /><strong>{t('Recent sessions')}</strong></span><small>{t('Newest first')}</small></header>
         {recentSessions.length ? (
           <ol>
             {recentSessions.map((session) => {
@@ -84,19 +80,19 @@ export function ProjectOverview({ tasks, graphTasks, sessions, facts, repository
                 <li key={session.id} className={session.excluded ? 'session-excluded' : ''}>
                   <button type="button" onClick={() => task && onTaskSelect(task.id)} disabled={!task}>
                     <span><strong>{task?.title ?? session.taskId}</strong><small>{dateFormatter.format(new Date(session.lastActivityAt ?? session.startedAt))}</small></span>
-                    <span><code>{session.sourceThreadId ?? 'No source task ID'}</code><small>{session.compactionCount} compactions · {usage === null ? 'usage unavailable' : `${usage}% context`}</small></span>
-                    <span className={`session-state-label state-${session.continuationState}`}>{session.excluded ? 'Excluded from memory' : session.continuationState}</span>
+                    <span><code>{session.sourceThreadId ?? t('No source task ID')}</code><small>{usage === null ? t('{count} compactions · usage unavailable', { count: session.compactionCount }) : t('{count} compactions · {usage}% context', { count: session.compactionCount, usage })}</small></span>
+                    <span className={`session-state-label state-${session.continuationState}`}>{session.excluded ? t('Excluded from memory') : session.continuationState}</span>
                   </button>
                 </li>
               );
             })}
           </ol>
-        ) : <EmptyCopy text="No Codex sessions have been captured for this project yet." />}
+        ) : <EmptyCopy text={t('No Codex sessions have been captured for this project yet.')} />}
       </section>
 
       <div className="overview-column-grid">
-        <FactSummary title="Decisions" icon={<CheckCircle2 size={17} />} facts={decisions} empty="No active decisions captured." />
-        <FactSummary title="Open items" icon={<AlertCircle size={17} />} facts={openItems} empty="No unresolved items captured." />
+        <FactSummary title={t('Decisions')} icon={<CheckCircle2 size={17} />} facts={decisions} empty={t('No active decisions captured.')} />
+        <FactSummary title={t('Open items')} icon={<AlertCircle size={17} />} facts={openItems} empty={t('No unresolved items captured.')} />
       </div>
 
       <RelationshipGraphPanel
@@ -111,6 +107,7 @@ export function ProjectOverview({ tasks, graphTasks, sessions, facts, repository
 }
 
 function FactSummary({ title, icon, facts, empty }: { title: string; icon: React.ReactNode; facts: Fact[]; empty: string }) {
+  const { t } = useI18n();
   return (
     <section className="overview-panel overview-facts">
       <header><span>{icon}<strong>{title}</strong></span><small>{facts.length}</small></header>
@@ -118,7 +115,7 @@ function FactSummary({ title, icon, facts, empty }: { title: string; icon: React
         <ul>{facts.slice(0, 6).map((fact) => (
           <li key={fact.id}>
             <MessageSquareText size={14} />
-            <span><strong>{fact.text}</strong><small>{fact.status} · {fact.selectionReason ?? 'Not selected in the current Context Pack'}</small></span>
+            <span><strong>{fact.text}</strong><small>{fact.status} · {fact.selectionReason ?? t('Not selected in the current Context Pack')}</small></span>
           </li>
         ))}</ul>
       ) : <EmptyCopy text={empty} />}

@@ -25,6 +25,7 @@ import { RegressionContractsPanel } from './RegressionContractsPanel';
 import { ResumeBanner } from './ResumeBanner';
 import { TaskEditor } from './TaskEditor';
 import { TaskGroupingPanel } from './TaskGroupingPanel';
+import { useI18n } from '../i18n-context';
 
 interface TaskWorkspaceModel {
   task: Task;
@@ -76,6 +77,7 @@ interface TaskWorkspaceProps {
 }
 
 export function TaskWorkspace({ model, actions, uiState }: TaskWorkspaceProps) {
+  const { t } = useI18n();
   const {
     task,
     checkpoints,
@@ -115,12 +117,12 @@ export function TaskWorkspace({ model, actions, uiState }: TaskWorkspaceProps) {
   return (
     <main className="task-workspace">
       <header className="task-header">
-        <button className="back-button" type="button" aria-label="All tasks" onClick={onBack}><ArrowLeft size={18} /> <span className="desktop-only">All tasks</span></button>
+        <button className="back-button" type="button" aria-label={t('All tasks')} onClick={onBack}><ArrowLeft size={18} /> <span className="desktop-only">{t('All tasks')}</span></button>
         <div>
           <h1>{task.title}</h1>
           <span className="task-meta desktop-only">
-            <small>Task ID: &nbsp;{task.id}</small>
-            <span className={`task-lifecycle task-lifecycle-${task.status}`}>{task.status}</span>
+            <small>{t('Task ID:')} &nbsp;{task.id}</small>
+            <span className={`task-lifecycle task-lifecycle-${task.status}`}>{t(task.status)}</span>
           </span>
         </div>
       </header>
@@ -191,6 +193,7 @@ export function TaskWorkspace({ model, actions, uiState }: TaskWorkspaceProps) {
 }
 
 function AutomaticRolloverBanner({ task }: { task: Task }) {
+  const { t } = useI18n();
   const rollover = task.rollover!;
   const Icon = rollover.status === 'started' ? CircleCheck : rollover.status === 'failed' ? CircleAlert : LoaderCircle;
   const title = rollover.status === 'started'
@@ -199,16 +202,16 @@ function AutomaticRolloverBanner({ task }: { task: Task }) {
       ? 'Continuation did not start'
       : 'Fresh Codex task is being prepared';
   return (
-    <section className={`automatic-rollover-banner rollover-${rollover.status}`} aria-label="Continuation status">
+    <section className={`automatic-rollover-banner rollover-${rollover.status}`} aria-label={t('Continuation status')}>
       <Icon size={19} className={rollover.status === 'pending' || rollover.status === 'thread_created' ? 'spin-icon' : ''} />
       <span>
-        <strong>{title}</strong>
-        <small>{rollover.message ?? (rollover.status === 'failed' ? 'The original request was left in this task so work can continue safely.' : 'The verified Context Pack and current request were started only after approval.')}</small>
+        <strong>{t(title)}</strong>
+        <small>{rollover.message ?? (rollover.status === 'failed' ? t('The original request was left in this task so work can continue safely.') : t('The verified Context Pack and current request were started only after approval.'))}</small>
       </span>
       {rollover.newThreadId ? (
         <span className="rollover-actions">
-          <code title={rollover.newThreadId}>Task {shortId(rollover.newThreadId)}</code>
-          <a className="secondary-button" href={codexThreadUrl(rollover.newThreadId)}>Open in Codex</a>
+          <code title={rollover.newThreadId}>{t('Task {id}', { id: shortId(rollover.newThreadId) })}</code>
+          <a className="secondary-button" href={codexThreadUrl(rollover.newThreadId)}>{t('Open in Codex')}</a>
         </span>
       ) : null}
     </section>
@@ -224,10 +227,11 @@ function codexThreadUrl(threadId: string) {
 }
 
 function EmptyTask() {
+  const { t } = useI18n();
   return (
     <section className="empty-task">
-      <h2>No checkpoints yet</h2>
-      <p>New verified sessions for this task will appear here.</p>
+      <h2>{t('No checkpoints yet')}</h2>
+      <p>{t('New verified sessions for this task will appear here.')}</p>
     </section>
   );
 }

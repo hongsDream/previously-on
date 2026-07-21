@@ -39,6 +39,22 @@ export interface ContractMutationResponse {
   contractEvaluation?: ContractEvaluationV1 | null;
 }
 
+export interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface SetupCodexResponse {
+  ok: true;
+  repositoryPath: string;
+  restartRequired: boolean;
+  doctor: {
+    healthy: boolean;
+    checks: DoctorCheck[];
+  };
+}
+
 export class ApiUnavailableError extends Error {
   constructor(message = 'PreviouslyOn API is unavailable') {
     super(message);
@@ -77,6 +93,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchBootstrap(signal?: AbortSignal) {
   return request<BootstrapData>('/api/bootstrap', { signal });
+}
+
+export function setupCodex(repositoryPath: string) {
+  return request<SetupCodexResponse>('/api/setup/codex', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryPath, confirmed: true }),
+  });
 }
 
 export function updateFactStatus(id: string, status: FactStatus, supersedesFactId?: string) {

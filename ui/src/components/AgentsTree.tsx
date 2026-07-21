@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Bot, Check, Clipboard, ExternalLink, GitFork } from 'lucide-react';
 import type { AgentV1, Task } from '../types';
+import { useI18n } from '../i18n-context';
 
 interface AgentsTreeProps {
   task: Task;
@@ -13,6 +14,7 @@ interface AgentBranch {
 }
 
 export function AgentsTree({ task, agents }: AgentsTreeProps) {
+  const { t } = useI18n();
   const taskAgents = useMemo(() => agents.filter((agent) => agent.taskId === task.id), [agents, task.id]);
   const branches = useMemo(() => buildAgentTree(taskAgents), [taskAgents]);
   const [copiedId, setCopiedId] = useState('');
@@ -23,10 +25,10 @@ export function AgentsTree({ task, agents }: AgentsTreeProps) {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
       await navigator.clipboard.writeText(threadId);
       setCopiedId(threadId);
-      setCopyMessage('Codex task ID copied.');
+      setCopyMessage(t('Codex task ID copied.'));
     } catch {
       setCopiedId('');
-      setCopyMessage('Copy is unavailable. Select the visible task ID instead.');
+      setCopyMessage(t('Copy is unavailable. Select the visible task ID instead.'));
     }
   };
 
@@ -34,22 +36,22 @@ export function AgentsTree({ task, agents }: AgentsTreeProps) {
     <section className="agents-tree-panel" aria-labelledby="agents-tree-title">
       <header>
         <div>
-          <span className="task-integrity-kicker">Same-device observation</span>
-          <h2 id="agents-tree-title"><GitFork size={16} /> Local agents</h2>
-          <p>Observed Codex task ancestry only. This is not cloud sync, team membership, or orchestration control.</p>
+          <span className="task-integrity-kicker">{t('Same-device observation')}</span>
+          <h2 id="agents-tree-title"><GitFork size={16} /> {t('Local agents')}</h2>
+          <p>{t('Observed Codex task ancestry only. This is not cloud sync, team membership, or orchestration control.')}</p>
         </div>
-        <span>{taskAgents.length} observed</span>
+        <span>{t('{count} observed', { count: taskAgents.length })}</span>
       </header>
 
       {taskAgents.length ? (
-        <ul className="agents-tree" role="tree" aria-label={`Agents observed for ${task.title}`}>
+        <ul className="agents-tree" role="tree" aria-label={t('Agents observed for {title}', { title: task.title })}>
           {branches.map((branch) => <AgentTreeItem key={branch.agent.id} branch={branch} level={1} copiedId={copiedId} onCopy={copyId} />)}
         </ul>
-      ) : <p className="agents-empty">No local App Server agent lineage is linked to this task.</p>}
+      ) : <p className="agents-empty">{t('No local App Server agent lineage is linked to this task.')}</p>}
 
       <aside className="find-codex-guide" aria-labelledby="find-codex-title">
         <ExternalLink size={16} />
-        <span><strong id="find-codex-title">Open in Codex</strong>Use the documented task link directly. Copy the unique task ID only when you need a search fallback.</span>
+        <span><strong id="find-codex-title">{t('Open in Codex')}</strong>{t('Use the documented task link directly. Copy the unique task ID only when you need a search fallback.')}</span>
       </aside>
       <p className="sr-only" aria-live="polite">{copyMessage}</p>
     </section>
@@ -67,6 +69,7 @@ function AgentTreeItem({
   copiedId: string;
   onCopy: (threadId: string) => Promise<void>;
 }) {
+  const { t } = useI18n();
   const { agent, children } = branch;
   return (
     <li role="treeitem" aria-level={level} aria-expanded={children.length ? true : undefined}>
@@ -74,25 +77,25 @@ function AgentTreeItem({
         <header>
           <span className="agent-avatar"><Bot size={15} /></span>
           <span className="agent-identity">
-            <strong>{agent.name || `${roleLabel(agent.role)} · ${shortId(agent.threadId)}`}</strong>
-            <small>{sourceKindLabel(agent.sourceKind)} · {roleLabel(agent.role)}</small>
+            <strong>{agent.name || `${t(roleLabel(agent.role))} · ${shortId(agent.threadId)}`}</strong>
+            <small>{t(sourceKindLabel(agent.sourceKind))} · {t(roleLabel(agent.role))}</small>
           </span>
-          <span className={`agent-status agent-status-${agent.status}`}>{agent.status}</span>
-          <span className={`agent-association association-${agent.associationState}`}>{agent.associationState}</span>
+          <span className={`agent-status agent-status-${agent.status}`}>{t(agent.status)}</span>
+          <span className={`agent-association association-${agent.associationState}`}>{t(agent.associationState)}</span>
         </header>
         <div className="agent-task-id">
-          <span><small>Codex task ID</small><code title={agent.threadId}>{agent.threadId}</code></span>
-          <a className="secondary-button" href={codexThreadUrl(agent.threadId)} aria-label={`Open Codex task ${agent.threadId}`}><ExternalLink size={13} /> Open</a>
-          <button className="secondary-button" type="button" onClick={() => void onCopy(agent.threadId)} aria-label={`Copy Codex task ID ${agent.threadId}`}>
-            {copiedId === agent.threadId ? <Check size={13} /> : <Clipboard size={13} />} {copiedId === agent.threadId ? 'Copied' : 'Copy ID'}
+          <span><small>{t('Codex task ID')}</small><code title={agent.threadId}>{agent.threadId}</code></span>
+          <a className="secondary-button" href={codexThreadUrl(agent.threadId)} aria-label={t('Open Codex task {id}', { id: agent.threadId })}><ExternalLink size={13} /> {t('Open')}</a>
+          <button className="secondary-button" type="button" onClick={() => void onCopy(agent.threadId)} aria-label={t('Copy Codex task ID {id}', { id: agent.threadId })}>
+            {copiedId === agent.threadId ? <Check size={13} /> : <Clipboard size={13} />} {copiedId === agent.threadId ? t('Copied') : t('Copy ID')}
           </button>
         </div>
-        {agent.degradedReason ? <p className="agent-degraded-reason">{agent.degradedReason}</p> : null}
+        {agent.degradedReason ? <p className="agent-degraded-reason">{t(agent.degradedReason)}</p> : null}
         {agent.outputSummary ? <p className="agent-output-summary">{agent.outputSummary}</p> : null}
         {agent.files.length || agent.tests.length ? (
           <dl className="agent-observations">
-            <div><dt>Files</dt><dd>{agent.files.length ? agent.files.map((file) => <code key={file}>{file}</code>) : 'None observed'}</dd></div>
-            <div><dt>Tests</dt><dd>{agent.tests.length ? agent.tests.map((test) => <code key={test}>{test}</code>) : 'None observed'}</dd></div>
+            <div><dt>{t('Files')}</dt><dd>{agent.files.length ? agent.files.map((file) => <code key={file}>{file}</code>) : t('None observed')}</dd></div>
+            <div><dt>{t('Tests')}</dt><dd>{agent.tests.length ? agent.tests.map((test) => <code key={test}>{test}</code>) : t('None observed')}</dd></div>
           </dl>
         ) : null}
       </article>

@@ -9,6 +9,7 @@ import type {
   TaskGroupingPreviewV1,
   TaskGroupingRequestV1,
 } from '../types';
+import { useI18n } from '../i18n-context';
 
 type GroupingAction = Exclude<TaskGroupingAction, 'undo'>;
 
@@ -26,6 +27,7 @@ interface TaskGroupingPanelProps {
 }
 
 export function TaskGroupingPanel({ task, tasks, sessions, facts, operations, disabled, mutationPending, onPreview, onApply, onUndo }: TaskGroupingPanelProps) {
+  const { t } = useI18n();
   const taskSessions = useMemo(() => sessions.filter((session) => session.taskId === task.id), [sessions, task.id]);
   const targetTasks = useMemo(
     () => tasks.filter((candidate) => candidate.id !== task.id && candidate.repositoryId === task.repositoryId),
@@ -69,15 +71,15 @@ export function TaskGroupingPanel({ task, tasks, sessions, facts, operations, di
 
   const buildRequest = (): TaskGroupingRequestV1 | null => {
     if (selectedSessionIds.length === 0) {
-      setValidationError('Select at least one session.');
+      setValidationError(t('Select at least one session.'));
       return null;
     }
     if ((action === 'move' || action === 'merge') && !targetTaskId) {
-      setValidationError('Select a target task.');
+      setValidationError(t('Select a target task.'));
       return null;
     }
     if (action === 'split' && !newTaskTitle.trim()) {
-      setValidationError('A new task title is required for split.');
+      setValidationError(t('A new task title is required for split.'));
       return null;
     }
     setValidationError('');
@@ -113,33 +115,33 @@ export function TaskGroupingPanel({ task, tasks, sessions, facts, operations, di
     <section className="task-grouping-panel" aria-labelledby="task-grouping-title">
       <header>
         <div>
-          <span className="task-integrity-kicker">Append-only organization</span>
-          <h2 id="task-grouping-title">Session grouping</h2>
-          <p>Preview session and fact impact before moving task history.</p>
+          <span className="task-integrity-kicker">{t('Append-only organization')}</span>
+          <h2 id="task-grouping-title">{t('Session grouping')}</h2>
+          <p>{t('Preview session and fact impact before moving task history.')}</p>
         </div>
         <button className="secondary-button" type="button" disabled={disabled || mutationPending || open || taskSessions.length === 0} onClick={begin}>
-          <Move size={14} /> Organize sessions
+          <Move size={14} /> {t('Organize sessions')}
         </button>
       </header>
 
       {open ? (
         <div className="task-grouping-editor">
           <div className="task-editor-heading">
-            <strong>Preview a grouping operation</strong>
-            <button className="icon-button" type="button" aria-label="Close grouping editor" onClick={() => setOpen(false)}><X size={16} /></button>
+            <strong>{t('Preview a grouping operation')}</strong>
+            <button className="icon-button" type="button" aria-label={t('Close grouping editor')} onClick={() => setOpen(false)}><X size={16} /></button>
           </div>
           {validationError ? <p className="task-editor-error" role="alert">{validationError}</p> : null}
           <fieldset disabled={disabled || mutationPending}>
-            <legend>Action</legend>
+            <legend>{t('Action')}</legend>
             <div className="grouping-action-picker">
-              <ActionButton action="move" current={action} icon={<Move size={14} />} onSelect={changeAction}>Move</ActionButton>
-              <ActionButton action="merge" current={action} icon={<Merge size={14} />} onSelect={changeAction}>Merge</ActionButton>
-              <ActionButton action="split" current={action} icon={<Scissors size={14} />} onSelect={changeAction}>Split</ActionButton>
+              <ActionButton action="move" current={action} icon={<Move size={14} />} onSelect={changeAction}>{t('Move')}</ActionButton>
+              <ActionButton action="merge" current={action} icon={<Merge size={14} />} onSelect={changeAction}>{t('Merge')}</ActionButton>
+              <ActionButton action="split" current={action} icon={<Scissors size={14} />} onSelect={changeAction}>{t('Split')}</ActionButton>
             </div>
           </fieldset>
 
           <fieldset disabled={disabled || mutationPending}>
-            <legend>Sessions from {task.title}</legend>
+            <legend>{t('Sessions from {title}', { title: task.title })}</legend>
             <div className="grouping-session-list">
               {taskSessions.map((session) => (
                 <label key={session.id}>
@@ -149,7 +151,7 @@ export function TaskGroupingPanel({ task, tasks, sessions, facts, operations, di
                     disabled={action === 'merge'}
                     onChange={() => toggleSession(session.id)}
                   />
-                  <span><strong>{session.sourceThreadId ?? session.id}</strong><small>{session.id} · {session.turnCount} turns · {session.compactionCount} compactions</small></span>
+                  <span><strong>{session.sourceThreadId ?? session.id}</strong><small>{t('{id} · {turns} turns · {compactions} compactions', { id: session.id, turns: session.turnCount, compactions: session.compactionCount })}</small></span>
                 </label>
               ))}
             </div>
@@ -157,25 +159,25 @@ export function TaskGroupingPanel({ task, tasks, sessions, facts, operations, di
 
           {action === 'split' ? (
             <fieldset className="grouping-target-fields" disabled={disabled || mutationPending}>
-              <legend>New active task</legend>
-              <label>Title<input value={newTaskTitle} onChange={(event) => { setNewTaskTitle(event.target.value); invalidatePreview(); }} /></label>
-              <label>Goal<textarea rows={3} value={newTaskGoal} onChange={(event) => { setNewTaskGoal(event.target.value); invalidatePreview(); }} /></label>
+              <legend>{t('New active task')}</legend>
+              <label>{t('Title')}<input value={newTaskTitle} onChange={(event) => { setNewTaskTitle(event.target.value); invalidatePreview(); }} /></label>
+              <label>{t('Goal')}<textarea rows={3} value={newTaskGoal} onChange={(event) => { setNewTaskGoal(event.target.value); invalidatePreview(); }} /></label>
             </fieldset>
           ) : (
             <fieldset className="grouping-target-fields" disabled={disabled || mutationPending}>
-              <legend>Target task</legend>
-              <label>Task
+              <legend>{t('Target task')}</legend>
+              <label>{t('Task')}
                 <select value={targetTaskId} onChange={(event) => { setTargetTaskId(event.target.value); invalidatePreview(); }}>
-                  <option value="">Select a task</option>
-                  {targetTasks.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title} · {candidate.status}</option>)}
+                  <option value="">{t('Select a task')}</option>
+                  {targetTasks.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title} · {t(candidate.status)}</option>)}
                 </select>
               </label>
             </fieldset>
           )}
 
           <div className="grouping-editor-actions">
-            <code title={operationId}>Operation {compactId(operationId)}</code>
-            <button className="secondary-button" type="button" disabled={disabled || mutationPending} onClick={() => void requestPreview()}>Preview impact</button>
+            <code title={operationId}>{t('Operation {id}', { id: compactId(operationId) })}</code>
+            <button className="secondary-button" type="button" disabled={disabled || mutationPending} onClick={() => void requestPreview()}>{t('Preview impact')}</button>
           </div>
 
           {preview ? (
@@ -225,25 +227,26 @@ function GroupingPreview({ preview, facts, action, disabled, onConfirm }: {
   disabled: boolean;
   onConfirm: () => void;
 }) {
+  const { t } = useI18n();
   const sessionMoves = preview.affectedSessions.length ? preview.affectedSessions : preview.operation.sessionMoves;
   const factImpacts = preview.affectedFacts.length ? preview.affectedFacts : preview.operation.factImpacts;
   return (
     <section className="grouping-preview" aria-labelledby="grouping-preview-title" aria-live="polite">
       <header>
-        <div><h3 id="grouping-preview-title">Impact preview</h3><small>{preview.counts.sessions} sessions · {preview.counts.factsMoved} moved facts · {preview.counts.factsMixed} mixed facts</small></div>
-        <button className="primary-button" type="button" disabled={disabled} onClick={onConfirm}>Confirm {action}</button>
+        <div><h3 id="grouping-preview-title">{t('Impact preview')}</h3><small>{t('{sessions} sessions · {moved} moved facts · {mixed} mixed facts', { sessions: preview.counts.sessions, moved: preview.counts.factsMoved, mixed: preview.counts.factsMixed })}</small></div>
+        <button className="primary-button" type="button" disabled={disabled} onClick={onConfirm}>{t('Confirm {action}', { action: t(action) })}</button>
       </header>
       <div className="grouping-preview-grid">
         <section>
-          <h3>Affected sessions</h3>
+          <h3>{t('Affected sessions')}</h3>
           <ul>{sessionMoves.map((move) => <li key={move.sessionId}><code>{move.sessionId}</code><span>{compactId(move.fromTaskId)} <ArrowRight size={12} aria-hidden="true" /> {compactId(move.toTaskId)}</span></li>)}</ul>
         </section>
         <section>
-          <h3>Affected facts</h3>
+          <h3>{t('Affected facts')}</h3>
           {factImpacts.length ? <ul>{factImpacts.map((impact) => {
             const fact = facts.find((candidate) => candidate.id === impact.factId);
-            return <li key={impact.factId} className={impact.mixedProvenance ? 'mixed-impact' : ''}><strong>{fact?.text ?? impact.factId}</strong><small>{impact.mixedProvenance ? 'Retained in the source task · mixed provenance · not duplicated' : `Moves to ${compactId(impact.toTaskId ?? '')}`}</small></li>;
-          })}</ul> : <p>No facts change task association.</p>}
+            return <li key={impact.factId} className={impact.mixedProvenance ? 'mixed-impact' : ''}><strong>{fact?.text ?? impact.factId}</strong><small>{impact.mixedProvenance ? t('Retained in the source task · mixed provenance · not duplicated') : t('Moves to {id}', { id: compactId(impact.toTaskId ?? '') })}</small></li>;
+          })}</ul> : <p>{t('No facts change task association.')}</p>}
         </section>
       </div>
     </section>
@@ -256,22 +259,23 @@ function OperationHistory({ history, operations, disabled, onUndo }: {
   disabled: boolean;
   onUndo: (operationId: string) => Promise<boolean>;
 }) {
+  const { t, locale } = useI18n();
   return (
     <section className="grouping-history" aria-labelledby="grouping-history-title">
-      <header><span><History size={14} /><strong id="grouping-history-title">Operation history</strong></span><small>{history.length}</small></header>
+      <header><span><History size={14} /><strong id="grouping-history-title">{t('Operation history')}</strong></span><small>{history.length}</small></header>
       {history.length ? (
         <ol>{history.map((operation) => {
           const inverse = operations.find((candidate) => candidate.inverseOf === operation.operationId);
           const canUndo = operation.action !== 'undo' && !inverse;
           return (
             <li key={operation.operationId}>
-              <span><strong>{operation.action}</strong><code title={operation.operationId}>{compactId(operation.operationId)}</code><small>{formatOccurredAt(operation.occurredAt)} · {operation.sessionMoves.length} sessions</small></span>
-              {operation.inverseOf ? <small>Inverse of {compactId(operation.inverseOf)}</small> : null}
-              <button className="secondary-button" type="button" disabled={disabled || !canUndo} aria-label={`Undo grouping operation ${operation.operationId}`} onClick={() => void onUndo(operation.operationId)}><Undo2 size={13} /> {inverse ? 'Undone' : 'Undo'}</button>
+              <span><strong>{t(operation.action)}</strong><code title={operation.operationId}>{compactId(operation.operationId)}</code><small>{t('{time} · {count} sessions', { time: formatOccurredAt(operation.occurredAt, locale, t('Time unavailable')), count: operation.sessionMoves.length })}</small></span>
+              {operation.inverseOf ? <small>{t('Inverse of {id}', { id: compactId(operation.inverseOf) })}</small> : null}
+              <button className="secondary-button" type="button" disabled={disabled || !canUndo} aria-label={t('Undo grouping operation {id}', { id: operation.operationId })} onClick={() => void onUndo(operation.operationId)}><Undo2 size={13} /> {inverse ? t('Undone') : t('Undo')}</button>
             </li>
           );
         })}</ol>
-      ) : <p>No grouping operations recorded.</p>}
+      ) : <p>{t('No grouping operations recorded.')}</p>}
     </section>
   );
 }
@@ -291,7 +295,7 @@ function compactId(value: string) {
   return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
 }
 
-function formatOccurredAt(value: string) {
+function formatOccurredAt(value: string, locale: string, unavailable: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'time unavailable' : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? unavailable : date.toLocaleString(locale);
 }

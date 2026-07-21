@@ -1,4 +1,5 @@
 import { Clock3, FileText, List, Settings } from 'lucide-react';
+import { useI18n } from '../i18n-context';
 
 const items = [
   { label: 'Tasks', icon: List },
@@ -18,6 +19,7 @@ interface BottomNavigationProps {
 }
 
 export function BottomNavigation({ activeNavigation, sessionsEnabled, evidenceEnabled, onTasksOpen, onSessionsOpen, onEvidenceOpen, onSettingsOpen }: BottomNavigationProps) {
+  const { t } = useI18n();
   const actions: Record<string, (() => void) | undefined> = {
     Tasks: onTasksOpen,
     Sessions: onSessionsOpen,
@@ -25,7 +27,7 @@ export function BottomNavigation({ activeNavigation, sessionsEnabled, evidenceEn
     Settings: onSettingsOpen,
   };
   return (
-    <nav className="bottom-navigation mobile-only" aria-label="Mobile navigation">
+    <nav className="bottom-navigation mobile-only" aria-label={t('Mobile navigation')}>
       {items.map(({ label, icon: Icon }) => (
         <button
           key={label}
@@ -35,7 +37,7 @@ export function BottomNavigation({ activeNavigation, sessionsEnabled, evidenceEn
           onClick={actions[label]}
         >
           <Icon size={22} strokeWidth={1.8} />
-          <span>{label}</span>
+          <span>{t(label)}</span>
         </button>
       ))}
     </nav>

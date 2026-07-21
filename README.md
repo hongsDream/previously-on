@@ -11,16 +11,17 @@ instruction and not a replacement for checking the current source.
 
 ## First checkpoint in about five minutes
 
-With the reviewed `previously` binary installed, use one real repository and work normally—no
+With the reviewed `previously` binary installed, open the local UI and use one real repository—no
 synthetic demo data is required:
 
 ```bash
-previously setup codex --repo '/absolute/path/to/your repository'
-previously doctor
+previously ui
 ```
 
-Restart Codex manually once so it loads the managed Hooks and MCP server, then start the first
-captured session:
+On first launch, enter the repository's absolute path, review the local changes, and approve
+**Connect Codex**. PreviouslyOn backs up existing Codex configuration, installs its managed Hooks
+and MCP entry, and runs the same read-only doctor checks without creating a task or calling a
+model. Restart Codex manually once when the UI asks, then start the first captured session:
 
 ```bash
 previously run codex --repo '/absolute/path/to/your repository' --
@@ -100,14 +101,17 @@ merge that generated consumer workflow until a later public release supplies the
 ## Quick start
 
 ```bash
-previously setup codex --repo /absolute/path/to/your/repository
+previously ui
 previously run codex --repo /absolute/path/to/your/repository -- <codex arguments>
 previously status
 previously doctor
-previously ui
 previously contracts validate
 previously contracts check --base origin/main --execute --json
 ```
+
+The first-run UI is the default setup path. It requires an absolute Git worktree path and explicit
+same-origin confirmation before it changes local files. Headless or advanced users can still run
+`previously setup codex --repo /absolute/path/to/your/repository` directly.
 
 `previously doctor` is read-only: it generates the installed App Server's official JSON schema,
 performs `initialize` and a bounded `thread/list`, and reports readiness separately for core

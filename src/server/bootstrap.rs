@@ -267,12 +267,15 @@ pub(super) async fn build_bootstrap(state: &AppState) -> ApiResult<BootstrapResp
         .store
         .list_repositories()
         .map_err(ApiError::internal)?;
-    let configured_repository = if repositories.is_empty() {
-        setup_manifest_repository(state)
-    } else {
-        None
-    };
-    let repository = repositories.first().or(configured_repository.as_ref());
+    let configured_repository = setup_manifest_repository(state);
+    let stored_repository = configured_repository.as_ref().and_then(|registered| {
+        repositories
+            .iter()
+            .find(|repository| repository.id == registered.id)
+    });
+    let repository = configured_repository
+        .as_ref()
+        .map(|registered| stored_repository.unwrap_or(registered));
     let contracts = repository
         .filter(|repository| std::path::Path::new(&repository.path).exists())
         .map(|repository| crate::contracts::load_contracts(&repository.path))
@@ -295,8 +298,7 @@ pub(super) async fn build_bootstrap(state: &AppState) -> ApiResult<BootstrapResp
         .store
         .list_task_grouping_operations(repository.map(|item| item.id.as_str()))
         .map_err(ApiError::internal)?;
-    let graph_summary = repositories
-        .first()
+    let graph_summary = stored_repository
         .map(|repository| {
             crate::graph::derive_relationship_graph(&state.store, &repository.id, None, &contracts)
                 .map(|graph| crate::graph::compact_summary(&graph))
