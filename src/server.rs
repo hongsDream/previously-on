@@ -1524,6 +1524,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registered_bootstrap_before_first_capture_has_an_empty_graph() {
+        let temp = TempDir::new().unwrap();
+        let repository = temp.path().join("registered-repository");
+        std::fs::create_dir_all(&repository).unwrap();
+        git(&repository, &["init", "-q"]);
+        register_test_repository(temp.path(), &repository);
+        let state = AppState {
+            store: Store::open(temp.path().join("previously.sqlite3")).unwrap(),
+            session_token: Arc::from("test-token"),
+            data_dir: Arc::new(temp.path().to_path_buf()),
+        };
+
+        let Json(payload) = bootstrap(State(state), authorized_headers()).await.unwrap();
+        let payload = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(payload["repository"]["state"], "registered-empty");
+        assert_eq!(payload["repository"]["connected"], true);
+        assert_eq!(
+            payload["repository"]["path"],
+            repository.to_string_lossy().as_ref()
+        );
+        assert_eq!(payload["tasks"], json!([]));
+        assert_eq!(payload["graphSummary"]["nodeCount"], 0);
+        assert_eq!(payload["graphSummary"]["edgeCount"], 0);
+    }
+
+    #[tokio::test]
     async fn bootstrap_uses_registered_repository_instead_of_stale_history() {
         let temp = TempDir::new().unwrap();
         let stale_repository = temp.path().join("stale-repository");
