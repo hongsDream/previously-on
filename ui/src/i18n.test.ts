@@ -53,6 +53,21 @@ describe('Korean product copy catalog', () => {
     }
     expect(exposed).toEqual([]);
   });
+
+  it('translates dynamic project status values returned by the local API', () => {
+    expect(KOREAN_MESSAGES).toMatchObject({
+      'Session {value}': '세션 {value}',
+      added: '추가됨',
+      modified: '수정됨',
+      renamed: '이름 변경됨',
+      deleted: '삭제됨',
+      'temporal revalidation: Unchanged': '시간 기준 재검증: 변경 없음',
+      'temporal revalidation: Changed': '시간 기준 재검증: 변경됨',
+      'temporal revalidation: Diverged': '시간 기준 재검증: Git 이력 분기',
+      'temporal revalidation: Broken': '시간 기준 재검증: 손상됨',
+      'temporal revalidation: Degraded': '시간 기준 재검증: 성능 저하',
+    });
+  });
 });
 
 function productSourceFiles(directory: string): string[] {

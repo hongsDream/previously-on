@@ -51,10 +51,18 @@ function shortSha(value: string | undefined, unknown: string) {
   return value ? value.slice(0, 8) : unknown;
 }
 
-function formatChange(change: RelatedChange) {
+function formatChange(change: RelatedChange, translate: (message: string) => string) {
   return change.status === 'renamed' && change.previousPath
     ? `${change.previousPath} → ${change.path}`
-    : `${change.status}: ${change.path}`;
+    : `${translate(change.status)}: ${change.path}`;
+}
+
+function sessionTitle(
+  title: string,
+  translate: (message: string, values?: Record<string, string | number>) => string,
+) {
+  const match = /^Session\s+(.+)$/.exec(title);
+  return match ? translate('Session {value}', { value: match[1] }) : title;
 }
 
 function TemporalBadge({ status }: { status: TemporalStatus }) {
@@ -114,7 +122,7 @@ export function CheckpointTimeline({ checkpoints, selectedId, onSelect }: Checkp
                 <div className="checkpoint-session">
                   <div className="desktop-only session-title-line">
                     <strong>{checkpoint.sequence}</strong>
-                    <span>{checkpoint.sessionTitle}</span>
+                    <span>{sessionTitle(checkpoint.sessionTitle, t)}</span>
                   </div>
                   <div className="mobile-only mobile-checkpoint-topline">
                     <span>{relativeAge(lastActivityAt)}</span>
@@ -154,8 +162,8 @@ export function CheckpointTimeline({ checkpoints, selectedId, onSelect }: Checkp
                   <strong>{t('{count} files', { count: checkpoint.filesChanged })}</strong>
                   <span><em>+{checkpoint.additions}</em> <b>−{checkpoint.deletions}</b></span>
                   {changes.length > 0 ? (
-                    <small className="change-paths" title={changes.map(formatChange).join('\n')}>
-                      {formatChange(changes[0])}{changes.length > 1 ? ` +${changes.length - 1}` : ''}
+                    <small className="change-paths" title={changes.map((change) => formatChange(change, t)).join('\n')}>
+                      {formatChange(changes[0], t)}{changes.length > 1 ? ` +${changes.length - 1}` : ''}
                     </small>
                   ) : <small>{t('No revalidated delta')}</small>}
                 </div>
