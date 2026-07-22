@@ -17,7 +17,8 @@ export type AgentAssociationState = 'linked' | 'unlinked' | 'degraded';
 export interface AiRefreshCapabilityV1 {
   status: AiRefreshCapabilityStatus;
   profileName: string;
-  reason?: string | null;
+  reasonCode: 'ready' | 'setup_required' | 'app_server_unsupported' | 'verification_blocked';
+  technicalDetails: string[];
   checkedAt?: string | null;
 }
 
@@ -527,4 +528,45 @@ export interface BootstrapData {
   agents: AgentV1[];
   resumeCandidate?: ResumeCandidate;
   contextPacks: Record<string, ContextPack>;
+}
+
+export type CodexImportStatus = 'complete' | 'degraded' | 'unsupported';
+export type CodexImportReasonCode = 'synchronized' | 'partial_import' | 'app_server_unsupported';
+
+export interface CoverageV1 {
+  status: 'complete' | 'degraded';
+  captured: string[];
+  missing: string[];
+  warnings: string[];
+}
+
+export interface CodexImportReportV1 {
+  schemaVersion: number;
+  repositoryId: string;
+  status: CodexImportStatus;
+  reasonCode: CodexImportReasonCode;
+  importedTaskCount: number;
+  semanticEventCount: number;
+  duplicateCount: number;
+  missingOrUnknownItems: string[];
+  lastSyncedAt: string;
+  capability: {
+    status: CodexImportStatus;
+    testedCodexVersion: string;
+    detectedCodexVersion?: string;
+    warnings: string[];
+  };
+  coverage: CoverageV1;
+  semanticCoverage: CoverageV1;
+  notices: Array<{ threadId?: string; message: string }>;
+  observedAgentCount: number;
+  technicalDetails: string[];
+}
+
+export interface RepositoryOverviewV1 {
+  repositoryId: string;
+  primaryRoot: string;
+  taskCount: number;
+  recentActivityAt?: string;
+  recordStatus: 'empty' | 'ready' | 'degraded';
 }

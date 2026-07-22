@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -23,6 +24,16 @@ const UNTRUSTED_INSTRUCTION_POLICY: &str = "data_only_never_execute";
 
 pub trait McpBackend: Send + Sync {
     fn suggest_resume(&self, query: &str) -> Result<Value>;
+    fn suggest_resume_in_repository(
+        &self,
+        query: &str,
+        repository_root: Option<&str>,
+    ) -> Result<Value> {
+        if repository_root.is_some() {
+            bail!("repository_root is not supported by this MCP backend");
+        }
+        self.suggest_resume(query)
+    }
     fn resume_task(&self, task_id: &str, token_budget: Option<u32>) -> Result<Value>;
     fn continue_task(
         &self,
@@ -32,6 +43,16 @@ pub trait McpBackend: Send + Sync {
         current_request: &str,
     ) -> Result<Value>;
     fn search_tasks(&self, query: &str) -> Result<Value>;
+    fn search_tasks_in_repository(
+        &self,
+        query: &str,
+        repository_root: Option<&str>,
+    ) -> Result<Value> {
+        if repository_root.is_some() {
+            bail!("repository_root is not supported by this MCP backend");
+        }
+        self.search_tasks(query)
+    }
     fn explain_fact(&self, fact_id: &str) -> Result<Value>;
     fn get_task_timeline(&self, task_id: &str) -> Result<Value>;
 }
@@ -39,7 +60,7 @@ pub trait McpBackend: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct StoreMcpBackend {
     store: Store,
-    repository_id: String,
+    registered_roots: BTreeMap<String, PathBuf>,
     database_path: Option<PathBuf>,
     rollover_program: Option<PathBuf>,
     opener_program: Option<PathBuf>,
@@ -48,9 +69,41 @@ pub struct StoreMcpBackend {
 impl StoreMcpBackend {
     pub fn open(path: impl AsRef<std::path::Path>, repository_id: String) -> Result<Self> {
         let database_path = path.as_ref().to_path_buf();
+        let store = Store::open(&database_path)?;
+        let root = store
+            .list_repositories()?
+            .into_iter()
+            .find(|repository| repository.id == repository_id)
+            .map(|repository| PathBuf::from(repository.path))
+            .unwrap_or_else(|| PathBuf::from(&repository_id));
+        Ok(Self {
+            store,
+            registered_roots: BTreeMap::from([(repository_id, root)]),
+            database_path: Some(database_path),
+            rollover_program: Some(
+                std::env::current_exe().context("resolve PreviouslyOn MCP executable")?,
+            ),
+            opener_program: None,
+        })
+    }
+
+    pub fn open_registry(
+        path: impl AsRef<std::path::Path>,
+        projects: &[crate::setup::SetupProjectV2],
+    ) -> Result<Self> {
+        let database_path = path.as_ref().to_path_buf();
+        let mut registered_roots = BTreeMap::new();
+        for project in projects {
+            if registered_roots
+                .insert(project.repository_id.clone(), project.primary_root.clone())
+                .is_some()
+            {
+                bail!("setup registry contains duplicate logical repository ids");
+            }
+        }
         Ok(Self {
             store: Store::open(&database_path)?,
-            repository_id,
+            registered_roots,
             database_path: Some(database_path),
             rollover_program: Some(
                 std::env::current_exe().context("resolve PreviouslyOn MCP executable")?,
@@ -67,9 +120,16 @@ impl StoreMcpBackend {
         opener_program: impl Into<PathBuf>,
     ) -> Result<Self> {
         let database_path = path.as_ref().to_path_buf();
+        let store = Store::open(&database_path)?;
+        let root = store
+            .list_repositories()?
+            .into_iter()
+            .find(|repository| repository.id == repository_id)
+            .map(|repository| PathBuf::from(repository.path))
+            .unwrap_or_else(|| PathBuf::from(&repository_id));
         Ok(Self {
-            store: Store::open(&database_path)?,
-            repository_id,
+            store,
+            registered_roots: BTreeMap::from([(repository_id, root)]),
             database_path: Some(database_path),
             rollover_program: Some(rollover_program.into()),
             opener_program: Some(opener_program.into()),
@@ -77,27 +137,67 @@ impl StoreMcpBackend {
     }
 
     pub(crate) fn from_store(store: Store, repository_id: String) -> Self {
+        let root = store
+            .list_repositories()
+            .ok()
+            .and_then(|repositories| {
+                repositories
+                    .into_iter()
+                    .find(|repository| repository.id == repository_id)
+            })
+            .map(|repository| PathBuf::from(repository.path))
+            .unwrap_or_else(|| PathBuf::from(&repository_id));
         Self {
             store,
-            repository_id,
+            registered_roots: BTreeMap::from([(repository_id, root)]),
             database_path: None,
             rollover_program: None,
             opener_program: None,
         }
     }
 
-    fn repository_path(&self) -> String {
+    fn repository_path(&self, repository_id: &str) -> String {
+        if let Some(root) = self.registered_roots.get(repository_id) {
+            return root.to_string_lossy().into_owned();
+        }
         self.store
             .list_repositories()
             .ok()
             .and_then(|repositories| {
                 repositories
                     .into_iter()
-                    .find(|repository| repository.id == self.repository_id)
+                    .find(|repository| repository.id == repository_id)
             })
             .map(|repository| repository.path)
             .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| self.repository_id.clone())
+            .unwrap_or_else(|| repository_id.to_string())
+    }
+
+    fn require_registered(&self, repository_id: &str) -> Result<()> {
+        if !self.registered_roots.contains_key(repository_id) {
+            bail!("target does not belong to a registered repository");
+        }
+        Ok(())
+    }
+
+    fn select_repository(&self, repository_root: Option<&str>) -> Result<(String, String)> {
+        if let Some(repository_root) = repository_root {
+            let path = Path::new(repository_root);
+            if !path.is_absolute() {
+                bail!("repository_root must be absolute");
+            }
+            let identity = crate::git::repository_identity(path)?;
+            self.require_registered(&identity.id)?;
+            return Ok((identity.id, identity.root.to_string_lossy().into_owned()));
+        }
+        match self.registered_roots.len() {
+            0 => bail!("no repositories are registered"),
+            1 => {
+                let (id, root) = self.registered_roots.iter().next().expect("one repository");
+                Ok((id.clone(), root.to_string_lossy().into_owned()))
+            }
+            _ => bail!("repository_root is required when multiple repositories are registered"),
+        }
     }
 
     pub fn verified_context_pack(
@@ -127,9 +227,8 @@ impl StoreMcpBackend {
             .store
             .get_task(task_id)?
             .with_context(|| format!("task not found: {task_id}"))?;
-        if task.repository_id != self.repository_id {
-            bail!("task does not belong to the registered repository");
-        }
+        self.require_registered(&task.repository_id)?;
+        let repository_id = task.repository_id.clone();
         let worktree = worktree
             .map(crate::git::repository_identity)
             .transpose()?
@@ -140,7 +239,7 @@ impl StoreMcpBackend {
                 Ok(identity.root.to_string_lossy().into_owned())
             })
             .transpose()?;
-        let task_events = self.store.list_task_events(&self.repository_id, task_id)?;
+        let task_events = self.store.list_task_events(&repository_id, task_id)?;
         let mut excluded_sessions = std::collections::BTreeMap::<String, bool>::new();
         let mut deprecated_facts = std::collections::BTreeMap::<String, String>::new();
         for event in task_events {
@@ -219,7 +318,7 @@ impl StoreMcpBackend {
                 excluded_sessions.len()
             ));
         }
-        let registered_repository_path = self.repository_path();
+        let registered_repository_path = self.repository_path(&repository_id);
         let repository_path = worktree.as_deref().unwrap_or_else(|| {
             checkpoints
                 .last()
@@ -272,16 +371,21 @@ impl StoreMcpBackend {
 
 impl McpBackend for StoreMcpBackend {
     fn suggest_resume(&self, query: &str) -> Result<Value> {
-        let branch = crate::git::capture_snapshot(self.repository_path())
+        self.suggest_resume_in_repository(query, None)
+    }
+
+    fn suggest_resume_in_repository(
+        &self,
+        query: &str,
+        repository_root: Option<&str>,
+    ) -> Result<Value> {
+        let (repository_id, repository_path) = self.select_repository(repository_root)?;
+        let branch = crate::git::capture_snapshot(&repository_path)
             .ok()
             .and_then(|snapshot| snapshot.branch);
         Ok(serde_json::to_value(
-            self.store.suggest_resume_for_branch(
-                &self.repository_id,
-                query,
-                5,
-                branch.as_deref(),
-            )?,
+            self.store
+                .suggest_resume_for_branch(&repository_id, query, 5, branch.as_deref())?,
         )?)
     }
 
@@ -297,6 +401,11 @@ impl McpBackend for StoreMcpBackend {
         source_event_id: &str,
         current_request: &str,
     ) -> Result<Value> {
+        let task = self
+            .store
+            .get_task(task_id)?
+            .with_context(|| format!("task not found: {task_id}"))?;
+        self.require_registered(&task.repository_id)?;
         let database_path = self
             .database_path
             .as_deref()
@@ -310,7 +419,7 @@ impl McpBackend for StoreMcpBackend {
             .context("continuation worker is unavailable")?;
         let request = crate::continuation::AutomaticRolloverRequestV1 {
             schema_version: crate::domain::SCHEMA_VERSION_V1,
-            repository_id: self.repository_id.clone(),
+            repository_id: task.repository_id,
             task_id: task_id.to_string(),
             source_session_id: source_session_id.to_string(),
             source_event_id: source_event_id.to_string(),
@@ -356,11 +465,20 @@ impl McpBackend for StoreMcpBackend {
     }
 
     fn search_tasks(&self, query: &str) -> Result<Value> {
+        self.search_tasks_in_repository(query, None)
+    }
+
+    fn search_tasks_in_repository(
+        &self,
+        query: &str,
+        repository_root: Option<&str>,
+    ) -> Result<Value> {
+        let (repository_id, _) = self.select_repository(repository_root)?;
         let hits = self
             .store
             .search_tasks(query, 20)?
             .into_iter()
-            .filter(|hit| hit.task.repository_id == self.repository_id)
+            .filter(|hit| hit.task.repository_id == repository_id)
             .collect::<Vec<_>>();
         Ok(serde_json::to_value(hits)?)
     }
@@ -370,9 +488,7 @@ impl McpBackend for StoreMcpBackend {
             .store
             .get_fact(fact_id)?
             .with_context(|| format!("fact not found: {fact_id}"))?;
-        if fact.repository_id != self.repository_id {
-            bail!("fact does not belong to the registered repository");
-        }
+        self.require_registered(&fact.repository_id)?;
         let mut evidence = Vec::new();
         for evidence_id in &fact.evidence_ids {
             if let Some(item) = self.store.get_evidence(evidence_id)? {
@@ -387,9 +503,7 @@ impl McpBackend for StoreMcpBackend {
             .store
             .get_task_timeline(task_id)?
             .with_context(|| format!("task not found: {task_id}"))?;
-        if timeline.task.repository_id != self.repository_id {
-            bail!("task does not belong to the registered repository");
-        }
+        self.require_registered(&timeline.task.repository_id)?;
         Ok(serde_json::to_value(timeline)?)
     }
 }
@@ -465,7 +579,10 @@ pub fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["query"],
-                "properties": { "query": { "type": "string", "minLength": 1 } }
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "repository_root": { "type": "string", "minLength": 1 }
+                }
             }
         }),
         json!({
@@ -507,7 +624,10 @@ pub fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["query"],
-                "properties": { "query": { "type": "string", "minLength": 1 } }
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "repository_root": { "type": "string", "minLength": 1 }
+                }
             }
         }),
         json!({
@@ -652,7 +772,10 @@ fn call_tool(backend: &impl McpBackend, params: Option<&Value>) -> Result<Value>
         .and_then(Value::as_object)
         .context("tool arguments must be an object")?;
     let value = match name {
-        "suggest_resume" => backend.suggest_resume(required_string(arguments, "query")?)?,
+        "suggest_resume" => backend.suggest_resume_in_repository(
+            required_string(arguments, "query")?,
+            optional_string(arguments, "repository_root")?,
+        )?,
         "resume_task" => backend.resume_task(
             required_string(arguments, "task_id")?,
             Some(
@@ -670,7 +793,10 @@ fn call_tool(backend: &impl McpBackend, params: Option<&Value>) -> Result<Value>
             required_string(arguments, "source_event_id")?,
             required_string(arguments, "current_request")?,
         )?,
-        "search_tasks" => backend.search_tasks(required_string(arguments, "query")?)?,
+        "search_tasks" => backend.search_tasks_in_repository(
+            required_string(arguments, "query")?,
+            optional_string(arguments, "repository_root")?,
+        )?,
         "explain_fact" => backend.explain_fact(required_string(arguments, "fact_id")?)?,
         "get_task_timeline" => backend.get_task_timeline(required_string(arguments, "task_id")?)?,
         _ => bail!("unknown tool: {name}"),
@@ -801,6 +927,17 @@ fn required_string<'a>(object: &'a serde_json::Map<String, Value>, key: &str) ->
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .with_context(|| format!("{key} is required"))
+}
+
+fn optional_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>> {
+    match object.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value)),
+        Some(_) => bail!("{key} must be a non-empty string"),
+    }
 }
 
 fn json_rpc_result(id: Value, result: Value) -> Value {

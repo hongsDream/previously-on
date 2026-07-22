@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { I18nContext, type I18nValue, type Language } from './i18n-context';
+import { readPreferences, updatePreferences } from './lib/preferences';
 
-const STORAGE_KEY = 'previously-on:preferences:v1';
-const KOREAN_MESSAGES: Record<string, string> = {
+// eslint-disable-next-line react-refresh/only-export-components
+export const KOREAN_MESSAGES: Record<string, string> = {
   'Tasks': '작업',
   'Sessions': '세션',
   'Evidence': '증거',
@@ -28,6 +29,47 @@ const KOREAN_MESSAGES: Record<string, string> = {
   'No repository': '저장소 없음',
   'Repository state: {state}': '저장소 상태: {state}',
   'Repository state': '저장소 상태',
+  'Project selector': '프로젝트 선택',
+  'All projects': '전체 프로젝트',
+  'Read-only overview': '읽기 전용 보기',
+  'Compare project activity without synchronizing or mixing project history.': '동기화하거나 프로젝트 기록을 섞지 않고 활동을 비교합니다.',
+  'Recent activity': '최근 활동',
+  'No activity': '활동 없음',
+  'Record status': '기록 상태',
+  'No registered projects': '등록된 프로젝트가 없습니다',
+  'empty': '기록 없음',
+  'Sync Codex app history': 'Codex 앱 기록 동기화',
+  'Synchronizing…': '동기화 중…',
+  'Codex app history synchronization': 'Codex 앱 기록 동기화',
+  'Synchronization complete': '동기화 완료',
+  'Synchronization degraded': '동기화 성능 저하',
+  'Codex Desktop history was imported into this local project.': 'Codex Desktop 기록을 이 로컬 프로젝트로 가져왔습니다.',
+  'Some local Codex Desktop history could not be imported. Review the counts and technical details.': '일부 로컬 Codex Desktop 기록을 가져오지 못했습니다. 항목 수와 기술 세부 정보를 확인하세요.',
+  'This local Codex App Server cannot import Codex Desktop history.': '이 로컬 Codex App Server는 Codex Desktop 기록 가져오기를 지원하지 않습니다.',
+  '{count} tasks imported': '가져온 작업 {count}개',
+  '{count} duplicates': '중복 {count}개',
+  '{count} missing or unknown items': '누락/불명 항목 {count}개',
+  'Technical details': '기술 세부 정보',
+  'Fresh': '최신',
+  'Stale': '오래됨',
+  'Broken': '손상됨',
+  'Candidate decision': '후보 결정',
+  'Pinned decision': '고정된 결정',
+  'Invalid decision': '무효 결정',
+  'Superseded decision': '대체된 결정',
+  'The request could not be completed because its input was invalid.': '입력값이 올바르지 않아 요청을 완료하지 못했습니다.',
+  'The local UI is not authorized to perform this request.': '로컬 UI에 이 요청을 수행할 권한이 없습니다.',
+  'The requested local item could not be found.': '요청한 로컬 항목을 찾지 못했습니다.',
+  'Local data changed before this request could be completed. Refresh and try again.': '요청을 완료하기 전에 로컬 데이터가 변경되었습니다. 새로고침한 뒤 다시 시도하세요.',
+  'PreviouslyOn could not complete the local request.': 'PreviouslyOn이 로컬 요청을 완료하지 못했습니다.',
+  'PreviouslyOn API is unavailable': 'PreviouslyOn API를 사용할 수 없습니다',
+  'The local change could not be saved.': '로컬 변경 사항을 저장하지 못했습니다.',
+  'Codex synchronization failed.': 'Codex 동기화에 실패했습니다.',
+  'The local API returned an invalid response.': '로컬 API가 올바르지 않은 응답을 반환했습니다.',
+  'The local status could not be refreshed.': '로컬 상태를 새로고치지 못했습니다.',
+  'The export could not be created.': '내보내기 파일을 만들지 못했습니다.',
+  'The local refresh status could not be checked.': '로컬 새로고침 상태를 확인하지 못했습니다.',
+  'Permanently delete all PreviouslyOn data for {path}? This cannot be undone.': '{path}의 모든 PreviouslyOn 데이터를 영구 삭제할까요? 이 작업은 되돌릴 수 없습니다.',
   'Preview context pack': '컨텍스트 팩 미리보기',
   'More options': '더 보기',
   'Export JSON': 'JSON 내보내기',
@@ -67,6 +109,8 @@ const KOREAN_MESSAGES: Record<string, string> = {
   'Candidate-only output': '후보 전용 출력',
   'Model output never becomes Evidence. You must review it before it can become a Fact Candidate.': '모델 출력은 증거가 되지 않습니다. 사실 후보가 되기 전에 사용자가 검토해야 합니다.',
   'Connect Codex to your repository': 'Codex를 저장소에 연결하세요',
+  'Connect Codex to a project': 'Codex를 프로젝트에 연결하세요',
+  'Connect a local Git project. PreviouslyOn keeps every registered project separate and lets you switch or review all projects from this device.': '로컬 Git 프로젝트를 연결하세요. PreviouslyOn은 등록한 프로젝트를 각각 분리해 보관하며, 이 기기에서 프로젝트를 전환하거나 전체 프로젝트를 검토할 수 있습니다.',
   'Choose one local Git repository for this pilot. PreviouslyOn will configure the local Codex integration and verify it here—no setup command is required.': '파일럿에 사용할 로컬 Git 저장소 하나를 선택하세요. PreviouslyOn이 로컬 Codex 연동을 설정하고 여기에서 검증하므로 별도 설정 명령은 필요하지 않습니다.',
   'Repository path': '저장소 경로',
   'Enter an absolute path beginning with /.': '/로 시작하는 절대 경로를 입력하세요.',
@@ -96,6 +140,10 @@ const KOREAN_MESSAGES: Record<string, string> = {
   'I restarted Codex · Continue': 'Codex를 재시작했습니다 · 계속',
   'Start a captured Codex session': '기록되는 Codex 세션 시작',
   'Check the local integration': '로컬 연동 확인',
+  'Work in Codex Desktop': 'Codex Desktop에서 작업하기',
+  'Open {path} in Codex Desktop and complete a task normally.': 'Codex Desktop에서 {path}을(를) 열고 평소처럼 작업을 완료하세요.',
+  'Import from this device': '이 기기에서 가져오기',
+  'Return here and choose Sync Codex app history. The import starts only when you request it and stays local.': '여기로 돌아와 Codex 앱 기록 동기화를 선택하세요. 가져오기는 사용자가 요청할 때만 시작되며 로컬에서만 처리됩니다.',
   'Copy {title}': '{title} 복사',
   'Clipboard access was unavailable. Select and copy the command manually.': '클립보드를 사용할 수 없습니다. 명령어를 직접 선택해 복사하세요.',
   'Refreshing status…': '상태 새로고침 중…',
@@ -525,6 +573,16 @@ const KOREAN_MESSAGES: Record<string, string> = {
   'AI fact refresh was not explicitly enabled during setup': '설정할 때 AI 사실 새로고침을 명시적으로 활성화하지 않았습니다.',
   'No task-related paths are available for revalidation.': '재검증할 작업 관련 경로가 없습니다.',
   'Codex did not provide a stable event/turn/tool identifier; a UUID source ID was used to avoid false deduplication': 'Codex가 안정적인 이벤트·턴·도구 식별자를 제공하지 않아 잘못된 중복 제거를 피하기 위해 UUID 원본 ID를 사용했습니다.',
+  'file changes were observed, but exact structured PreToolUse/PostToolUse evidence did not match; attribution was downgraded': '파일 변경은 관찰됐지만 정확한 구조화 PreToolUse/PostToolUse 증거가 일치하지 않아 변경 귀속의 신뢰 수준을 낮췄습니다.',
+  'Session {value}': '세션 {value}',
+  'added': '추가됨',
+  'modified': '수정됨',
+  'renamed': '이름 변경됨',
+  'deleted': '삭제됨',
+  'temporal revalidation: Unchanged': '시간 기준 재검증: 변경 없음',
+  'temporal revalidation: Changed': '시간 기준 재검증: 변경됨',
+  'temporal revalidation: Diverged': '시간 기준 재검증: Git 이력 분기',
+  'temporal revalidation: Broken': '시간 기준 재검증: 손상됨',
   'temporal revalidation: Degraded': '시간 기준 재검증: 성능 저하',
   'stable_source_id': '안정적인 원본 ID',
 };
@@ -538,11 +596,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   const setLanguage = useCallback((nextLanguage: Language) => {
     setLanguageState(nextLanguage);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ schemaVersion: 1, language: nextLanguage }));
-    } catch {
-      // The selected language still applies for this session when storage is unavailable.
-    }
+    updatePreferences({ language: nextLanguage });
   }, []);
 
   const value = useMemo<I18nValue>(() => ({
@@ -556,12 +610,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 }
 
 function readInitialLanguage(): Language {
-  try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as { schemaVersion?: unknown; language?: unknown } | null;
-    if (stored?.schemaVersion === 1 && (stored.language === 'en' || stored.language === 'ko')) return stored.language;
-  } catch {
-    // Invalid or unavailable preferences fall back to the browser language.
-  }
+  const stored = readPreferences();
+  if (stored.language) return stored.language;
   return navigator.language.toLowerCase().startsWith('ko') ? 'ko' : 'en';
 }
 

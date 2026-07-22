@@ -1,7 +1,10 @@
 import { useDeferredValue, useMemo, useState } from 'react';
 import { AppHeader } from './components/AppHeader';
+import { AllProjectsView } from './components/AllProjectsView';
 import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
+import { CodexSyncStatus } from './components/CodexSyncStatus';
+import { ErrorNotice } from './components/ErrorNotice';
 import { FirstRunSetup, RegisteredEmptyActions } from './components/FirstRunSetup';
 import { ProjectOverview } from './components/ProjectOverview';
 import { Sidebar } from './components/Sidebar';
@@ -36,6 +39,16 @@ function AppContent() {
   const {
     data,
     setData,
+    repositories,
+    selectedRepositoryId,
+    bootstrapRepositoryId,
+    allProjects,
+    selectRepository,
+    showAllProjects,
+    syncReport,
+    syncPending,
+    syncError,
+    manualSync,
     offlineFallback,
     fatalError,
     selection,
@@ -90,6 +103,7 @@ function AppContent() {
     performMutation,
   });
   const taskActions = useTaskActions({
+    repositoryId: bootstrapRepositoryId,
     selectedTask: workspace?.selectedTask,
     selection,
     offlineFallback,
@@ -99,6 +113,7 @@ function AppContent() {
     performMutation,
   });
   const refreshActions = useRefreshActions({
+    repositoryId: bootstrapRepositoryId,
     data,
     selectedTask: workspace?.selectedTask,
     selection,
@@ -113,12 +128,38 @@ function AppContent() {
     performMutation,
   });
 
-  if (fatalError) return <ErrorScreen message={fatalError} />;
+  const projectHeaderProps = {
+    repositories,
+    selectedRepositoryId,
+    allProjects,
+    syncPending,
+    onRepositorySelect: selectRepository,
+    onAllProjects: showAllProjects,
+    onSync: manualSync,
+  };
+
+  if (fatalError) return <ErrorScreen error={fatalError} />;
+  if (allProjects) {
+    return (
+      <div className="app-shell">
+        <AppHeader
+          {...projectHeaderProps}
+          onPreview={() => undefined}
+          onExport={() => undefined}
+          onPurge={() => undefined}
+          actionsDisabled
+          previewDisabled
+        />
+        <AllProjectsView repositories={repositories} onOpen={selectRepository} />
+      </div>
+    );
+  }
   if (!data) return <LoadingScreen />;
   if (data.tasks.length === 0) {
     return (
       <div className="app-shell">
         <AppHeader
+          {...projectHeaderProps}
           repository={data.repository}
           onPreview={() => undefined}
           onExport={() => void refreshActions.exportData()}
@@ -126,7 +167,9 @@ function AppContent() {
           actionsDisabled={offlineFallback || isUnregistered || mutationPending}
           previewDisabled
         />
-        {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
+        <CodexSyncStatus report={syncReport} />
+        {syncError ? <ErrorNotice error={syncError} /> : null}
+        {actionError ? <ErrorNotice error={actionError} /> : null}
         <div className="app-body empty-app-body">
           <Sidebar
             query={query}
@@ -251,6 +294,7 @@ function AppContent() {
   return (
     <div className="app-shell">
       <AppHeader
+        {...projectHeaderProps}
         repository={data.repository}
         onPreview={openContextPack}
         onExport={() => void refreshActions.exportData()}
@@ -258,9 +302,11 @@ function AppContent() {
         actionsDisabled={offlineFallback || mutationPending}
         previewDisabled={!selectedCheckpoint || !data.contextPacks[selectedTask.id]}
       />
+      <CodexSyncStatus report={syncReport} />
+      {syncError ? <ErrorNotice error={syncError} /> : null}
       {offlineFallback ? <div className="sample-banner" role="status">{t('Local API unavailable · read-only sample workspace · changes are disabled')}</div> : null}
       {!offlineFallback && data.repository.state === 'degraded' ? <div className="degraded-banner" role="status">{t('Capture degraded · review missing evidence before trusting this workspace')}</div> : null}
-      {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
+      {actionError ? <ErrorNotice error={actionError} /> : null}
       <div className={`app-body ${workspaceView === 'overview' || workspaceView === 'settings' ? 'overview-app-body' : ''}`}>
         <Sidebar
           query={query}
@@ -361,13 +407,19 @@ function AppContent() {
   );
 }
 
-function ErrorScreen({ message }: { message: string }) {
+function ErrorScreen({ error }: { error: import('./lib/api').UiError }) {
   const { t } = useI18n();
   return (
     <main className="loading-screen" role="alert">
       <span className="loading-mark error-mark" />
       <h1>{t('PreviouslyOn could not load')}</h1>
-      <p>{message}</p>
+      <p>{t(error.messageKey)}</p>
+      {error.technicalDetails.length > 0 ? (
+        <details>
+          <summary>{t('Technical details')}</summary>
+          <ul>{error.technicalDetails.map((detail) => <li key={detail}>{detail}</li>)}</ul>
+        </details>
+      ) : null}
     </main>
   );
 }

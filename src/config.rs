@@ -6,16 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, ExitCode, Stdio};
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::BaseDirs;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::app_server::{
-    codex_version, inspect_capabilities, AppServerCapabilityStatus, AppServerClient,
-};
-use crate::domain::{CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind};
+use crate::app_server::{codex_version, inspect_capabilities, AppServerCapabilityStatus};
+use crate::domain::EventEnvelopeV1;
 use crate::hook::{HookEvent, HookIngressConfig};
 use crate::setup::{self, SetupPaths, MANAGED_ID};
 use crate::store::Store;
@@ -65,6 +63,11 @@ pub enum Commands {
     },
     /// Permanently purge one repository from local storage.
     Purge {
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Stop capture for one logical repository while preserving its local history.
+    Unregister {
         #[arg(long)]
         repo: PathBuf,
     },
@@ -205,15 +208,24 @@ impl AppConfig {
         HookIngressConfig {
             socket_path: self.socket_path.clone(),
             queue_path: self.queue_path.clone(),
-            registered_repository: setup::read_manifest(&self.setup_paths().manifest_path())
+            registered_repositories: setup::read_manifest(&self.setup_paths().manifest_path())
                 .ok()
-                .map(|manifest| manifest.repository),
+                .map(|manifest| {
+                    manifest
+                        .projects
+                        .into_iter()
+                        .flat_map(|project| project.known_worktree_roots)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
-    pub fn repository_id(&self) -> Result<String> {
-        let repository = setup::read_manifest(&self.setup_paths().manifest_path())?.repository;
-        Ok(crate::git::repository_identity(repository)?.id)
+    pub fn codex_import_service(&self) -> crate::codex_import::CodexImportService {
+        crate::codex_import::CodexImportService::new(
+            &self.database_path,
+            self.setup_paths().manifest_path(),
+        )
     }
 }
 
@@ -239,7 +251,11 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
                 serde_json::to_string_pretty(&json!({
                     "dataDir": config.data_dir,
                     "database": store.health()?,
-                    "repository": manifest.map(|manifest| manifest.repository),
+                    "projects": manifest.as_ref().map(|manifest| &manifest.projects),
+                    "repository": manifest.as_ref().and_then(|manifest| {
+                        (manifest.projects.len() == 1)
+                            .then(|| &manifest.projects[0].primary_root)
+                    }),
                     "queuedEvents": queue_line_count(&config.queue_path)?
                 }))?
             );
@@ -283,6 +299,10 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
                 Ok(())
             })?;
             println!("purged {}", repository.root.display());
+        }
+        Commands::Unregister { repo } => {
+            let result = setup::unregister_repository(&config.setup_paths(), &repo)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Uninstall {
             target: UninstallTarget::Codex,
@@ -333,8 +353,11 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Commands::Daemon => crate::hook::run_daemon(config.data_dir).await?,
         Commands::Mcp => {
-            let repository_id = config.repository_id()?;
-            let backend = crate::mcp::StoreMcpBackend::open(&config.database_path, repository_id)?;
+            let manifest = setup::read_manifest(&config.setup_paths().manifest_path())?;
+            let backend = crate::mcp::StoreMcpBackend::open_registry(
+                &config.database_path,
+                &manifest.projects,
+            )?;
             crate::mcp::run_stdio(&backend, tokio::io::stdin(), tokio::io::stdout()).await?;
         }
         Commands::AutoRollover => {
@@ -363,12 +386,13 @@ async fn diagnostics(
 ) -> Result<crate::diagnostics::PilotDiagnosticsV1> {
     let requested = crate::git::repository_identity(repo)?;
     let manifest = setup::read_manifest(&config.setup_paths().manifest_path())?;
-    let registered = crate::git::repository_identity(&manifest.repository)?;
-    if requested.id != registered.id {
-        bail!("diagnostics repository does not match the registered repository");
-    }
-    let setup_at = DateTime::parse_from_rfc3339(&manifest.installed_at)
-        .context("parse setup installation timestamp")?
+    let project = manifest
+        .projects
+        .iter()
+        .find(|project| project.repository_id == requested.id)
+        .context("diagnostics repository is not registered")?;
+    let setup_at = DateTime::parse_from_rfc3339(&project.registered_at)
+        .context("parse project registration timestamp")?
         .with_timezone(&Utc);
     let store = Store::open_read_only(&config.database_path)?;
     let sessions = store.list_sessions(Some(&requested.id))?;
@@ -553,8 +577,19 @@ async fn doctor(config: &AppConfig) -> DoctorReport {
     checks.push(match setup {
         Ok(manifest) => DoctorCheck {
             name: "repository registration",
-            ok: manifest.repository.exists(),
-            detail: manifest.repository.display().to_string(),
+            ok: !manifest.projects.is_empty()
+                && manifest.projects.iter().all(|project| {
+                    project
+                        .known_worktree_roots
+                        .iter()
+                        .any(|root| root.exists())
+                }),
+            detail: manifest
+                .projects
+                .iter()
+                .map(|project| project.primary_root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
         },
         Err(error) => DoctorCheck {
             name: "repository registration",
@@ -636,108 +671,11 @@ pub(crate) async fn doctor_for_setup_paths(paths: &SetupPaths) -> DoctorReport {
 
 async fn import_codex_threads(config: &AppConfig, repo: &Path) -> Result<()> {
     let repository = crate::git::repository_identity(repo)?;
-    let repository_id = repository.id;
-    let store = Store::open(&config.database_path)?;
-    let mut client = AppServerClient::connect().await?;
-    let capability = client.capability_report().await;
-    if capability.status == crate::app_server::AppServerCapabilityStatus::Unsupported {
-        bail!(
-            "Codex App Server integration is unsupported: {:?}",
-            capability.warnings
-        );
-    }
-    let import_report = client.import_threads_report(&repository.root).await?;
-    let count = import_report.threads.len();
-    let mut semantic_events = 0usize;
-    let mut duplicate_events = 0usize;
-    let mut semantic_coverages = Vec::new();
-    for thread in import_report.threads {
-        let projection =
-            crate::app_server::project_thread_events(&thread, &repository_id, &repository.root);
-        semantic_coverages.push(projection.coverage.clone());
-        for event in projection.events {
-            let ack = crate::hook::ingest_hook_event(&store, event)?;
-            semantic_events += 1;
-            if ack.status == crate::hook::HookDeliveryStatus::Duplicate {
-                duplicate_events += 1;
-            }
-        }
-        let turns = thread
-            .thread
-            .get("turns")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0);
-        let payload = json!({
-            "id": thread.id,
-            "sessionId": thread.session_id,
-            "cwd": thread.cwd,
-            "cliVersion": thread.cli_version,
-            "createdAt": thread.created_at,
-            "updatedAt": thread.updated_at,
-            "turnCount": turns,
-            "rawTranscriptStored": false
-        });
-        let occurred_at = Utc
-            .timestamp_opt(thread.updated_at, 0)
-            .single()
-            .unwrap_or_else(Utc::now);
-        let mut event = EventEnvelopeV1::new(
-            format!("codex-app-server:thread:read:{}", thread.id),
-            &repository_id,
-            thread.session_id,
-            EventKind::Unknown,
-            occurred_at,
-            payload,
-        );
-        event.coverage = thread.coverage;
-        event.coverage.status = event.coverage.status.worst(CoverageStatus::Degraded);
-        event.coverage.captured.extend([
-            "thread/list".to_string(),
-            "thread/read".to_string(),
-            "allowlisted semantic item projection".to_string(),
-        ]);
-        store.insert_event(&event)?;
-    }
-    client.shutdown().await?;
-    let agent_lineage = match AppServerClient::connect_experimental().await {
-        Ok(mut lineage_client) => {
-            let observed = crate::app_server::collect_agent_lineage(
-                &mut lineage_client,
-                &store,
-                &repository.root,
-                &repository_id,
-            )
-            .await;
-            lineage_client.shutdown().await.ok();
-            observed
-        }
-        Err(error) => Err(error),
-    };
-    let (observed_agents, agent_lineage_warning) = match agent_lineage {
-        Ok(agents) => (agents.len(), None),
-        Err(error) => (
-            0,
-            Some(crate::redaction::redact_excerpt(&format!(
-                "agent lineage unavailable: {error}"
-            ))),
-        ),
-    };
-    let semantic_coverage = CoverageV1::merge(semantic_coverages.iter());
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "importedThreads": count,
-            "semanticEvents": semantic_events,
-            "duplicateEvents": duplicate_events,
-            "capability": capability,
-            "coverage": import_report.coverage,
-            "semanticCoverage": semantic_coverage,
-            "notices": import_report.notices,
-            "observedAgents": observed_agents,
-            "agentLineageWarning": agent_lineage_warning
-        }))?
-    );
+    let report = config
+        .codex_import_service()
+        .sync_repository(&repository.id)
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

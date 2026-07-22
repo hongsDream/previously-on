@@ -1,11 +1,14 @@
 use std::fs;
 
+use previously_on::domain::{RepositoryV1, TaskLifecycle, TaskV1, SCHEMA_VERSION_V1};
 use previously_on::setup::{
-    install_codex, install_codex_with_options, uninstall_codex, uninstall_codex_detailed,
-    SetupPaths, MANAGED_ID,
+    install_codex, install_codex_with_options, read_manifest, uninstall_codex,
+    uninstall_codex_detailed, unregister_repository, SetupPaths, MANAGED_ID,
 };
+use previously_on::store::Store;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::process::Command;
 use tempfile::TempDir;
 
 fn create_private_dir(path: &std::path::Path) {
@@ -74,6 +77,30 @@ fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<
     entries
 }
 
+fn git(path: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn real_setup_fixture() -> (TempDir, SetupPaths) {
+    let temp = TempDir::new().unwrap();
+    let paths = SetupPaths {
+        codex_home: temp.path().join("codex"),
+        data_dir: temp.path().join("previously-on"),
+        executable: std::path::PathBuf::from("/Applications/PreviouslyOn/previously"),
+    };
+    (temp, paths)
+}
+
 fn valid_install_journal(paths: &SetupPaths) -> Value {
     let hooks = fs::read(paths.hooks_path()).unwrap();
     let config = fs::read(paths.config_path()).unwrap();
@@ -124,6 +151,183 @@ fn valid_uninstall_journal(paths: &SetupPaths) -> Value {
             },
         ]
     })
+}
+
+#[test]
+fn v1_registration_migrates_to_v2_without_changing_install_ownership() {
+    let (temp, paths) = real_setup_fixture();
+    let first_repository = temp.path().join("first");
+    let second_repository = temp.path().join("second");
+    for repository in [&first_repository, &second_repository] {
+        fs::create_dir_all(repository).unwrap();
+        git(repository, &["init", "-q"]);
+    }
+
+    let first = install_codex(&paths, &first_repository).unwrap();
+    let hooks_before = fs::read(paths.hooks_path()).unwrap();
+    let config_before = fs::read(paths.config_path()).unwrap();
+    let legacy = json!({
+        "version": 1,
+        "managedId": first.managed_id,
+        "installedAt": first.installed_at,
+        "repository": first.projects[0].primary_root,
+        "executable": first.executable,
+        "hooksPath": first.hooks_path,
+        "configPath": first.config_path,
+        "hooksBackup": first.hooks_backup,
+        "configBackup": first.config_backup,
+        "installedHooksSha256": first.installed_hooks_sha256,
+        "installedConfigSha256": first.installed_config_sha256,
+        "hooksFeatureBefore": first.hooks_feature_before,
+        "hooksFeatureManaged": first.hooks_feature_managed,
+        "aiRefreshEnabled": first.ai_refresh_enabled,
+        "aiRefreshProfileSha256": first.ai_refresh_profile_sha256,
+    });
+    write_private_file(
+        &paths.manifest_path(),
+        serde_json::to_vec_pretty(&legacy).unwrap(),
+    );
+
+    let readable = read_manifest(&paths.manifest_path()).unwrap();
+    assert_eq!(readable.projects.len(), 1);
+    let raw_before: Value =
+        serde_json::from_slice(&fs::read(paths.manifest_path()).unwrap()).unwrap();
+    assert_eq!(raw_before["version"], 1);
+
+    let migrated = install_codex(&paths, &second_repository).unwrap();
+    let raw_after: Value =
+        serde_json::from_slice(&fs::read(paths.manifest_path()).unwrap()).unwrap();
+    assert_eq!(raw_after["version"], 2);
+    assert_eq!(migrated.projects.len(), 2);
+    assert_eq!(migrated.installed_at, readable.installed_at);
+    assert_eq!(migrated.hooks_backup.existed, readable.hooks_backup.existed);
+    assert_eq!(
+        migrated.hooks_backup.backup_path,
+        readable.hooks_backup.backup_path
+    );
+    assert_eq!(migrated.hooks_backup.sha256, readable.hooks_backup.sha256);
+    assert_eq!(
+        migrated.config_backup.existed,
+        readable.config_backup.existed
+    );
+    assert_eq!(
+        migrated.config_backup.backup_path,
+        readable.config_backup.backup_path
+    );
+    assert_eq!(migrated.config_backup.sha256, readable.config_backup.sha256);
+    assert_eq!(
+        migrated.installed_hooks_sha256,
+        readable.installed_hooks_sha256
+    );
+    assert_eq!(
+        migrated.installed_config_sha256,
+        readable.installed_config_sha256
+    );
+    assert_eq!(fs::read(paths.hooks_path()).unwrap(), hooks_before);
+    assert_eq!(fs::read(paths.config_path()).unwrap(), config_before);
+}
+
+#[test]
+fn linked_worktree_is_added_to_one_logical_project() {
+    let (temp, paths) = real_setup_fixture();
+    let primary = temp.path().join("primary");
+    let linked = temp.path().join("linked");
+    fs::create_dir_all(&primary).unwrap();
+    git(&primary, &["init", "-q"]);
+    fs::write(primary.join("tracked.txt"), "baseline\n").unwrap();
+    git(&primary, &["add", "tracked.txt"]);
+    git(
+        &primary,
+        &[
+            "-c",
+            "user.name=PreviouslyOn Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    );
+    git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+
+    let first = install_codex(&paths, &primary).unwrap();
+    let registered = install_codex(&paths, &linked).unwrap();
+
+    assert_eq!(registered.projects.len(), 1);
+    assert_eq!(
+        registered.projects[0].repository_id,
+        first.projects[0].repository_id
+    );
+    assert_eq!(
+        registered.projects[0].primary_root,
+        primary.canonicalize().unwrap()
+    );
+    assert_eq!(
+        registered.projects[0].known_worktree_roots,
+        vec![
+            linked.canonicalize().unwrap(),
+            primary.canonicalize().unwrap()
+        ]
+    );
+}
+
+#[test]
+fn unregister_removes_only_manifest_registration_and_preserves_store_history() {
+    let (temp, paths) = real_setup_fixture();
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    git(&repository, &["init", "-q"]);
+    let manifest = install_codex(&paths, &repository).unwrap();
+    let project = &manifest.projects[0];
+    let store = Store::open(paths.data_dir.join("previously.sqlite3")).unwrap();
+    let now = chrono::Utc::now();
+    store
+        .upsert_repository(&RepositoryV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: project.repository_id.clone(),
+            path: project.primary_root.to_string_lossy().into_owned(),
+            remote_url: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_task(&TaskV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "preserved-task".into(),
+            repository_id: project.repository_id.clone(),
+            title: "Preserve this history".into(),
+            goal: None,
+            lifecycle: TaskLifecycle::Active,
+            branch: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    let hooks_before = fs::read(paths.hooks_path()).unwrap();
+    let config_before = fs::read(paths.config_path()).unwrap();
+
+    let result = unregister_repository(&paths, &repository).unwrap();
+
+    assert!(result.removed);
+    assert!(result.history_preserved);
+    assert!(read_manifest(&paths.manifest_path())
+        .unwrap()
+        .projects
+        .is_empty());
+    assert!(store.get_task("preserved-task").unwrap().is_some());
+    assert_eq!(fs::read(paths.hooks_path()).unwrap(), hooks_before);
+    assert_eq!(fs::read(paths.config_path()).unwrap(), config_before);
 }
 
 #[test]
@@ -200,7 +404,10 @@ fn uninstall_preserves_a_user_modified_ai_refresh_profile() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ai_refresh_capability_is_ready_only_for_an_unchanged_allowed_profile() {
-    use previously_on::ai_refresh::{inspect_capability_with_program, AiRefreshCapabilityStatusV1};
+    use previously_on::ai_refresh::{
+        inspect_capability_with_program, AiRefreshCapabilityReasonCodeV1,
+        AiRefreshCapabilityStatusV1,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     fn fake_server(root: &std::path::Path, name: &str, allowed: bool) -> std::path::PathBuf {
@@ -250,13 +457,20 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"data":[{{"id":"previously-in
     .await
     .unwrap();
     assert_eq!(changed.status, AiRefreshCapabilityStatusV1::Blocked);
-    assert!(changed.reason.unwrap().contains("changed or is missing"));
+    assert_eq!(
+        changed.reason_code,
+        AiRefreshCapabilityReasonCodeV1::VerificationBlocked
+    );
+    assert!(changed.technical_details[0].contains("changed or is missing"));
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn ai_refresh_capability_reports_unsupported_app_server_without_enabling_refresh() {
-    use previously_on::ai_refresh::{inspect_capability_with_program, AiRefreshCapabilityStatusV1};
+    use previously_on::ai_refresh::{
+        inspect_capability_with_program, AiRefreshCapabilityReasonCodeV1,
+        AiRefreshCapabilityStatusV1,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     let (temp, paths, repository) = fixture();
@@ -269,6 +483,11 @@ async fn ai_refresh_capability_reports_unsupported_app_server_without_enabling_r
         .await
         .unwrap();
     assert_eq!(report.status, AiRefreshCapabilityStatusV1::Unsupported);
+    assert_eq!(
+        report.reason_code,
+        AiRefreshCapabilityReasonCodeV1::AppServerUnsupported
+    );
+    assert!(!report.technical_details.is_empty());
 }
 
 fn fixture() -> (TempDir, SetupPaths, std::path::PathBuf) {
@@ -723,7 +942,7 @@ fn setup_fails_closed_without_mutations_for_invalid_existing_manifests() {
         ("malformed", b"{not-json".to_vec(), "parse setup manifest"),
         (
             "unsupported",
-            valid_manifest(2, MANAGED_ID),
+            valid_manifest(3, MANAGED_ID),
             "unsupported or foreign setup manifest",
         ),
         (

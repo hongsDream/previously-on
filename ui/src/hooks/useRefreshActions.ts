@@ -7,13 +7,16 @@ import {
   purgeRepository,
   reviewFactRefreshCandidate,
   startFactRefresh,
+  toUiError,
 } from '../lib/api';
-import type { FactCandidateReviewResponse } from '../lib/api';
+import type { FactCandidateReviewResponse, UiError } from '../lib/api';
+import { useI18n } from '../i18n-context';
 import { emptyWorkspaceSelection, type WorkspaceSelectionIds } from '../lib/workspace';
 import type { AiFactRefreshOperationV1, BootstrapData, Fact, FactKind, Task } from '../types';
 import type { PerformMutation } from './useMutationRunner';
 
 interface RefreshActionsOptions {
+  repositoryId: string | null;
   data: BootstrapData | null;
   selectedTask?: Task;
   selection: WorkspaceSelectionIds;
@@ -21,7 +24,7 @@ interface RefreshActionsOptions {
   isUnregistered: boolean;
   mutationPending: boolean;
   setMutationPending: Dispatch<SetStateAction<boolean>>;
-  setActionError: Dispatch<SetStateAction<string>>;
+  setActionError: Dispatch<SetStateAction<UiError | null>>;
   setData: Dispatch<SetStateAction<BootstrapData | null>>;
   setSelection: Dispatch<SetStateAction<WorkspaceSelectionIds>>;
   installBootstrap: (next: BootstrapData, preferred?: Partial<WorkspaceSelectionIds>) => void;
@@ -29,6 +32,7 @@ interface RefreshActionsOptions {
 }
 
 export function useRefreshActions({
+  repositoryId,
   data,
   selectedTask,
   selection,
@@ -42,22 +46,23 @@ export function useRefreshActions({
   installBootstrap,
   performMutation,
 }: RefreshActionsOptions) {
+  const { t } = useI18n();
   const refreshBootstrap = useCallback(async () => {
     if (offlineFallback || mutationPending) return;
     setMutationPending(true);
-    setActionError('');
+    setActionError(null);
     try {
-      installBootstrap(await fetchBootstrap(), selection);
+      installBootstrap(await fetchBootstrap(repositoryId ?? undefined), selection);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'The local status could not be refreshed.');
+      setActionError(toUiError(error, 'The local status could not be refreshed.'));
     } finally {
       setMutationPending(false);
     }
-  }, [installBootstrap, mutationPending, offlineFallback, selection, setActionError, setMutationPending]);
+  }, [installBootstrap, mutationPending, offlineFallback, repositoryId, selection, setActionError, setMutationPending]);
 
   const exportData = useCallback(async () => {
     if (!data || offlineFallback || isUnregistered || mutationPending) return;
-    setActionError('');
+    setActionError(null);
     try {
       const exported = await exportRepository();
       const blob = new Blob([`${JSON.stringify(exported, null, 2)}\n`], { type: 'application/json' });
@@ -69,13 +74,13 @@ export function useRefreshActions({
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'The export could not be created.');
+      setActionError(toUiError(error, 'The export could not be created.'));
     }
   }, [data, isUnregistered, mutationPending, offlineFallback, setActionError]);
 
   const purge = useCallback(async () => {
     if (!data || offlineFallback || isUnregistered || mutationPending) return;
-    const confirmed = window.confirm(`Permanently delete all PreviouslyOn data for ${data.repository.path}? This cannot be undone.`);
+    const confirmed = window.confirm(t('Permanently delete all PreviouslyOn data for {path}? This cannot be undone.', { path: data.repository.path }));
     if (!confirmed) return;
     const purged = await performMutation(purgeRepository);
     if (purged !== null) {
@@ -96,7 +101,7 @@ export function useRefreshActions({
       } : current);
       setSelection(emptyWorkspaceSelection);
     }
-  }, [data, isUnregistered, mutationPending, offlineFallback, performMutation, setData, setSelection]);
+  }, [data, isUnregistered, mutationPending, offlineFallback, performMutation, setData, setSelection, t]);
 
   const installFactRefreshOperation = useCallback((operation: AiFactRefreshOperationV1) => {
     setData((current) => current ? {
@@ -126,7 +131,7 @@ export function useRefreshActions({
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return null;
       console.error('PreviouslyOn fact refresh polling failed', error);
-      setActionError(error instanceof Error ? error.message : 'The local refresh status could not be checked.');
+      setActionError(toUiError(error, 'The local refresh status could not be checked.'));
       return null;
     }
   }, [installFactRefreshOperation, offlineFallback, setActionError]);

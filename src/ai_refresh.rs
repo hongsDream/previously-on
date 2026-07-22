@@ -32,22 +32,47 @@ pub enum AiRefreshCapabilityStatusV1 {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRefreshCapabilityReasonCodeV1 {
+    Ready,
+    SetupRequired,
+    AppServerUnsupported,
+    VerificationBlocked,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiRefreshCapabilityV1 {
     pub status: AiRefreshCapabilityStatusV1,
     pub profile_name: String,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub technical_details: Vec<String>,
+    pub reason_code: AiRefreshCapabilityReasonCodeV1,
     pub checked_at: chrono::DateTime<Utc>,
 }
 
 impl AiRefreshCapabilityV1 {
     fn new(status: AiRefreshCapabilityStatusV1, reason: Option<String>) -> Self {
+        let reason_code = match status {
+            AiRefreshCapabilityStatusV1::Ready => AiRefreshCapabilityReasonCodeV1::Ready,
+            AiRefreshCapabilityStatusV1::NeedsSetup => {
+                AiRefreshCapabilityReasonCodeV1::SetupRequired
+            }
+            AiRefreshCapabilityStatusV1::Unsupported => {
+                AiRefreshCapabilityReasonCodeV1::AppServerUnsupported
+            }
+            AiRefreshCapabilityStatusV1::Blocked => {
+                AiRefreshCapabilityReasonCodeV1::VerificationBlocked
+            }
+        };
         Self {
             status,
             profile_name: AI_REFRESH_PROFILE.to_string(),
-            reason: reason.map(|value| redact_excerpt(&value)),
+            technical_details: reason
+                .map(|value| vec![redact_excerpt(&value)])
+                .unwrap_or_default(),
+            reason_code,
             checked_at: Utc::now(),
         }
     }

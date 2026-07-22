@@ -667,7 +667,7 @@ fn git_repository() -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn import_verifies_returned_cwd_and_accepts_only_the_registered_worktree() {
+async fn import_accepts_linked_worktrees_but_rejects_cross_repository_and_invalid_paths() {
     use std::process::Command;
 
     use previously_on::app_server::{AppServerClient, ThreadImportDisposition};
@@ -730,8 +730,11 @@ IFS= read -r initialized
 IFS= read -r list
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"data":[{"cliVersion":"0.144.3","createdAt":5,"cwd":"__NESTED__","id":"thread-nested","preview":"wrong repository","sessionId":"session-nested","updatedAt":6},{"cliVersion":"0.144.3","createdAt":4,"cwd":"relative/repository","id":"thread-relative","preview":"relative","sessionId":"session-relative","updatedAt":5},{"cliVersion":"0.144.3","createdAt":3,"id":"thread-missing","preview":"missing cwd","sessionId":"session-missing","updatedAt":4},{"cliVersion":"0.144.3","createdAt":2,"cwd":"__LINKED__","id":"thread-linked","preview":"sibling worktree","sessionId":"session-linked","updatedAt":3},{"cliVersion":"0.144.3","createdAt":1,"cwd":"__REPO__","id":"thread-primary","preview":"registered worktree","sessionId":"session-primary","updatedAt":2}],"nextCursor":null}}'
 IFS= read -r read_thread
-case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-primary"'*) ;; *) exit 20 ;; esac
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-primary","cwd":"__REPO__","turns":[{"id":"turn-primary","items":[],"status":"completed"}]}}}'
+case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-linked"'*) ;; *) exit 20 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-linked","cwd":"__LINKED__","turns":[{"id":"turn-linked","items":[],"status":"completed"}]}}}'
+IFS= read -r read_thread
+case "$read_thread" in *'"method":"thread/read"'*'"threadId":"thread-primary"'*) ;; *) exit 21 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"thread":{"id":"thread-primary","cwd":"__REPO__","turns":[{"id":"turn-primary","items":[],"status":"completed"}]}}}'
 "#
     .replace("__NESTED__", nested.to_str().unwrap())
     .replace("__LINKED__", linked.to_str().unwrap())
@@ -742,9 +745,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-primary"
     let report = client.import_threads_report(&repo).await.unwrap();
 
     assert_eq!(report.coverage.status, CoverageStatus::Degraded);
-    assert_eq!(report.threads.len(), 1);
-    assert_eq!(report.threads[0].id, "thread-primary");
-    assert_eq!(report.threads[0].cwd, repo);
+    assert_eq!(report.threads.len(), 2);
+    assert_eq!(report.threads[0].id, "thread-linked");
+    assert_eq!(report.threads[0].cwd, linked);
+    assert_eq!(report.threads[1].id, "thread-primary");
+    assert_eq!(report.threads[1].cwd, repo);
     assert!(report
         .threads
         .iter()
@@ -761,10 +766,10 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-primary"
         notice.thread_id.as_deref() == Some("thread-relative")
             && notice.message.contains("non-absolute cwd")
     }));
-    assert!(report.notices.iter().any(|notice| {
-        notice.thread_id.as_deref() == Some("thread-linked")
-            && notice.message.contains("different Git worktree")
-    }));
+    assert!(!report
+        .notices
+        .iter()
+        .any(|notice| notice.thread_id.as_deref() == Some("thread-linked")));
     assert!(report
         .coverage
         .warnings
@@ -851,7 +856,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"thread":{"id":"thread-missing-
     assert!(report
         .notices
         .iter()
-        .any(|notice| notice.message.contains("different Git worktree")));
+        .any(|notice| notice.message.contains("different cwd")));
     assert!(report
         .notices
         .iter()

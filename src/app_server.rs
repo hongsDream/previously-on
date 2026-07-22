@@ -1310,7 +1310,7 @@ impl AppServerClient {
             )
         })?;
         let thread = self.read_thread(thread_id).await?;
-        validate_thread_read(&thread, thread_id, &registered)?;
+        validate_thread_read(&thread, thread_id, expected_worktree, &registered)?;
         Ok(thread)
     }
 
@@ -1535,7 +1535,10 @@ impl AppServerClient {
                 cwd.display()
             )
         })?;
-        let listed = self.list_threads_report(Some(cwd)).await?;
+        // `thread/list.cwd` is an exact working-directory filter. Listing without it lets one
+        // registered logical repository include its linked worktrees while the identity checks
+        // below still reject every other repository.
+        let listed = self.list_threads_report(None).await?;
         let mut imported = Vec::with_capacity(listed.threads.len());
         let mut notices = Vec::new();
         let mut coverages = vec![listed.coverage.clone()];
@@ -1584,7 +1587,8 @@ impl AppServerClient {
                     continue;
                 }
             };
-            if let Err(warning) = validate_thread_read(&thread, &summary.id, &registered_repository)
+            if let Err(warning) =
+                validate_thread_read(&thread, &summary.id, &summary.cwd, &registered_repository)
             {
                 let mut coverage = summary.coverage.clone();
                 degrade(
@@ -1786,15 +1790,13 @@ fn validate_thread_repository(cwd: &Path, registered: &RepositoryIdentity) -> Re
             "Codex App Server returned a cwd owned by a different logical Git repository; thread skipped"
         )
     }
-    if returned.root != registered.root {
-        bail!("Codex App Server returned a cwd owned by a different Git worktree; thread skipped")
-    }
     Ok(())
 }
 
 fn validate_thread_read(
     thread: &Value,
     expected_thread_id: &str,
+    expected_cwd: &Path,
     registered: &RepositoryIdentity,
 ) -> Result<()> {
     let returned_id = thread
@@ -1810,7 +1812,18 @@ fn validate_thread_read(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .context("Codex thread/read omitted cwd; thread skipped")?;
-    validate_thread_repository(Path::new(cwd), registered)
+    let cwd = Path::new(cwd);
+    validate_thread_repository(cwd, registered)?;
+    let expected = expected_cwd
+        .canonicalize()
+        .context("canonicalize Codex thread/list cwd; thread skipped")?;
+    let returned = cwd
+        .canonicalize()
+        .context("canonicalize Codex thread/read cwd; thread skipped")?;
+    if returned != expected {
+        bail!("Codex thread/read returned a different cwd; thread skipped")
+    }
+    Ok(())
 }
 
 pub async fn inspect_capabilities() -> AppServerCapabilityReport {
@@ -1859,7 +1872,13 @@ pub async fn collect_agent_lineage(
         let (output_summary, files, tests, read_degraded) =
             match client.read_thread(&summary.id).await {
                 Ok(thread)
-                    if validate_lineage_thread_read(&thread, &summary.id, &registered).is_ok() =>
+                    if validate_lineage_thread_read(
+                        &thread,
+                        &summary.id,
+                        &summary.cwd,
+                        &registered,
+                    )
+                    .is_ok() =>
                 {
                     let (output_summary, files, tests) = extract_agent_observation(&thread);
                     (output_summary, files, tests, false)
@@ -1956,9 +1975,10 @@ pub async fn collect_agent_lineage(
 fn validate_lineage_thread_read(
     thread: &Value,
     expected_thread_id: &str,
+    expected_cwd: &Path,
     registered: &RepositoryIdentity,
 ) -> Result<()> {
-    validate_thread_read(thread, expected_thread_id, registered)
+    validate_thread_read(thread, expected_thread_id, expected_cwd, registered)
 }
 
 fn extract_agent_observation(thread: &Value) -> (Option<String>, Vec<String>, Vec<String>) {

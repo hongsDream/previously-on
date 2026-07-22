@@ -74,7 +74,7 @@ impl FromStr for HookEvent {
 pub struct HookIngressConfig {
     pub socket_path: PathBuf,
     pub queue_path: PathBuf,
-    pub registered_repository: Option<PathBuf>,
+    pub registered_repositories: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -130,7 +130,7 @@ pub fn run_hook(
     output: &mut dyn Write,
 ) -> Result<()> {
     let envelope = capture_event(event, input)?;
-    if !is_registered_repository(&envelope, config.registered_repository.as_deref()) {
+    if !is_registered_repository(&envelope, &config.registered_repositories) {
         serde_json::to_writer(&mut *output, &json!({}))?;
         output.write_all(b"\n")?;
         return Ok(());
@@ -543,13 +543,12 @@ fn read_daemon_ack(reader: &mut dyn BufRead) -> Result<HookAckV1> {
     }
 }
 
-fn is_registered_repository(event: &EventEnvelopeV1, registered: Option<&Path>) -> bool {
-    let Some(registered) = registered else {
-        return false;
-    };
-    crate::git::repository_identity(registered)
-        .map(|identity| identity.id == event.repository_id)
-        .unwrap_or(false)
+fn is_registered_repository(event: &EventEnvelopeV1, registered: &[PathBuf]) -> bool {
+    registered.iter().any(|root| {
+        crate::git::repository_identity(root)
+            .map(|identity| identity.id == event.repository_id)
+            .unwrap_or(false)
+    })
 }
 
 fn validate_hook_storage(config: &HookIngressConfig) -> Result<()> {

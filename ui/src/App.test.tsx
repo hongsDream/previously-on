@@ -191,7 +191,8 @@ describe('PreviouslyOn review workspace', () => {
     data.aiRefreshCapability = {
       status,
       profileName: 'previously-input-only',
-      reason: null,
+      reasonCode: status === 'ready' ? 'ready' : status === 'needs_setup' ? 'setup_required' : status === 'unsupported' ? 'app_server_unsupported' : 'verification_blocked',
+      technicalDetails: [],
       checkedAt: status === 'ready' ? '2025-05-21T00:00:00Z' : null,
     };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
@@ -240,17 +241,23 @@ describe('PreviouslyOn review workspace', () => {
 
   it.each(['needs_setup', 'unsupported', 'blocked'] as const)('keeps Refresh facts disabled when capability is %s', async (status) => {
     const data = liveWorkspace();
-    data.aiRefreshCapability = { status, profileName: 'previously-input-only', reason: `${status} reason` };
+    data.aiRefreshCapability = {
+      status,
+      profileName: 'previously-input-only',
+      reasonCode: status === 'needs_setup' ? 'setup_required' : status === 'unsupported' ? 'app_server_unsupported' : 'verification_blocked',
+      technicalDetails: [`${status} reason`],
+    };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
     render(<App />);
 
     expect(await screen.findByRole('button', { name: 'Refresh facts' })).toBeDisabled();
+    expect(screen.getByText('The required input-only permission profile has not been verified.')).toBeInTheDocument();
     expect(screen.getByText(`${status} reason`)).toBeInTheDocument();
   });
 
   it('polls a user-started fact refresh and supports edit, accept, and reject review without creating Evidence', async () => {
     const data = liveWorkspace();
-    data.aiRefreshCapability = { status: 'ready', profileName: 'previously-input-only', reason: null };
+    data.aiRefreshCapability = { status: 'ready', profileName: 'previously-input-only', reasonCode: 'ready', technicalDetails: [] };
     data.factRefreshOperations = [];
     const pending = factRefreshOperation(data.tasks[0].id, 'pending');
     const completed = factRefreshOperation(data.tasks[0].id, 'completed');
@@ -315,7 +322,7 @@ describe('PreviouslyOn review workspace', () => {
 
   it('aborts an in-flight fact refresh poll when the task surface unmounts', async () => {
     const data = liveWorkspace();
-    data.aiRefreshCapability = { status: 'ready', profileName: 'previously-input-only', reason: null };
+    data.aiRefreshCapability = { status: 'ready', profileName: 'previously-input-only', reasonCode: 'ready', technicalDetails: [] };
     data.factRefreshOperations = [factRefreshOperation(data.tasks[0].id, 'pending')];
     let pollSignal: AbortSignal | undefined;
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -634,23 +641,19 @@ describe('PreviouslyOn review workspace', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const user = userEvent.setup();
-    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'new-repo is connected' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Regression contracts' })).toBeInTheDocument();
     expect(screen.getByText('Readiness unavailable')).toBeInTheDocument();
     expect(screen.getByText(/Start one captured Codex session/)).toBeInTheDocument();
-    expect(screen.getByText("previously run codex --repo '/tmp/My Repo' --")).toBeInTheDocument();
-    expect(screen.getByText('previously doctor')).toBeInTheDocument();
+    expect(screen.getByText('Work in Codex Desktop')).toBeInTheDocument();
+    expect(screen.getByText('Import from this device')).toBeInTheDocument();
+    expect(screen.getByText(/Open \/tmp\/My Repo in Codex Desktop/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Preview context pack' })).toBeDisabled();
     expect(screen.getAllByRole('button', { name: 'Evidence' }).every((button) => button.hasAttribute('disabled'))).toBe(true);
     expect(screen.queryByText(/sample workspace/)).not.toBeInTheDocument();
 
-    const copyRun = screen.getByRole('button', { name: 'Copy Start a captured Codex session' });
-    copyRun.focus();
-    await user.keyboard('{Enter}');
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("previously run codex --repo '/tmp/My Repo' --"));
     await user.click(screen.getByRole('button', { name: 'Refresh status' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
@@ -722,7 +725,7 @@ describe('PreviouslyOn review workspace', () => {
 
     render(<App />);
 
-    expect(await screen.findByRole('heading', { name: 'Connect Codex to your repository' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Connect Codex to a project' })).toBeInTheDocument();
     expect(screen.getAllByText('Not registered').length).toBeGreaterThan(0);
     expect(screen.queryByText('Connected')).not.toBeInTheDocument();
     expect(screen.queryByText('Ready to complete')).not.toBeInTheDocument();
@@ -755,7 +758,8 @@ describe('PreviouslyOn review workspace', () => {
 
     await user.click(screen.getByRole('button', { name: 'I restarted Codex · Continue' }));
     expect(await screen.findByRole('heading', { name: 'My Repo is connected' })).toBeInTheDocument();
-    expect(screen.getByText("previously run codex --repo '/tmp/My Repo' --")).toBeInTheDocument();
+    expect(screen.getByText('Work in Codex Desktop')).toBeInTheDocument();
+    expect(screen.getByText('Import from this device')).toBeInTheDocument();
   });
 
   it('keeps first-run setup recoverable when the repository cannot be registered', async () => {
@@ -780,18 +784,20 @@ describe('PreviouslyOn review workspace', () => {
     data.contextPacks = {};
     vi.stubGlobal('fetch', vi.fn().mockImplementation((input) => Promise.resolve(
       String(input) === '/api/setup/codex'
-        ? { ok: false, status: 400, json: async () => ({ error: 'repository is not a Git work tree' }) }
+        ? { ok: false, status: 400, json: async () => ({ errorCode: 'invalid_request', technicalDetails: ['repository is not a Git work tree'] }) }
         : { ok: true, json: async () => data },
     )));
     const user = userEvent.setup();
 
     render(<App />);
-    await screen.findByRole('heading', { name: 'Connect Codex to your repository' });
+    await screen.findByRole('heading', { name: 'Connect Codex to a project' });
     await user.type(screen.getByLabelText('Repository path'), '/tmp/not-a-repo');
     await user.click(screen.getByRole('checkbox', { name: /I approve updating my local Codex configuration/ }));
     await user.click(screen.getByRole('button', { name: 'Connect Codex' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('repository is not a Git work tree');
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('The request could not be completed because its input was invalid.');
+    expect(screen.getByText('repository is not a Git work tree')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Connect Codex' })).toBeEnabled();
   });
 
