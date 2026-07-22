@@ -385,7 +385,31 @@ fn consented_continuation_runs_once_and_opens_the_official_codex_deep_link() {
 
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("previously.sqlite3");
-    Store::open(&database).unwrap();
+    let store = Store::open(&database).unwrap();
+    let now = Utc::now();
+    store
+        .upsert_repository(&RepositoryV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "repo-1".into(),
+            path: "repo-1".into(),
+            remote_url: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    store
+        .upsert_task(&TaskV1 {
+            schema_version: SCHEMA_VERSION_V1,
+            id: "task-1".into(),
+            repository_id: "repo-1".into(),
+            title: "Continue safely".into(),
+            goal: None,
+            lifecycle: TaskLifecycle::Active,
+            branch: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
     let worker_input = temp.path().join("worker-input.json");
     let opened_link = temp.path().join("opened-link.txt");
     let worker = temp.path().join("fake-worker");

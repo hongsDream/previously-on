@@ -68,6 +68,11 @@ pub enum Commands {
         #[arg(long)]
         repo: PathBuf,
     },
+    /// Stop capture for one logical repository while preserving its local history.
+    Unregister {
+        #[arg(long)]
+        repo: PathBuf,
+    },
     /// Remove a PreviouslyOn integration without touching user-owned config.
     Uninstall {
         #[command(subcommand)]
@@ -205,15 +210,17 @@ impl AppConfig {
         HookIngressConfig {
             socket_path: self.socket_path.clone(),
             queue_path: self.queue_path.clone(),
-            registered_repository: setup::read_manifest(&self.setup_paths().manifest_path())
+            registered_repositories: setup::read_manifest(&self.setup_paths().manifest_path())
                 .ok()
-                .map(|manifest| manifest.repository),
+                .map(|manifest| {
+                    manifest
+                        .projects
+                        .into_iter()
+                        .flat_map(|project| project.known_worktree_roots)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
-    }
-
-    pub fn repository_id(&self) -> Result<String> {
-        let repository = setup::read_manifest(&self.setup_paths().manifest_path())?.repository;
-        Ok(crate::git::repository_identity(repository)?.id)
     }
 }
 
@@ -239,7 +246,11 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
                 serde_json::to_string_pretty(&json!({
                     "dataDir": config.data_dir,
                     "database": store.health()?,
-                    "repository": manifest.map(|manifest| manifest.repository),
+                    "projects": manifest.as_ref().map(|manifest| &manifest.projects),
+                    "repository": manifest.as_ref().and_then(|manifest| {
+                        (manifest.projects.len() == 1)
+                            .then(|| &manifest.projects[0].primary_root)
+                    }),
                     "queuedEvents": queue_line_count(&config.queue_path)?
                 }))?
             );
@@ -283,6 +294,10 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
                 Ok(())
             })?;
             println!("purged {}", repository.root.display());
+        }
+        Commands::Unregister { repo } => {
+            let result = setup::unregister_repository(&config.setup_paths(), &repo)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Uninstall {
             target: UninstallTarget::Codex,
@@ -333,8 +348,11 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Commands::Daemon => crate::hook::run_daemon(config.data_dir).await?,
         Commands::Mcp => {
-            let repository_id = config.repository_id()?;
-            let backend = crate::mcp::StoreMcpBackend::open(&config.database_path, repository_id)?;
+            let manifest = setup::read_manifest(&config.setup_paths().manifest_path())?;
+            let backend = crate::mcp::StoreMcpBackend::open_registry(
+                &config.database_path,
+                &manifest.projects,
+            )?;
             crate::mcp::run_stdio(&backend, tokio::io::stdin(), tokio::io::stdout()).await?;
         }
         Commands::AutoRollover => {
@@ -363,12 +381,13 @@ async fn diagnostics(
 ) -> Result<crate::diagnostics::PilotDiagnosticsV1> {
     let requested = crate::git::repository_identity(repo)?;
     let manifest = setup::read_manifest(&config.setup_paths().manifest_path())?;
-    let registered = crate::git::repository_identity(&manifest.repository)?;
-    if requested.id != registered.id {
-        bail!("diagnostics repository does not match the registered repository");
-    }
-    let setup_at = DateTime::parse_from_rfc3339(&manifest.installed_at)
-        .context("parse setup installation timestamp")?
+    let project = manifest
+        .projects
+        .iter()
+        .find(|project| project.repository_id == requested.id)
+        .context("diagnostics repository is not registered")?;
+    let setup_at = DateTime::parse_from_rfc3339(&project.registered_at)
+        .context("parse project registration timestamp")?
         .with_timezone(&Utc);
     let store = Store::open_read_only(&config.database_path)?;
     let sessions = store.list_sessions(Some(&requested.id))?;
@@ -553,8 +572,19 @@ async fn doctor(config: &AppConfig) -> DoctorReport {
     checks.push(match setup {
         Ok(manifest) => DoctorCheck {
             name: "repository registration",
-            ok: manifest.repository.exists(),
-            detail: manifest.repository.display().to_string(),
+            ok: !manifest.projects.is_empty()
+                && manifest.projects.iter().all(|project| {
+                    project
+                        .known_worktree_roots
+                        .iter()
+                        .any(|root| root.exists())
+                }),
+            detail: manifest
+                .projects
+                .iter()
+                .map(|project| project.primary_root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
         },
         Err(error) => DoctorCheck {
             name: "repository registration",

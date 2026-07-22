@@ -132,7 +132,13 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
     };
 
     let app = Router::new()
-        .route("/api/bootstrap", get(bootstrap))
+        .route("/api/bootstrap", get(bootstrap_route))
+        .route("/api/overview", get(overview))
+        .route(
+            "/api/repositories",
+            get(list_repositories).post(setup_codex),
+        )
+        .route("/api/repositories/unregister", post(unregister_repository))
         .route("/api/setup/codex", post(setup_codex))
         .route("/api/export", get(export_repository))
         .route("/api/repository", delete(purge_repository))
@@ -185,12 +191,31 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
         .context("serve PreviouslyOn UI")
 }
 
+#[cfg(test)]
 async fn bootstrap(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<bootstrap::BootstrapResponseV1>> {
     authorize_api_read(&state, &headers)?;
-    Ok(Json(bootstrap::build_bootstrap(&state).await?))
+    Ok(Json(bootstrap::build_bootstrap(&state, None).await?))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepositoryQuery {
+    #[serde(default)]
+    repository_id: Option<String>,
+}
+
+async fn bootstrap_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<RepositoryQuery>,
+) -> ApiResult<Json<bootstrap::BootstrapResponseV1>> {
+    authorize_api_read(&state, &headers)?;
+    Ok(Json(
+        bootstrap::build_bootstrap(&state, query.repository_id.as_deref()).await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,7 +259,7 @@ async fn setup_codex(
         return Err(ApiError::bad_request("repository path must be absolute"));
     }
     let install_paths = setup_paths.clone();
-    let manifest =
+    let _manifest =
         tokio::task::spawn_blocking(move || install_codex_from_ui(&install_paths, &repository))
             .await
             .map_err(ApiError::internal)??;
@@ -242,7 +267,11 @@ async fn setup_codex(
 
     Ok(Json(SetupCodexResponse {
         ok: true,
-        repository_path: manifest.repository.to_string_lossy().into_owned(),
+        repository_path: crate::git::repository_identity(repository_path)
+            .map_err(ApiError::internal)?
+            .root
+            .to_string_lossy()
+            .into_owned(),
         restart_required: true,
         doctor,
     }))
@@ -251,14 +280,114 @@ async fn setup_codex(
 fn install_codex_from_ui(
     setup_paths: &crate::setup::SetupPaths,
     repository: &std::path::Path,
-) -> ApiResult<crate::setup::SetupManifestV1> {
-    if std::fs::symlink_metadata(setup_paths.manifest_path()).is_ok() {
-        return Err(ApiError::conflict(
-            "a repository is already registered; review it before changing setup",
-        ));
-    }
+) -> ApiResult<crate::setup::SetupManifestV2> {
     crate::setup::install_codex_with_options(setup_paths, repository, false)
         .map_err(|error| ApiError::bad_request(error.to_string()))
+}
+
+fn registered_projects(state: &AppState) -> ApiResult<Vec<crate::setup::SetupProjectV2>> {
+    let path = state.data_dir.join("setup-manifest.json");
+    match crate::setup::read_manifest(&path) {
+        Ok(manifest) => Ok(manifest.projects),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(ApiError::internal(error)),
+    }
+}
+
+fn registered_repository_by_id(
+    state: &AppState,
+    repository_id: &str,
+) -> ApiResult<crate::domain::RepositoryV1> {
+    let project = registered_projects(state)?
+        .into_iter()
+        .find(|project| project.repository_id == repository_id)
+        .ok_or_else(|| ApiError::not_found("repository is not registered"))?;
+    let registered_at = chrono::DateTime::parse_from_rfc3339(&project.registered_at)
+        .map_err(ApiError::internal)?
+        .with_timezone(&Utc);
+    Ok(crate::domain::RepositoryV1 {
+        schema_version: crate::domain::SCHEMA_VERSION_V1,
+        id: project.repository_id,
+        path: project.primary_root.to_string_lossy().into_owned(),
+        remote_url: None,
+        created_at: registered_at,
+        updated_at: registered_at,
+    })
+}
+
+fn resolve_registered_repository(
+    state: &AppState,
+    repository_id: Option<&str>,
+) -> ApiResult<crate::domain::RepositoryV1> {
+    if let Some(repository_id) = repository_id {
+        return registered_repository_by_id(state, repository_id);
+    }
+    let projects = registered_projects(state)?;
+    match projects.as_slice() {
+        [] => Err(ApiError::not_found("no repository is registered")),
+        [project] => registered_repository_by_id(state, &project.repository_id),
+        _ => Err(ApiError::conflict(
+            "repositoryId is required when multiple repositories are registered",
+        )),
+    }
+}
+
+async fn list_repositories(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    authorize_api_read(&state, &headers)?;
+    Ok(Json(redact_value(&json!({
+        "repositories": registered_projects(&state)?
+    }))))
+}
+
+async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    authorize_api_read(&state, &headers)?;
+    let mut repositories = Vec::new();
+    for project in registered_projects(&state)? {
+        let task_count = state
+            .store
+            .list_tasks(Some(&project.repository_id))
+            .map_err(ApiError::internal)?
+            .len();
+        repositories.push(json!({
+            "repositoryId": project.repository_id,
+            "primaryRoot": project.primary_root,
+            "knownWorktreeRoots": project.known_worktree_roots,
+            "registeredAt": project.registered_at,
+            "taskCount": task_count
+        }));
+    }
+    Ok(Json(redact_value(&json!({ "repositories": repositories }))))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UnregisterRepositoryRequest {
+    repository_id: String,
+}
+
+async fn unregister_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UnregisterRepositoryRequest>,
+) -> ApiResult<Json<Value>> {
+    authorize_mutation(&state, &headers)?;
+    if request.repository_id.trim().is_empty() {
+        return Err(ApiError::bad_request("repositoryId is required"));
+    }
+    registered_repository_by_id(&state, &request.repository_id)?;
+    let paths = server_setup_paths(&state)?;
+    let result = crate::setup::unregister_repository_id(&paths, &request.repository_id)
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "ok": true, "result": result })))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -413,17 +542,13 @@ async fn review_fact_refresh_candidate(
 async fn export_repository(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<RepositoryQuery>,
 ) -> ApiResult<Json<Value>> {
     authorize_api_read(&state, &headers)?;
-    let repository_id = state
-        .store
-        .list_repositories()
-        .map_err(ApiError::internal)?
-        .first()
-        .map(|repository| repository.id.clone());
+    let repository = resolve_registered_repository(&state, query.repository_id.as_deref())?;
     let export = state
         .store
-        .export_json(repository_id.as_deref())
+        .export_json(Some(&repository.id))
         .map_err(ApiError::internal)?;
     Ok(Json(redact_value(&export)))
 }
@@ -431,15 +556,10 @@ async fn export_repository(
 async fn purge_repository(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<RepositoryQuery>,
 ) -> ApiResult<Json<Value>> {
     authorize_mutation(&state, &headers)?;
-    let repository = state
-        .store
-        .list_repositories()
-        .map_err(ApiError::internal)?
-        .first()
-        .cloned()
-        .ok_or_else(|| ApiError::not_found("no registered repository data found"))?;
+    let repository = resolve_registered_repository(&state, query.repository_id.as_deref())?;
     let socket_path = state.data_dir.join("previously.sock");
     let _ = crate::hook::stop_daemon(&socket_path);
     let queue_path = state.data_dir.join("queue/events.jsonl");
@@ -650,6 +770,8 @@ async fn revalidate_fact(
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ContractCandidateDraft {
+    #[serde(default)]
+    repository_id: Option<String>,
     title: String,
     invariant: String,
     impact_selectors: Vec<ImpactSelectorGroupV1>,
@@ -668,7 +790,7 @@ async fn create_contract_candidate(
     Json(draft): Json<ContractCandidateDraft>,
 ) -> ApiResult<Json<Value>> {
     authorize_mutation(&state, &headers)?;
-    let repository = primary_repository(&state)?;
+    let repository = resolve_registered_repository(&state, draft.repository_id.as_deref())?;
     let now = Utc::now();
     let draft = redact_candidate_draft(draft)?;
     let evidence_sha256 = candidate_evidence_sha256(&draft).map_err(ApiError::internal)?;
@@ -705,16 +827,23 @@ async fn update_contract_candidate(
     Json(draft): Json<ContractCandidateDraft>,
 ) -> ApiResult<Json<Value>> {
     authorize_mutation(&state, &headers)?;
-    let repository = primary_repository(&state)?;
     let stored = state
         .store
         .get_regression_candidate(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("Contract candidate not found: {id}")))?;
     let mut candidate = stored;
-    if candidate.repository_id != repository.id
-        || candidate.status != RegressionCandidateStatusV1::Pending
+    let repository = registered_repository_by_id(&state, &candidate.repository_id)?;
+    if draft
+        .repository_id
+        .as_deref()
+        .is_some_and(|repository_id| repository_id != candidate.repository_id)
     {
+        return Err(ApiError::bad_request(
+            "candidate repositoryId cannot be changed",
+        ));
+    }
+    if candidate.status != RegressionCandidateStatusV1::Pending {
         return Err(ApiError::bad_request(
             "only pending candidates from this repository can be edited",
         ));
@@ -749,16 +878,14 @@ async fn approve_contract_candidate(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     authorize_mutation(&state, &headers)?;
-    let repository = primary_repository(&state)?;
     let stored = state
         .store
         .get_regression_candidate(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("Contract candidate not found: {id}")))?;
     let mut candidate = stored;
-    if candidate.repository_id != repository.id
-        || candidate.status != RegressionCandidateStatusV1::Pending
-    {
+    let repository = registered_repository_by_id(&state, &candidate.repository_id)?;
+    if candidate.status != RegressionCandidateStatusV1::Pending {
         return Err(ApiError::bad_request(
             "only pending candidates from this repository can be approved",
         ));
@@ -809,7 +936,7 @@ async fn supersede_contract(
     Json(update): Json<ContractSupersedeRequest>,
 ) -> ApiResult<Json<Value>> {
     authorize_mutation(&state, &headers)?;
-    let repository = primary_repository(&state)?;
+    let repository = contract_repository_for_id(&state, &id)?;
     if id == update.superseded_by {
         return Err(ApiError::bad_request("a Contract cannot supersede itself"));
     }
@@ -838,14 +965,30 @@ async fn supersede_contract(
     Ok(Json(json!({ "ok": true, "contract": contract })))
 }
 
-fn primary_repository(state: &AppState) -> ApiResult<crate::domain::RepositoryV1> {
-    state
-        .store
-        .list_repositories()
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::not_found("no registered repository data found"))
+fn contract_repository_for_id(
+    state: &AppState,
+    contract_id: &str,
+) -> ApiResult<crate::domain::RepositoryV1> {
+    let mut matched = Vec::new();
+    for project in registered_projects(state)? {
+        if !project.primary_root.exists() {
+            continue;
+        }
+        let contracts =
+            crate::contracts::load_contracts(&project.primary_root).map_err(ApiError::internal)?;
+        if contracts.iter().any(|contract| contract.id == contract_id) {
+            matched.push(project.repository_id);
+        }
+    }
+    match matched.as_slice() {
+        [repository_id] => registered_repository_by_id(state, repository_id),
+        [] => Err(ApiError::not_found(format!(
+            "Contract not found: {contract_id}"
+        ))),
+        _ => Err(ApiError::conflict(
+            "Contract id is ambiguous across registered repositories",
+        )),
+    }
 }
 
 fn redact_candidate_draft(draft: ContractCandidateDraft) -> ApiResult<ContractCandidateDraft> {
@@ -855,7 +998,12 @@ fn redact_candidate_draft(draft: ContractCandidateDraft) -> ApiResult<ContractCa
 }
 
 fn candidate_evidence_sha256(draft: &ContractCandidateDraft) -> Result<String> {
-    let bytes = serde_json::to_vec(draft)?;
+    let bytes = serde_json::to_vec(&json!({
+        "title": draft.title,
+        "invariant": draft.invariant,
+        "impactSelectors": draft.impact_selectors,
+        "requiredTests": draft.required_tests
+    }))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
@@ -1543,7 +1691,11 @@ mod tests {
         assert_eq!(payload["repository"]["connected"], true);
         assert_eq!(
             payload["repository"]["path"],
-            repository.to_string_lossy().as_ref()
+            repository
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(payload["tasks"], json!([]));
         assert_eq!(payload["graphSummary"]["nodeCount"], 0);
@@ -1669,7 +1821,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_setup_reuses_journaled_install_and_refuses_an_existing_registration() {
+    fn ui_setup_reuses_journaled_install_and_is_idempotent_for_an_existing_registration() {
         let temp = TempDir::new().unwrap();
         let repository = temp.path().join("My Repo");
         std::fs::create_dir(&repository).unwrap();
@@ -1681,7 +1833,11 @@ mod tests {
         };
 
         let manifest = install_codex_from_ui(&setup_paths, &repository).unwrap();
-        assert_eq!(manifest.repository, repository.canonicalize().unwrap());
+        assert_eq!(manifest.projects.len(), 1);
+        assert_eq!(
+            manifest.projects[0].primary_root,
+            repository.canonicalize().unwrap()
+        );
         assert!(std::fs::read_to_string(setup_paths.hooks_path())
             .unwrap()
             .contains(crate::setup::MANAGED_ID));
@@ -1690,8 +1846,8 @@ mod tests {
             .contains(crate::setup::MANAGED_ID));
         assert!(setup_paths.manifest_path().exists());
 
-        let error = install_codex_from_ui(&setup_paths, &repository).unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
+        let second = install_codex_from_ui(&setup_paths, &repository).unwrap();
+        assert_eq!(second.projects, manifest.projects);
     }
 
     #[test]
@@ -2237,6 +2393,7 @@ mod tests {
         std::fs::write(repository.join("src/lib.rs"), "pub fn stable() {}\n").unwrap();
         git(&repository, &["add", "."]);
         git(&repository, &["commit", "-qm", "initial"]);
+        register_test_repository(temp.path(), &repository);
 
         let identity = crate::git::repository_identity(&repository).unwrap();
         let store = Store::open(temp.path().join("previously.sqlite3")).unwrap();
@@ -2257,6 +2414,7 @@ mod tests {
             data_dir: Arc::new(temp.path().to_path_buf()),
         };
         let draft = |title: &str| ContractCandidateDraft {
+            repository_id: None,
             title: title.to_string(),
             invariant: "OPENAI_API_KEY=sk-proj-contract-ui-secret must never be stored".to_string(),
             impact_selectors: vec![ImpactSelectorGroupV1 {
@@ -2452,6 +2610,7 @@ mod tests {
             State(state),
             authorized_headers(),
             Json(ContractCandidateDraft {
+                repository_id: None,
                 title: "Keep auth stable".into(),
                 invariant: "Auth behavior remains stable".into(),
                 impact_selectors: vec![ImpactSelectorGroupV1 {

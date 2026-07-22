@@ -163,7 +163,7 @@ fn hook_ignores_work_outside_the_registered_repository() {
     let config = HookIngressConfig {
         socket_path: temp.path().join("previously.sock"),
         queue_path: temp.path().join("queue/events.jsonl"),
-        registered_repository: Some(registered),
+        registered_repositories: vec![registered],
     };
     let mut input = Cursor::new(
         br#"{"session_id":"session-outside","cwd":"/tmp/unregistered-repository","prompt":"do not capture"}"#,
@@ -228,7 +228,7 @@ fn stop_hook_waits_for_large_slow_contract_ack_instead_of_bypassing_the_block() 
     let config = HookIngressConfig {
         socket_path,
         queue_path: temp.path().join("queue/events.jsonl"),
-        registered_repository: Some(registered.clone()),
+        registered_repositories: vec![registered.clone()],
     };
     let mut input = Cursor::new(
         serde_json::to_vec(&serde_json::json!({

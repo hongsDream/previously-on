@@ -723,7 +723,7 @@ fn setup_fails_closed_without_mutations_for_invalid_existing_manifests() {
         ("malformed", b"{not-json".to_vec(), "parse setup manifest"),
         (
             "unsupported",
-            valid_manifest(2, MANAGED_ID),
+            valid_manifest(3, MANAGED_ID),
             "unsupported or foreign setup manifest",
         ),
         (

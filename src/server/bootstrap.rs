@@ -262,12 +262,28 @@ struct BootstrapSessionV1 {
     excluded: bool,
 }
 
-pub(super) async fn build_bootstrap(state: &AppState) -> ApiResult<BootstrapResponseV1> {
+pub(super) async fn build_bootstrap(
+    state: &AppState,
+    repository_id: Option<&str>,
+) -> ApiResult<BootstrapResponseV1> {
     let repositories = state
         .store
         .list_repositories()
         .map_err(ApiError::internal)?;
-    let configured_repository = setup_manifest_repository(state);
+    let projects = super::registered_projects(state)?;
+    let configured_repository = match (repository_id, projects.len()) {
+        (Some(repository_id), _) => Some(super::registered_repository_by_id(state, repository_id)?),
+        (None, 0) => None,
+        (None, 1) => Some(super::registered_repository_by_id(
+            state,
+            &projects[0].repository_id,
+        )?),
+        (None, _) => {
+            return Err(ApiError::conflict(
+                "repositoryId is required when multiple repositories are registered",
+            ))
+        }
+    };
     let stored_repository = configured_repository.as_ref().and_then(|registered| {
         repositories
             .iter()
@@ -927,25 +943,6 @@ fn bootstrap_context_usage(usage: &crate::domain::ContextUsageV1) -> BootstrapCo
         model_context_window: usage.model_context_window,
         observed_at: usage.observed_at.map(iso),
     }
-}
-
-fn setup_manifest_repository(state: &AppState) -> Option<crate::domain::RepositoryV1> {
-    let manifest = crate::setup::read_manifest(&state.data_dir.join("setup-manifest.json")).ok()?;
-    let path = manifest.repository.to_string_lossy().into_owned();
-    let id = crate::git::repository_identity(&manifest.repository)
-        .map(|identity| identity.id)
-        .unwrap_or_else(|_| path.clone());
-    let installed_at = chrono::DateTime::parse_from_rfc3339(&manifest.installed_at)
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
-    Some(crate::domain::RepositoryV1 {
-        schema_version: crate::domain::SCHEMA_VERSION_V1,
-        id,
-        path,
-        remote_url: None,
-        created_at: installed_at,
-        updated_at: installed_at,
-    })
 }
 
 #[cfg(test)]

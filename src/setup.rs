@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 use toml_edit::{value, Array, DocumentMut, Item, Table};
 
 pub const MANAGED_ID: &str = "previously-on-v1";
-const MANIFEST_VERSION: u32 = 1;
+const MANIFEST_VERSION_V1: u32 = 1;
+const MANIFEST_VERSION: u32 = 2;
 const JOURNAL_VERSION: u32 = 1;
 const HOOK_EVENTS: [&str; 6] = [
     "SessionStart",
@@ -74,6 +75,39 @@ pub struct SetupManifestV1 {
     pub ai_refresh_profile_sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupProjectV2 {
+    pub repository_id: String,
+    pub primary_root: PathBuf,
+    pub known_worktree_roots: Vec<PathBuf>,
+    pub registered_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupManifestV2 {
+    pub version: u32,
+    pub managed_id: String,
+    pub installed_at: String,
+    pub projects: Vec<SetupProjectV2>,
+    pub executable: PathBuf,
+    pub hooks_path: PathBuf,
+    pub config_path: PathBuf,
+    pub hooks_backup: BackupRecord,
+    pub config_backup: BackupRecord,
+    pub installed_hooks_sha256: String,
+    pub installed_config_sha256: String,
+    #[serde(default)]
+    pub hooks_feature_before: Option<bool>,
+    #[serde(default)]
+    pub hooks_feature_managed: bool,
+    #[serde(default)]
+    pub ai_refresh_enabled: bool,
+    #[serde(default)]
+    pub ai_refresh_profile_sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupRecord {
@@ -116,7 +150,15 @@ pub struct UninstallResult {
     pub warnings: Vec<String>,
 }
 
-pub fn install_codex(paths: &SetupPaths, repository: &Path) -> Result<SetupManifestV1> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterResult {
+    pub repository_id: String,
+    pub removed: bool,
+    pub history_preserved: bool,
+}
+
+pub fn install_codex(paths: &SetupPaths, repository: &Path) -> Result<SetupManifestV2> {
     install_codex_with_options(paths, repository, false)
 }
 
@@ -124,7 +166,7 @@ pub fn install_codex_with_options(
     paths: &SetupPaths,
     repository: &Path,
     enable_ai_refresh: bool,
-) -> Result<SetupManifestV1> {
+) -> Result<SetupManifestV2> {
     let repository = repository
         .canonicalize()
         .with_context(|| format!("repository does not exist: {}", repository.display()))?;
@@ -147,7 +189,7 @@ pub fn install_codex_with_options(
     // no-op rather than being silently treated as a first install.
     let validated_manifest = read_optional_manifest(&paths.manifest_path())?;
     if let Some(manifest) = validated_manifest.as_ref() {
-        validate_manifest_for_install(manifest, paths, &repository)?;
+        validate_manifest_for_install(manifest, paths)?;
     }
     let initial_config = read_optional_string(&paths.config_path())?.unwrap_or_default();
     let effective_ai_refresh = enable_ai_refresh
@@ -159,7 +201,7 @@ pub fn install_codex_with_options(
         effective_ai_refresh,
         validated_manifest.as_ref(),
     )?;
-    let repository_identity = crate::git::repository_identity(&repository).ok();
+    let repository_identity = setup_repository_identity(&repository)?;
 
     ensure_trusted_data_dir(&paths.data_dir)?;
     fs::create_dir_all(&paths.codex_home)
@@ -168,7 +210,7 @@ pub fn install_codex_with_options(
     crate::hook::ensure_reserve_file(&paths.data_dir.join("queue/events.jsonl"))?;
     let existing_manifest = read_optional_manifest(&paths.manifest_path())?;
     if let Some(manifest) = existing_manifest.as_ref() {
-        validate_manifest_for_install(manifest, paths, &repository)?;
+        validate_manifest_for_install(manifest, paths)?;
     }
 
     let hooks_backup = existing_manifest
@@ -226,11 +268,41 @@ pub fn install_codex_with_options(
         None
     };
 
-    let manifest = SetupManifestV1 {
+    let now = Utc::now().to_rfc3339();
+    let mut projects = existing_manifest
+        .as_ref()
+        .map(|manifest| manifest.projects.clone())
+        .unwrap_or_default();
+    if let Some(project) = projects
+        .iter_mut()
+        .find(|project| project.repository_id == repository_identity.id)
+    {
+        if !project
+            .known_worktree_roots
+            .contains(&repository_identity.root)
+        {
+            project
+                .known_worktree_roots
+                .push(repository_identity.root.clone());
+            project.known_worktree_roots.sort();
+        }
+    } else {
+        projects.push(SetupProjectV2 {
+            repository_id: repository_identity.id.clone(),
+            primary_root: repository_identity.root.clone(),
+            known_worktree_roots: vec![repository_identity.root.clone()],
+            registered_at: now.clone(),
+        });
+        projects.sort_by(|left, right| left.repository_id.cmp(&right.repository_id));
+    }
+    let manifest = SetupManifestV2 {
         version: MANIFEST_VERSION,
         managed_id: MANAGED_ID.to_string(),
-        installed_at: Utc::now().to_rfc3339(),
-        repository,
+        installed_at: existing_manifest
+            .as_ref()
+            .map(|manifest| manifest.installed_at.clone())
+            .unwrap_or(now),
+        projects,
         executable: paths.executable.clone(),
         hooks_path: paths.hooks_path(),
         config_path: paths.config_path(),
@@ -259,10 +331,56 @@ pub fn install_codex_with_options(
         ],
     };
     persist_and_apply_journal(paths, &journal)?;
-    if let Some(identity) = repository_identity {
-        crate::store::reactivate_repository(&paths.data_dir, &identity.id)?;
-    }
+    crate::store::reactivate_repository(&paths.data_dir, &repository_identity.id)?;
     Ok(manifest)
+}
+
+fn setup_repository_identity(repository: &Path) -> Result<crate::git::RepositoryIdentity> {
+    match crate::git::repository_identity(repository) {
+        Ok(identity) => Ok(identity),
+        Err(_error) if repository.join(".git").is_dir() => {
+            let root = repository.canonicalize()?;
+            let common_dir = root.join(".git").canonicalize()?;
+            Ok(crate::git::RepositoryIdentity {
+                id: common_dir.to_string_lossy().into_owned(),
+                root,
+                common_dir,
+                remote_url: None,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn unregister_repository(paths: &SetupPaths, repository: &Path) -> Result<UnregisterResult> {
+    let identity = crate::git::repository_identity(repository)?;
+    unregister_repository_id(paths, &identity.id)
+}
+
+pub fn unregister_repository_id(
+    paths: &SetupPaths,
+    repository_id: &str,
+) -> Result<UnregisterResult> {
+    ensure_trusted_data_dir(&paths.data_dir)?;
+    let _ = recover_setup_journal(paths)?;
+    let mut manifest = read_manifest(&paths.manifest_path())?;
+    validate_manifest_for_uninstall(&manifest, paths)?;
+    let before = manifest.projects.len();
+    manifest
+        .projects
+        .retain(|project| project.repository_id != repository_id);
+    if manifest.projects.len() == before {
+        bail!("repository is not registered: {repository_id}");
+    }
+    write_private_atomic(
+        &paths.manifest_path(),
+        &serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    Ok(UnregisterResult {
+        repository_id: repository_id.to_string(),
+        removed: true,
+        history_preserved: true,
+    })
 }
 
 pub fn uninstall_codex(paths: &SetupPaths) -> Result<bool> {
@@ -351,16 +469,15 @@ pub fn uninstall_codex_detailed(paths: &SetupPaths) -> Result<UninstallResult> {
     })
 }
 
-pub fn read_manifest(path: &Path) -> Result<SetupManifestV1> {
+pub fn read_manifest(path: &Path) -> Result<SetupManifestV2> {
     let bytes = read_trusted_private_file(path, "setup manifest")
         .with_context(|| format!("read setup manifest {}", path.display()))?;
-    let manifest: SetupManifestV1 = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse setup manifest {}", path.display()))?;
+    let manifest = parse_manifest(&bytes, path)?;
     ensure_manifest_matches(&manifest)?;
     Ok(manifest)
 }
 
-pub fn ai_refresh_profile_matches(paths: &SetupPaths, manifest: &SetupManifestV1) -> Result<bool> {
+pub fn ai_refresh_profile_matches(paths: &SetupPaths, manifest: &SetupManifestV2) -> Result<bool> {
     if !manifest.ai_refresh_enabled {
         return Ok(false);
     }
@@ -369,16 +486,65 @@ pub fn ai_refresh_profile_matches(paths: &SetupPaths, manifest: &SetupManifestV1
         == manifest.ai_refresh_profile_sha256.as_deref())
 }
 
-fn read_optional_manifest(path: &Path) -> Result<Option<SetupManifestV1>> {
+fn read_optional_manifest(path: &Path) -> Result<Option<SetupManifestV2>> {
     match read_optional_trusted_private_file(path, "setup manifest") {
         Ok(Some(bytes)) => {
-            let manifest: SetupManifestV1 = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parse setup manifest {}", path.display()))?;
+            let manifest = parse_manifest(&bytes, path)?;
             ensure_manifest_matches(&manifest)?;
             Ok(Some(manifest))
         }
         Ok(None) => Ok(None),
         Err(error) => Err(error).with_context(|| format!("read setup manifest {}", path.display())),
+    }
+}
+
+fn parse_manifest(bytes: &[u8], path: &Path) -> Result<SetupManifestV2> {
+    let version = serde_json::from_slice::<Value>(bytes)
+        .with_context(|| format!("parse setup manifest {}", path.display()))?
+        .get("version")
+        .and_then(Value::as_u64)
+        .context("setup manifest version is missing")?;
+    match version as u32 {
+        MANIFEST_VERSION => serde_json::from_slice(bytes)
+            .with_context(|| format!("parse setup manifest {}", path.display())),
+        MANIFEST_VERSION_V1 => {
+            let legacy: SetupManifestV1 = serde_json::from_slice(bytes)
+                .with_context(|| format!("parse setup manifest {}", path.display()))?;
+            if legacy.managed_id != MANAGED_ID {
+                bail!("unsupported or foreign setup manifest");
+            }
+            let identity = crate::git::repository_identity(&legacy.repository).ok();
+            let primary_root = identity
+                .as_ref()
+                .map(|identity| identity.root.clone())
+                .unwrap_or_else(|| legacy.repository.clone());
+            let repository_id = identity
+                .map(|identity| identity.id)
+                .unwrap_or_else(|| primary_root.to_string_lossy().into_owned());
+            Ok(SetupManifestV2 {
+                version: MANIFEST_VERSION,
+                managed_id: legacy.managed_id,
+                installed_at: legacy.installed_at.clone(),
+                projects: vec![SetupProjectV2 {
+                    repository_id,
+                    primary_root: primary_root.clone(),
+                    known_worktree_roots: vec![primary_root],
+                    registered_at: legacy.installed_at,
+                }],
+                executable: legacy.executable,
+                hooks_path: legacy.hooks_path,
+                config_path: legacy.config_path,
+                hooks_backup: legacy.hooks_backup,
+                config_backup: legacy.config_backup,
+                installed_hooks_sha256: legacy.installed_hooks_sha256,
+                installed_config_sha256: legacy.installed_config_sha256,
+                hooks_feature_before: legacy.hooks_feature_before,
+                hooks_feature_managed: legacy.hooks_feature_managed,
+                ai_refresh_enabled: legacy.ai_refresh_enabled,
+                ai_refresh_profile_sha256: legacy.ai_refresh_profile_sha256,
+            })
+        }
+        _ => bail!("unsupported or foreign setup manifest"),
     }
 }
 
@@ -595,25 +761,18 @@ fn restore_backup_bytes(
     Ok(Some(bytes))
 }
 
-fn ensure_manifest_matches(manifest: &SetupManifestV1) -> Result<()> {
+fn ensure_manifest_matches(manifest: &SetupManifestV2) -> Result<()> {
     if manifest.version != MANIFEST_VERSION || manifest.managed_id != MANAGED_ID {
         bail!("unsupported or foreign setup manifest");
     }
     Ok(())
 }
 
-fn validate_manifest_for_install(
-    manifest: &SetupManifestV1,
-    paths: &SetupPaths,
-    repository: &Path,
-) -> Result<()> {
-    if manifest.repository != repository {
-        bail!("setup manifest belongs to a different repository or Codex installation");
-    }
+fn validate_manifest_for_install(manifest: &SetupManifestV2, paths: &SetupPaths) -> Result<()> {
     validate_manifest_for_uninstall(manifest, paths)
 }
 
-fn validate_manifest_for_uninstall(manifest: &SetupManifestV1, paths: &SetupPaths) -> Result<()> {
+fn validate_manifest_for_uninstall(manifest: &SetupManifestV2, paths: &SetupPaths) -> Result<()> {
     if manifest.hooks_path != paths.hooks_path() || manifest.config_path != paths.config_path() {
         bail!("setup manifest belongs to a different repository or Codex installation");
     }
@@ -634,6 +793,23 @@ fn validate_manifest_for_uninstall(manifest: &SetupManifestV1, paths: &SetupPath
     }
     chrono::DateTime::parse_from_rfc3339(&manifest.installed_at)
         .context("setup manifest contains an invalid installation timestamp")?;
+    let mut repository_ids = std::collections::BTreeSet::new();
+    for project in &manifest.projects {
+        if project.repository_id.trim().is_empty()
+            || !repository_ids.insert(project.repository_id.as_str())
+            || !project.primary_root.is_absolute()
+            || project.known_worktree_roots.is_empty()
+            || !project.known_worktree_roots.contains(&project.primary_root)
+            || project
+                .known_worktree_roots
+                .iter()
+                .any(|root| !root.is_absolute())
+        {
+            bail!("setup manifest contains an invalid project registry");
+        }
+        chrono::DateTime::parse_from_rfc3339(&project.registered_at)
+            .context("setup manifest contains an invalid project registration timestamp")?;
+    }
     Ok(())
 }
 
@@ -915,7 +1091,7 @@ fn merge_config_with_ai_refresh(
     data_dir: &Path,
     repository: &Path,
     enable_ai_refresh: bool,
-    existing_manifest: Option<&SetupManifestV1>,
+    existing_manifest: Option<&SetupManifestV2>,
 ) -> Result<String> {
     let mut document = parse_toml(source)?;
     let features = ensure_table(&mut document, "features")?;
@@ -975,7 +1151,7 @@ fn merge_config_with_ai_refresh(
 fn validate_ai_profile_collision(
     source: &str,
     enable_ai_refresh: bool,
-    manifest: Option<&SetupManifestV1>,
+    manifest: Option<&SetupManifestV2>,
 ) -> Result<()> {
     if !enable_ai_refresh {
         return Ok(());
@@ -1091,7 +1267,7 @@ pub fn remove_managed_config(source: &str) -> Result<String> {
     Ok(document.to_string())
 }
 
-fn remove_managed_config_with_profile(source: &str, manifest: &SetupManifestV1) -> Result<String> {
+fn remove_managed_config_with_profile(source: &str, manifest: &SetupManifestV2) -> Result<String> {
     let source = remove_managed_config(source)?;
     let mut document = parse_toml(&source)?;
     if manifest.ai_refresh_enabled {
