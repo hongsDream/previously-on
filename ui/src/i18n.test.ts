@@ -56,6 +56,7 @@ describe('Korean product copy catalog', () => {
 
   it('translates dynamic project status values returned by the local API', () => {
     expect(KOREAN_MESSAGES).toMatchObject({
+      'file changes were observed, but exact structured PreToolUse/PostToolUse evidence did not match; attribution was downgraded': '파일 변경은 관찰됐지만 정확한 구조화 PreToolUse/PostToolUse 증거가 일치하지 않아 변경 귀속의 신뢰 수준을 낮췄습니다.',
       'Session {value}': '세션 {value}',
       added: '추가됨',
       modified: '수정됨',

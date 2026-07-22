@@ -573,6 +573,7 @@ export const KOREAN_MESSAGES: Record<string, string> = {
   'AI fact refresh was not explicitly enabled during setup': '설정할 때 AI 사실 새로고침을 명시적으로 활성화하지 않았습니다.',
   'No task-related paths are available for revalidation.': '재검증할 작업 관련 경로가 없습니다.',
   'Codex did not provide a stable event/turn/tool identifier; a UUID source ID was used to avoid false deduplication': 'Codex가 안정적인 이벤트·턴·도구 식별자를 제공하지 않아 잘못된 중복 제거를 피하기 위해 UUID 원본 ID를 사용했습니다.',
+  'file changes were observed, but exact structured PreToolUse/PostToolUse evidence did not match; attribution was downgraded': '파일 변경은 관찰됐지만 정확한 구조화 PreToolUse/PostToolUse 증거가 일치하지 않아 변경 귀속의 신뢰 수준을 낮췄습니다.',
   'Session {value}': '세션 {value}',
   'added': '추가됨',
   'modified': '수정됨',
