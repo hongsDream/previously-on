@@ -5,6 +5,8 @@ import {
   fetchBootstrap,
   fetchRepositoryOverview,
   syncCodexRepository,
+  toUiError,
+  type UiError,
 } from '../lib/api';
 import { readPreferences, updatePreferences } from '../lib/preferences';
 import {
@@ -25,9 +27,9 @@ export function useBootstrap() {
   const [allProjects, setAllProjects] = useState(false);
   const [syncReports, setSyncReports] = useState<Record<string, CodexImportReportV1>>({});
   const [syncPending, setSyncPending] = useState(false);
-  const [syncError, setSyncError] = useState('');
+  const [syncError, setSyncError] = useState<UiError | null>(null);
   const [offlineFallback, setOfflineFallback] = useState(false);
-  const [fatalError, setFatalError] = useState('');
+  const [fatalError, setFatalError] = useState<UiError | null>(null);
   const [selection, setSelection] = useState<WorkspaceSelectionIds>(emptyWorkspaceSelection);
   const loadVersion = useRef(0);
   const selectedRepositoryIdRef = useRef<string | null>(null);
@@ -69,7 +71,7 @@ export function useBootstrap() {
   ) => {
     if (automatic && !reserveAutomaticSync(repositoryId)) return;
     setSyncPending(true);
-    setSyncError('');
+    setSyncError(null);
     try {
       const report = await syncCodexRepository(repositoryId);
       setSyncReports((current) => ({ ...current, [repositoryId]: report }));
@@ -78,7 +80,7 @@ export function useBootstrap() {
       if (loadVersion.current === version) installBootstrap(refreshed);
     } catch (error) {
       if (loadVersion.current === version && selectedRepositoryIdRef.current === repositoryId) {
-        setSyncError(error instanceof Error ? error.message : 'Codex synchronization failed.');
+        setSyncError(toUiError(error, 'Codex synchronization failed.'));
       }
     } finally {
       if (loadVersion.current === version && selectedRepositoryIdRef.current === repositoryId) {
@@ -97,8 +99,8 @@ export function useBootstrap() {
     setBootstrapRepositoryId(repositoryId);
     selectedRepositoryIdRef.current = repositoryId;
     setData(null);
-    setFatalError('');
-    setSyncError('');
+    setFatalError(null);
+    setSyncError(null);
     setSyncPending(false);
     updatePreferences({ repositoryId });
     fetchBootstrap(repositoryId, controller.signal)
@@ -110,7 +112,7 @@ export function useBootstrap() {
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
         if (loadVersion.current !== version || selectedRepositoryIdRef.current !== repositoryId) return;
-        setFatalError(error instanceof Error ? error.message : 'The local API returned an invalid response.');
+        setFatalError(toUiError(error, 'The local API returned an invalid response.'));
       });
   }, [installBootstrap, synchronize]);
 
@@ -181,7 +183,7 @@ export function useBootstrap() {
         } catch (error: unknown) {
           if (error instanceof DOMException && error.name === 'AbortError') return;
           if (!(error instanceof ApiUnavailableError)) {
-            setFatalError(error instanceof Error ? error.message : 'The local API returned an invalid response.');
+            setFatalError(toUiError(error, 'The local API returned an invalid response.'));
             return;
           }
         }
@@ -207,7 +209,7 @@ export function useBootstrap() {
     loadVersion.current += 1;
     setAllProjects(true);
     setSyncPending(false);
-    setSyncError('');
+    setSyncError(null);
   }, []);
 
   const manualSync = useCallback(() => {

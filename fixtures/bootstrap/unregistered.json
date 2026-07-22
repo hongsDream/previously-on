@@ -32,7 +32,8 @@
   "aiRefreshCapability": {
     "status": "blocked",
     "profileName": "previously-input-only",
-    "reason": "no registered repository",
+    "reasonCode": "verification_blocked",
+    "technicalDetails": ["no registered repository"],
     "checkedAt": "2026-07-16T00:00:00Z"
   },
   "factRefreshOperations": [],

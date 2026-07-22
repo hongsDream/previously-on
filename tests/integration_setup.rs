@@ -404,7 +404,10 @@ fn uninstall_preserves_a_user_modified_ai_refresh_profile() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ai_refresh_capability_is_ready_only_for_an_unchanged_allowed_profile() {
-    use previously_on::ai_refresh::{inspect_capability_with_program, AiRefreshCapabilityStatusV1};
+    use previously_on::ai_refresh::{
+        inspect_capability_with_program, AiRefreshCapabilityReasonCodeV1,
+        AiRefreshCapabilityStatusV1,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     fn fake_server(root: &std::path::Path, name: &str, allowed: bool) -> std::path::PathBuf {
@@ -454,13 +457,20 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"data":[{{"id":"previously-in
     .await
     .unwrap();
     assert_eq!(changed.status, AiRefreshCapabilityStatusV1::Blocked);
-    assert!(changed.reason.unwrap().contains("changed or is missing"));
+    assert_eq!(
+        changed.reason_code,
+        AiRefreshCapabilityReasonCodeV1::VerificationBlocked
+    );
+    assert!(changed.technical_details[0].contains("changed or is missing"));
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn ai_refresh_capability_reports_unsupported_app_server_without_enabling_refresh() {
-    use previously_on::ai_refresh::{inspect_capability_with_program, AiRefreshCapabilityStatusV1};
+    use previously_on::ai_refresh::{
+        inspect_capability_with_program, AiRefreshCapabilityReasonCodeV1,
+        AiRefreshCapabilityStatusV1,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     let (temp, paths, repository) = fixture();
@@ -473,6 +483,11 @@ async fn ai_refresh_capability_reports_unsupported_app_server_without_enabling_r
         .await
         .unwrap();
     assert_eq!(report.status, AiRefreshCapabilityStatusV1::Unsupported);
+    assert_eq!(
+        report.reason_code,
+        AiRefreshCapabilityReasonCodeV1::AppServerUnsupported
+    );
+    assert!(!report.technical_details.is_empty());
 }
 
 fn fixture() -> (TempDir, SetupPaths, std::path::PathBuf) {

@@ -1,7 +1,8 @@
-import { Check, CircleAlert, Clipboard, LoaderCircle, RefreshCw, ShieldCheck, Terminal } from 'lucide-react';
+import { Check, CircleAlert, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
-import { setupCodex, type SetupCodexResponse } from '../lib/api';
+import { setupCodex, toUiError, type SetupCodexResponse, type UiError } from '../lib/api';
 import { useI18n } from '../i18n-context';
+import { ErrorNotice } from './ErrorNotice';
 
 const PATH_PLACEHOLDER = '/absolute/path/to/repository';
 
@@ -13,7 +14,7 @@ export function FirstRunSetup({ refreshPending, onRefresh }: {
   const [repositoryPath, setRepositoryPath] = useState('');
   const [confirmed, setConfirmed] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [setupError, setSetupError] = useState('');
+  const [setupError, setSetupError] = useState<UiError | null>(null);
   const [result, setResult] = useState<SetupCodexResponse | null>(null);
   const normalizedPath = repositoryPath.trim();
   const pathIsAbsolute = normalizedPath.startsWith('/');
@@ -21,11 +22,11 @@ export function FirstRunSetup({ refreshPending, onRefresh }: {
   const connect = async () => {
     if (!confirmed || !pathIsAbsolute || connecting) return;
     setConnecting(true);
-    setSetupError('');
+    setSetupError(null);
     try {
       setResult(await setupCodex(normalizedPath));
     } catch (error) {
-      setSetupError(error instanceof Error ? error.message : t('Codex could not be connected.'));
+      setSetupError(toUiError(error, 'Codex could not be connected.'));
     } finally {
       setConnecting(false);
     }
@@ -70,8 +71,8 @@ export function FirstRunSetup({ refreshPending, onRefresh }: {
   return (
     <section className="first-run-setup" aria-labelledby="first-run-title">
       <span className="empty-lineage-mark" aria-hidden="true" />
-      <h1 id="first-run-title">{t('Connect Codex to your repository')}</h1>
-      <p>{t('Choose one local Git repository for this pilot. PreviouslyOn will configure the local Codex integration and verify it here—no setup command is required.')}</p>
+      <h1 id="first-run-title">{t('Connect Codex to a project')}</h1>
+      <p>{t('Connect a local Git project. PreviouslyOn keeps every registered project separate and lets you switch or review all projects from this device.')}</p>
 
       <label htmlFor="repository-path">{t('Repository path')}</label>
       <input
@@ -83,7 +84,7 @@ export function FirstRunSetup({ refreshPending, onRefresh }: {
         spellCheck={false}
         onChange={(event) => {
           setRepositoryPath(event.target.value);
-          setSetupError('');
+          setSetupError(null);
         }}
         aria-describedby="repository-path-help"
       />
@@ -114,7 +115,7 @@ export function FirstRunSetup({ refreshPending, onRefresh }: {
         {connecting ? <LoaderCircle className="spin-icon" size={16} /> : <ShieldCheck size={16} />}
         {connecting ? t('Connecting and checking…') : t('Connect Codex')}
       </button>
-      {setupError ? <p className="setup-copy-error" role="alert">{setupError}</p> : null}
+      {setupError ? <ErrorNotice error={setupError} className="setup-copy-error" /> : null}
     </section>
   );
 }
@@ -125,34 +126,25 @@ export function RegisteredEmptyActions({ repositoryPath, refreshPending, onRefre
   onRefresh: () => void;
 }) {
   const { t } = useI18n();
-  const [copied, setCopied] = useState<number | null>(null);
-  const [copyError, setCopyError] = useState('');
-  const path = shellArgument(repositoryPath.trim() || PATH_PLACEHOLDER);
-  const commands = [
-    { title: t('Start a captured Codex session'), value: `previously run codex --repo ${path} --` },
-    { title: t('Check the local integration'), value: 'previously doctor' },
+  const path = repositoryPath.trim() || PATH_PLACEHOLDER;
+  const steps = [
+    {
+      title: t('Work in Codex Desktop'),
+      description: t('Open {path} in Codex Desktop and complete a task normally.', { path }),
+    },
+    {
+      title: t('Import from this device'),
+      description: t('Return here and choose Sync Codex app history. The import starts only when you request it and stays local.'),
+    },
   ];
-
-  const copy = async (value: string, index: number) => {
-    setCopyError('');
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(index);
-    } catch {
-      setCopyError(t('Clipboard access was unavailable. Select and copy the command manually.'));
-    }
-  };
 
   return (
     <div className="registered-empty-actions">
       <ol className="setup-command-list">
-        {commands.map((command, index) => (
-          <li key={command.title}>
+        {steps.map((step, index) => (
+          <li key={step.title}>
             <span className="setup-step-number">{index + 1}</span>
-            <span><strong>{command.title}</strong><code><Terminal size={14} aria-hidden="true" />{command.value}</code></span>
-            <button className="icon-button" type="button" aria-label={t('Copy {title}', { title: command.title })} onClick={() => void copy(command.value, index)}>
-              {copied === index ? <Check size={16} /> : <Clipboard size={16} />}
-            </button>
+            <span><strong>{step.title}</strong><small>{step.description}</small></span>
           </li>
         ))}
       </ol>
@@ -160,12 +152,6 @@ export function RegisteredEmptyActions({ repositoryPath, refreshPending, onRefre
         <RefreshCw size={15} className={refreshPending ? 'spin-icon' : ''} />
         {refreshPending ? t('Refreshing status…') : t('Refresh status')}
       </button>
-      {copyError ? <p className="setup-copy-error" role="alert">{copyError}</p> : null}
     </div>
   );
-}
-
-function shellArgument(value: string) {
-  if (/^[A-Za-z0-9_./~:-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }

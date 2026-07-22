@@ -48,8 +48,8 @@ export function SettingsPanel({ capability }: SettingsPanelProps) {
         <div className="language-settings-body">
           <label htmlFor="interface-language">{t('Language')}</label>
           <select id="interface-language" value={language} onChange={(event) => setLanguage(event.target.value as 'en' | 'ko')}>
-            <option value="ko">한국어</option>
-            <option value="en">English</option>
+            <option value="ko">{t('Korean')}</option>
+            <option value="en">{t('English')}</option>
           </select>
           <p>{t('Choose the language used for navigation, guidance, and local status messages. Repository content and commands are never translated.')}</p>
         </div>
@@ -67,7 +67,7 @@ export function SettingsPanel({ capability }: SettingsPanelProps) {
         <div className="settings-capability-body">
           <div className="capability-summary">
             <strong>{t(copy.title)}</strong>
-            <p>{capability.reason || t(copy.description)}</p>
+            <p>{t(copy.description)}</p>
           </div>
           <dl>
             <div><dt>{t('Permission profile')}</dt><dd><code>{capability.profileName || t('Unavailable')}</code></dd></div>
@@ -79,6 +79,12 @@ export function SettingsPanel({ capability }: SettingsPanelProps) {
             <li><ShieldCheck size={15} /><span><strong>{t('Bounded verified input')}</strong>{t('Only redacted task facts, files, tests, and Regression Contracts can enter the refresh pack.')}</span></li>
             <li><LockKeyhole size={15} /><span><strong>{t('Candidate-only output')}</strong>{t('Model output never becomes Evidence. You must review it before it can become a Fact Candidate.')}</span></li>
           </ul>
+          {capability.technicalDetails.length > 0 ? (
+            <details>
+              <summary>{t('Technical details')}</summary>
+              <ul>{capability.technicalDetails.map((detail) => <li key={detail}>{detail}</li>)}</ul>
+            </details>
+          ) : null}
         </div>
       </section>
     </main>

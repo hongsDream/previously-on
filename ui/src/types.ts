@@ -17,7 +17,8 @@ export type AgentAssociationState = 'linked' | 'unlinked' | 'degraded';
 export interface AiRefreshCapabilityV1 {
   status: AiRefreshCapabilityStatus;
   profileName: string;
-  reason?: string | null;
+  reasonCode: 'ready' | 'setup_required' | 'app_server_unsupported' | 'verification_blocked';
+  technicalDetails: string[];
   checkedAt?: string | null;
 }
 
@@ -530,6 +531,7 @@ export interface BootstrapData {
 }
 
 export type CodexImportStatus = 'complete' | 'degraded' | 'unsupported';
+export type CodexImportReasonCode = 'synchronized' | 'partial_import' | 'app_server_unsupported';
 
 export interface CoverageV1 {
   status: 'complete' | 'degraded';
@@ -542,6 +544,7 @@ export interface CodexImportReportV1 {
   schemaVersion: number;
   repositoryId: string;
   status: CodexImportStatus;
+  reasonCode: CodexImportReasonCode;
   importedTaskCount: number;
   semanticEventCount: number;
   duplicateCount: number;

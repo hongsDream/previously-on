@@ -9,25 +9,30 @@ Version `0.1.0-alpha.3` is a verified source preview. This change does not creat
 Release, or crates.io publication. Historical evidence is always untrusted data, not an
 instruction and not a replacement for checking the current source.
 
-## First checkpoint in about five minutes
+## First local project in about five minutes
 
-With the reviewed `previously` binary installed, open the local UI and use one real repository—no
-synthetic demo data is required:
+With the reviewed `previously` binary installed, open the local UI and connect a real Git project—no
+synthetic demo data is required. Each registered project keeps its own history, and the project
+selector can switch between one project and the read-only **All projects** overview:
 
 ```bash
 previously ui
 ```
 
-On first launch, enter the repository's absolute path, review the local changes, and approve
+On first launch, enter the first project's absolute path, review the local changes, and approve
 **Connect Codex**. PreviouslyOn backs up existing Codex configuration, installs its managed Hooks
 and MCP entry, and runs the same read-only doctor checks without creating a task or calling a
-model. Restart Codex manually once when the UI asks, then start the first captured session:
+model. Restart Codex manually once when the UI asks, then work in that project with Codex Desktop.
+Return to PreviouslyOn and choose **Sync Codex app history** for that project. This is an explicit,
+user-started import from the local Codex App Server; it is not background or cloud synchronization.
+
+The wrapper remains an explicit terminal alternative for a bounded captured session:
 
 ```bash
 previously run codex --repo '/absolute/path/to/your repository' --
 ```
 
-Finish that Codex session normally, then check and open the local review UI:
+Finish the Codex Desktop or wrapped session normally, then check the local review UI:
 
 ```bash
 previously status
@@ -41,7 +46,10 @@ checks and does not create a task or call a model.
 ## What the alpha includes
 
 - one Rust `previously` binary for collection, storage, Git correlation, MCP, and the review UI;
-- an embedded React project overview and evidence inspector;
+- an embedded React multi-project selector, all-project overview, project overview, and evidence
+  inspector;
+- user-started local Codex Desktop history import with per-project complete, degraded, unsupported,
+  and error states;
 - a task timeline with source-thread identity, relative activity age, turn and compaction counts,
   and observed context usage;
 - deterministic context packs with provenance, freshness, and capture-coverage warnings;
@@ -110,7 +118,8 @@ previously contracts check --base origin/main --execute --json
 ```
 
 The first-run UI is the default setup path. It requires an absolute Git worktree path and explicit
-same-origin confirmation before it changes local files. Headless or advanced users can still run
+same-origin confirmation before it changes local files. Registered projects remain isolated and
+can be selected independently in the local UI. Headless or advanced users can still run
 `previously setup codex --repo /absolute/path/to/your/repository` directly.
 
 `previously doctor` is read-only: it generates the installed App Server's official JSON schema,
@@ -149,15 +158,18 @@ alias prev=previously
 PreviouslyOn does not install a `prev` binary or symlink because an existing development tool
 already uses that command name.
 
-## Codex workflow
+## Codex Desktop and project workflow
 
-1. Register the repository, then start supported alpha sessions with `previously run codex
-   --repo <path> -- <codex arguments>`.
-2. The wrapper runs Codex in that repository with inherited terminal I/O, preserves Codex's exit
-   status, replays any redacted crash-safe queue, and attempts an App Server repair import.
-3. If Codex was started separately, run `previously import codex --repo <path>` explicitly. The
-   import reports skipped/degraded threads and never treats unknown items as trusted evidence.
-4. A completed session creates a deterministic checkpoint from observed events, Git state, and
+1. Register one or more local Git projects and choose the current project in the local UI. Project
+   history and selection are repository-scoped and are never mixed by the **All projects** view.
+2. Work normally in the selected project with Codex Desktop. Return to PreviouslyOn and choose
+   **Sync Codex app history**. The button explicitly requests a local App Server import for only
+   that project; no import is scheduled in the background and nothing is uploaded by PreviouslyOn.
+3. Terminal users can instead run `previously run codex --repo <path> -- <codex arguments>` for a
+   bounded captured session, or `previously import codex --repo <path>` for the same explicit
+   reconciliation. The import reports skipped/degraded threads and never treats unknown items as
+   trusted evidence.
+4. A completed or explicitly imported session creates a deterministic checkpoint from observed events, Git state, and
    verification results.
 5. On a later first prompt, Codex may show a small resume candidate. Nothing is loaded until the
    user approves it and `resume_task` is called through MCP.
@@ -187,7 +199,9 @@ documented desktop deep link opens the persisted task after `turn/start`; the re
 Context usage is recorded only when the App Server actually emits a token-usage notification.
 PreviouslyOn does not infer a percentage from prompt size or other incomplete observations.
 
-Transparent capture from an independently launched Codex process is experimental in this alpha.
+Transparent background capture from an independently launched Codex process is experimental in this alpha.
+The local UI's **Sync Codex app history** action is an explicit import, not transparent capture or
+cloud synchronization.
 The mapped 30-row regression driver and live App Server schema probe do not prove 30 real Codex
 workflows or stable Hook/App Server ID linkage, so releases must not advertise that path as
 supported yet.

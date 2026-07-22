@@ -403,7 +403,8 @@ export const fallbackData: BootstrapData = {
   aiRefreshCapability: {
     status: 'blocked',
     profileName: 'previously-input-only',
-    reason: 'The read-only sample workspace cannot verify the local App Server permission profile.',
+    reasonCode: 'verification_blocked',
+    technicalDetails: ['The read-only sample workspace cannot verify the local App Server permission profile.'],
   },
   factRefreshOperations: [],
   agents: [],

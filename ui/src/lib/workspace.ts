@@ -38,7 +38,8 @@ export function normalizeBootstrap(bootstrap: BootstrapData): BootstrapData {
     aiRefreshCapability: bootstrap.aiRefreshCapability ?? {
       status: 'blocked',
       profileName: 'previously-input-only',
-      reason: 'The local API did not provide a verified AI refresh capability.',
+      reasonCode: 'verification_blocked',
+      technicalDetails: ['The local API did not provide a verified AI refresh capability.'],
     },
     factRefreshOperations: bootstrap.factRefreshOperations ?? [],
     agents: bootstrap.agents ?? [],

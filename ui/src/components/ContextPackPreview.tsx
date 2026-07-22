@@ -95,17 +95,17 @@ export function ContextPackPreview({ checkpoint, contextPack, expanded, onToggle
             </div>
           ) : null}
           <div className="context-pack-content">
-            <PackSection title="Then" count={t('{count} items', { count: contextPack.facts.length + (contextPack.goal ? 1 : 0) })}>
+            <PackSection title={t('Then')} count={t('{count} items', { count: contextPack.facts.length + (contextPack.goal ? 1 : 0) })}>
               {contextPack.goal ? <PackText label="goal" text={contextPack.goal} /> : <p>{t('No verified goal was selected.')}</p>}
               {contextPack.facts.map((fact) => <PackText key={fact.id} label={fact.kind} text={fact.content} />)}
             </PackSection>
-            <PackSection title="Since" count={t('{count} files', { count: changes.length || contextPack.files.length })}>
+            <PackSection title={t('Since')} count={t('{count} files', { count: changes.length || contextPack.files.length })}>
               {changes.length > 0
                 ? changes.map((change) => <PackText key={`${change.previousPath ?? ''}-${change.path}-${change.status}`} label={change.status} text={changeText(change)} />)
                 : contextPack.files.map((file) => <PackText key={`${file.path}-${file.status}`} label={file.status} text={file.path} />)}
               {changes.length === 0 && contextPack.files.length === 0 ? <p>{t('No relevant file changes were selected.')}</p> : null}
             </PackSection>
-            <PackSection title="Now" count={t('{count} tests', { count: contextPack.tests.length })}>
+            <PackSection title={t('Now')} count={t('{count} tests', { count: contextPack.tests.length })}>
               {contextPack.current_validation ? (
                 <PackText
                   label={contextPack.current_validation.status}
@@ -115,7 +115,7 @@ export function ContextPackPreview({ checkpoint, contextPack, expanded, onToggle
               {contextPack.tests.map((test) => <PackText key={`${test.name}-${test.status}`} icon={<CheckCircle2 size={13} className={test.status === 'passed' ? 'success-text' : 'warning'} />} label={test.status} text={test.name} />)}
               {!contextPack.current_validation && contextPack.tests.length === 0 ? <p>{t('No current validation result was selected.')}</p> : null}
             </PackSection>
-            <PackSection title="Needs review" count={t('{count} items', { count: reviewCount })}>
+            <PackSection title={t('Needs review')} count={t('{count} items', { count: reviewCount })}>
               {temporal && temporal.status !== 'unchanged' ? <PackText label={temporal.status} text={t(temporalLabel(temporal.status))} /> : null}
               {contextPack.unresolved_items.map((fact) => <PackText key={fact.id} label="open" text={fact.content} />)}
               {warnings.map((warning, index) => <PackText key={`${warning}-${index}`} label="warning" text={t(warning)} />)}

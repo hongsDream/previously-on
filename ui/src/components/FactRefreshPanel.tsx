@@ -110,7 +110,10 @@ export function FactRefreshPanel({
       {!ready ? (
         <div className={`refresh-capability-message capability-${capability.status}`} role="status">
           <CircleAlert size={16} />
-          <span><strong>{t(capabilityLabel(capability.status))}</strong>{capability.reason ? t(capability.reason) : t('The required input-only permission profile has not been verified.')}</span>
+          <span><strong>{t(capabilityLabel(capability.status))}</strong>{t('The required input-only permission profile has not been verified.')}</span>
+          {capability.technicalDetails.length > 0 ? (
+            <details><summary>{t('Technical details')}</summary><ul>{capability.technicalDetails.map((detail) => <li key={detail}>{detail}</li>)}</ul></details>
+          ) : null}
         </div>
       ) : (
         <div className="refresh-capability-message capability-ready" role="status">

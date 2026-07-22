@@ -57,11 +57,49 @@ export interface SetupCodexResponse {
   };
 }
 
+export type ApiErrorCode = 'invalid_request' | 'forbidden' | 'not_found' | 'conflict' | 'internal_error';
+
+export interface UiError {
+  messageKey: string;
+  technicalDetails: string[];
+}
+
+const API_ERROR_MESSAGES: Record<ApiErrorCode, string> = {
+  invalid_request: 'The request could not be completed because its input was invalid.',
+  forbidden: 'The local UI is not authorized to perform this request.',
+  not_found: 'The requested local item could not be found.',
+  conflict: 'Local data changed before this request could be completed. Refresh and try again.',
+  internal_error: 'PreviouslyOn could not complete the local request.',
+};
+
+export class ApiResponseError extends Error {
+  constructor(
+    readonly errorCode: ApiErrorCode,
+    readonly technicalDetails: string[],
+  ) {
+    super(API_ERROR_MESSAGES[errorCode]);
+    this.name = 'ApiResponseError';
+  }
+}
+
 export class ApiUnavailableError extends Error {
   constructor(message = 'PreviouslyOn API is unavailable') {
     super(message);
     this.name = 'ApiUnavailableError';
   }
+}
+
+export function toUiError(error: unknown, fallbackMessageKey: string): UiError {
+  if (error instanceof ApiResponseError) {
+    return {
+      messageKey: API_ERROR_MESSAGES[error.errorCode],
+      technicalDetails: error.technicalDetails,
+    };
+  }
+  if (error instanceof ApiUnavailableError) {
+    return { messageKey: 'PreviouslyOn API is unavailable', technicalDetails: [] };
+  }
+  return { messageKey: fallbackMessageKey, technicalDetails: [] };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -84,13 +122,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (import.meta.env.DEV && response.status >= 500) {
       throw new ApiUnavailableError();
     }
-    const payload = await response.json().catch(() => null) as { error?: unknown } | null;
-    const message = typeof payload?.error === 'string' && payload.error.trim()
-      ? payload.error
-      : `API request failed (${response.status})`;
-    throw new Error(message);
+    const payload = await response.json().catch(() => null) as {
+      errorCode?: unknown;
+      technicalDetails?: unknown;
+      error?: unknown;
+    } | null;
+    const errorCode = isApiErrorCode(payload?.errorCode)
+      ? payload.errorCode
+      : errorCodeForStatus(response.status);
+    const technicalDetails = Array.isArray(payload?.technicalDetails)
+      ? payload.technicalDetails.filter((detail): detail is string => typeof detail === 'string' && detail.trim().length > 0)
+      : typeof payload?.error === 'string' && payload.error.trim()
+        ? [payload.error]
+        : [];
+    throw new ApiResponseError(errorCode, technicalDetails);
   }
   return response.json() as Promise<T>;
+}
+
+function isApiErrorCode(value: unknown): value is ApiErrorCode {
+  return typeof value === 'string' && value in API_ERROR_MESSAGES;
+}
+
+function errorCodeForStatus(status: number): ApiErrorCode {
+  if (status === 400) return 'invalid_request';
+  if (status === 403) return 'forbidden';
+  if (status === 404) return 'not_found';
+  if (status === 409) return 'conflict';
+  return 'internal_error';
 }
 
 export function fetchBootstrap(repositoryId?: string, signal?: AbortSignal) {

@@ -15,17 +15,20 @@ untrusted projections and never become evidence themselves.
 
 ## Process model
 
-The alpha's supported entry point is the explicit `previously run codex` wrapper. It provides a
-bounded session boundary, preserves Codex's exit status, replays the redacted fallback queue, and
-then attempts App Server reconciliation. `previously import codex` exposes reconciliation as a
-separate public command. Independently launched transparent capture remains experimental until the
-live compatibility gate proves stable Hook/App Server linkage.
+The alpha has two explicit local entry paths. The review UI lets a user select one registered
+project and request **Sync Codex app history**, which imports that project's same-device Codex
+Desktop history through the local App Server. `previously run codex` remains the terminal path for
+a bounded session boundary: it preserves Codex's exit status, replays the redacted fallback queue,
+and then attempts App Server reconciliation. `previously import codex` exposes the same explicit
+reconciliation as a public command. None of these paths is cloud synchronization. Independently
+launched transparent background capture remains experimental until the live compatibility gate
+proves stable Hook/App Server linkage.
 
 ```text
 Codex hooks ──> redaction/caps ──> Unix socket ──> insert-only event log
                          └──────> redacted fallback queue
                                                   │
-Codex App Server reconciliation ──────────────────┤
+User-started Codex Desktop/App Server import ─────┤
 Git snapshots and diffs ──────────────────────────┤
 Git regression contracts ─────────────────────────┤
                                                   ▼
@@ -36,7 +39,7 @@ Git regression contracts ──────────────────�
                                                   │
                                ┌──────────────────┴──────────────────┐
                                ▼                                     ▼
-                  MCP: 5 reads + approved continue_task      loopback review UI
+                  MCP: 5 reads + approved continue_task      loopback multi-project review UI
 ```
 
 The database runs in WAL mode. Canonical events are insert-only during ingestion. Retention

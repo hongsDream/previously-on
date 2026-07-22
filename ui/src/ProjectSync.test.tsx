@@ -1,8 +1,10 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { CodexSyncStatus } from './components/CodexSyncStatus';
 import { fallbackData } from './data/fallback';
+import { I18nProvider } from './i18n';
 import type { BootstrapData, CodexImportReportV1, RepositoryOverviewV1 } from './types';
 
 const overview: RepositoryOverviewV1[] = [
@@ -61,6 +63,7 @@ describe('Codex project synchronization', () => {
 
     expect(await screen.findByRole('combobox', { name: '프로젝트 선택' })).toHaveValue('repo-beta');
     expect(await screen.findByRole('heading', { name: 'Beta task' })).toBeInTheDocument();
+    expect(screen.getAllByText('진행 중').length).toBeGreaterThan(0);
     await waitFor(() => expect(imports.get('repo-beta')).toBe(1));
     expect(fetchMock.mock.calls.some(([input]) => String(input) === '/api/bootstrap?repositoryId=repo-beta')).toBe(true);
     expect(screen.queryByRole('heading', { name: 'Alpha task' })).not.toBeInTheDocument();
@@ -75,6 +78,7 @@ describe('Codex project synchronization', () => {
     expect(await screen.findByRole('heading', { name: '전체 프로젝트' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /alpha/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /beta/ })).toBeInTheDocument();
+    expect(screen.getByText('성능 저하')).toBeInTheDocument();
     await Promise.resolve();
     expect(imports.get('repo-beta')).toBe(1);
     expect(imports.get('repo-alpha')).toBeUndefined();
@@ -145,6 +149,67 @@ describe('Codex project synchronization', () => {
     expect(await screen.findByText('Synchronization complete')).toBeInTheDocument();
     expect(screen.queryByText('alpha sync failed late')).not.toBeInTheDocument();
   });
+
+  it.each([
+    ['complete', '동기화 완료', 'Codex Desktop 기록을 이 로컬 프로젝트로 가져왔습니다.'],
+    ['degraded', '동기화 성능 저하', '일부 로컬 Codex Desktop 기록을 가져오지 못했습니다. 항목 수와 기술 세부 정보를 확인하세요.'],
+    ['unsupported', 'App Server 미지원', '이 로컬 Codex App Server는 Codex Desktop 기록 가져오기를 지원하지 않습니다.'],
+  ] as const)('translates the %s sync reason while isolating raw details', (status, title, description) => {
+    localStorage.setItem('previously-on:preferences:v1', JSON.stringify({ schemaVersion: 1, language: 'ko' }));
+    render(<I18nProvider><CodexSyncStatus report={reportFor('repo-alpha', status)} /></I18nProvider>);
+
+    expect(screen.getByText(title)).toBeInTheDocument();
+    expect(screen.getByText(description)).toBeInTheDocument();
+    if (status !== 'complete') {
+      const details = screen.getByText('기술 세부 정보').closest('details');
+      expect(details).toContainElement(screen.getByText('unsupported test detail'));
+    }
+  });
+
+  it('renders the registered-empty Codex Desktop flow in Korean', async () => {
+    localStorage.setItem('previously-on:preferences:v1', JSON.stringify({ schemaVersion: 1, language: 'ko', repositoryId: 'repo-alpha' }));
+    const empty = bootstrapFor('repo-alpha');
+    empty.repository.state = 'registered-empty';
+    empty.tasks = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const requestPath = String(input);
+      if (requestPath === '/api/overview') return response({ repositories: [overview[0]] });
+      if (requestPath.startsWith('/api/bootstrap?')) return response(empty);
+      if (requestPath === '/api/imports/codex') return response(reportFor('repo-alpha'));
+      throw new Error(`unexpected request ${requestPath}`);
+    }));
+
+    render(<App />);
+
+    expect((await screen.findAllByText('등록됨 · 첫 체크포인트 대기 중')).length).toBeGreaterThan(0);
+    expect(screen.getByText('Codex Desktop에서 작업하기')).toBeInTheDocument();
+    expect(screen.getByText('이 기기에서 가져오기')).toBeInTheDocument();
+    expect(screen.queryByText('Start a captured Codex session')).not.toBeInTheDocument();
+  });
+
+  it('translates an API error code and keeps the raw failure under technical details', async () => {
+    localStorage.setItem('previously-on:preferences:v1', JSON.stringify({ schemaVersion: 1, language: 'ko', repositoryId: 'repo-alpha' }));
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const requestPath = String(input);
+      if (requestPath === '/api/overview') return response({ repositories: [overview[0]] });
+      if (requestPath.startsWith('/api/bootstrap?')) return response(bootstrapFor('repo-alpha'));
+      if (requestPath === '/api/imports/codex') {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ errorCode: 'conflict', technicalDetails: ['socket failure raw detail'] }),
+        };
+      }
+      throw new Error(`unexpected request ${requestPath}`);
+    }));
+
+    render(<App />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('요청을 완료하기 전에 로컬 데이터가 변경되었습니다. 새로고침한 뒤 다시 시도하세요.');
+    const details = within(alert).getByText('기술 세부 정보').closest('details');
+    expect(details).toContainElement(within(alert).getByText('socket failure raw detail'));
+  });
 });
 
 function installDeferredSyncFetch(
@@ -202,6 +267,7 @@ function reportFor(repositoryId: string, status: CodexImportReportV1['status'] =
     schemaVersion: 1,
     repositoryId,
     status,
+    reasonCode: status === 'complete' ? 'synchronized' : status === 'unsupported' ? 'app_server_unsupported' : 'partial_import',
     importedTaskCount: status === 'complete' ? 1 : 0,
     semanticEventCount: status === 'complete' ? 1 : 0,
     duplicateCount: 0,

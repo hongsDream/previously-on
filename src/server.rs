@@ -81,42 +81,58 @@ fn server_setup_paths(state: &AppState) -> ApiResult<crate::setup::SetupPaths> {
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
-    message: String,
+    code: ApiErrorCode,
+    technical_details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ApiErrorCode {
+    InvalidRequest,
+    Forbidden,
+    NotFound,
+    Conflict,
+    InternalError,
 }
 
 impl ApiError {
     fn internal(error: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: redact_excerpt(&error.to_string()),
+            code: ApiErrorCode::InternalError,
+            technical_details: vec![redact_excerpt(&error.to_string())],
         }
     }
 
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            message: redact_excerpt(&message.into()),
+            code: ApiErrorCode::NotFound,
+            technical_details: vec![redact_excerpt(&message.into())],
         }
     }
 
     fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
-            message: redact_excerpt(&message.into()),
+            code: ApiErrorCode::Forbidden,
+            technical_details: vec![redact_excerpt(&message.into())],
         }
     }
 
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            message: redact_excerpt(&message.into()),
+            code: ApiErrorCode::InvalidRequest,
+            technical_details: vec![redact_excerpt(&message.into())],
         }
     }
 
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            message: redact_excerpt(&message.into()),
+            code: ApiErrorCode::Conflict,
+            technical_details: vec![redact_excerpt(&message.into())],
         }
     }
 }
@@ -125,7 +141,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(json!({ "error": self.message, "status": self.status.as_u16() })),
+            Json(json!({
+                "errorCode": self.code,
+                "status": self.status.as_u16(),
+                "technicalDetails": self.technical_details,
+            })),
         )
             .into_response()
     }
@@ -499,9 +519,11 @@ async fn start_fact_refresh(
             .await;
     if capability.status != crate::ai_refresh::AiRefreshCapabilityStatusV1::Ready {
         return Err(ApiError::conflict(
-            capability
-                .reason
-                .unwrap_or_else(|| "AI fact refresh is unavailable".to_string()),
+            if capability.technical_details.is_empty() {
+                "AI fact refresh is unavailable".to_string()
+            } else {
+                capability.technical_details.join("; ")
+            },
         ));
     }
     let request_id = request
@@ -1671,6 +1693,24 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn api_errors_separate_stable_codes_from_technical_details() {
+        let response = ApiError::bad_request("repository is not a Git work tree").into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["errorCode"], "invalid_request");
+        assert_eq!(payload["status"], 400);
+        assert_eq!(
+            payload["technicalDetails"],
+            json!(["repository is not a Git work tree"])
+        );
+        assert!(payload.get("error").is_none());
+    }
+
     fn git(path: &std::path::Path, args: &[&str]) {
         let status = Command::new("git")
             .arg("-C")
@@ -1935,14 +1975,15 @@ mod tests {
             "Authorization: Bearer auth-ui-error-boundary-secret ",
             ".env.production credentials.json"
         ));
-        assert!(error.message.contains("[REDACTED]"));
+        let details = error.technical_details.join(" ");
+        assert!(details.contains("[REDACTED]"));
         for leaked in [
             "ui-error-boundary-secret",
             "error-boundary-secret",
             ".env.production",
             "credentials.json",
         ] {
-            assert!(!error.message.contains(leaked), "UI error leaked {leaked}");
+            assert!(!details.contains(leaked), "UI error leaked {leaked}");
         }
     }
 

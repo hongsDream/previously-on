@@ -23,6 +23,7 @@ pub struct CodexImportReportV1 {
     pub schema_version: u16,
     pub repository_id: String,
     pub status: AppServerCapabilityStatus,
+    pub reason_code: CodexImportReasonCode,
     pub imported_task_count: usize,
     pub semantic_event_count: usize,
     pub duplicate_count: usize,
@@ -34,6 +35,14 @@ pub struct CodexImportReportV1 {
     pub notices: Vec<ThreadImportNoticeV1>,
     pub observed_agent_count: usize,
     pub technical_details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexImportReasonCode {
+    Synchronized,
+    PartialImport,
+    AppServerUnsupported,
 }
 
 type FlightResult = std::result::Result<CodexImportReportV1, String>;
@@ -258,6 +267,11 @@ async fn execute_import(
         } else {
             AppServerCapabilityStatus::Complete
         },
+        reason_code: if degraded {
+            CodexImportReasonCode::PartialImport
+        } else {
+            CodexImportReasonCode::Synchronized
+        },
         imported_task_count,
         semantic_event_count,
         duplicate_count,
@@ -321,6 +335,11 @@ fn empty_report(
         schema_version: SCHEMA_VERSION_V1,
         repository_id,
         status,
+        reason_code: match status {
+            AppServerCapabilityStatus::Complete => CodexImportReasonCode::Synchronized,
+            AppServerCapabilityStatus::Degraded => CodexImportReasonCode::PartialImport,
+            AppServerCapabilityStatus::Unsupported => CodexImportReasonCode::AppServerUnsupported,
+        },
         imported_task_count: 0,
         semantic_event_count: 0,
         duplicate_count: 0,
@@ -366,6 +385,19 @@ mod tests {
             flights: Arc::new(Mutex::new(HashMap::new())),
             executor,
         }
+    }
+
+    #[test]
+    fn import_status_serializes_a_stable_reason_code() {
+        let unsupported = report("repo-a");
+        assert_eq!(
+            unsupported.reason_code,
+            CodexImportReasonCode::AppServerUnsupported
+        );
+        let payload = serde_json::to_value(unsupported).unwrap();
+        assert_eq!(payload["status"], "unsupported");
+        assert_eq!(payload["reasonCode"], "app_server_unsupported");
+        assert_eq!(payload["technicalDetails"], json!(["test"]));
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { AllProjectsView } from './components/AllProjectsView';
 import { BottomNavigation } from './components/BottomNavigation';
 import { EvidenceInspector } from './components/EvidenceInspector';
 import { CodexSyncStatus } from './components/CodexSyncStatus';
+import { ErrorNotice } from './components/ErrorNotice';
 import { FirstRunSetup, RegisteredEmptyActions } from './components/FirstRunSetup';
 import { ProjectOverview } from './components/ProjectOverview';
 import { Sidebar } from './components/Sidebar';
@@ -137,7 +138,7 @@ function AppContent() {
     onSync: manualSync,
   };
 
-  if (fatalError) return <ErrorScreen message={fatalError} />;
+  if (fatalError) return <ErrorScreen error={fatalError} />;
   if (allProjects) {
     return (
       <div className="app-shell">
@@ -167,8 +168,8 @@ function AppContent() {
           previewDisabled
         />
         <CodexSyncStatus report={syncReport} />
-        {syncError ? <div className="action-error" role="alert">{syncError}</div> : null}
-        {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
+        {syncError ? <ErrorNotice error={syncError} /> : null}
+        {actionError ? <ErrorNotice error={actionError} /> : null}
         <div className="app-body empty-app-body">
           <Sidebar
             query={query}
@@ -302,10 +303,10 @@ function AppContent() {
         previewDisabled={!selectedCheckpoint || !data.contextPacks[selectedTask.id]}
       />
       <CodexSyncStatus report={syncReport} />
-      {syncError ? <div className="action-error" role="alert">{syncError}</div> : null}
+      {syncError ? <ErrorNotice error={syncError} /> : null}
       {offlineFallback ? <div className="sample-banner" role="status">{t('Local API unavailable · read-only sample workspace · changes are disabled')}</div> : null}
       {!offlineFallback && data.repository.state === 'degraded' ? <div className="degraded-banner" role="status">{t('Capture degraded · review missing evidence before trusting this workspace')}</div> : null}
-      {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
+      {actionError ? <ErrorNotice error={actionError} /> : null}
       <div className={`app-body ${workspaceView === 'overview' || workspaceView === 'settings' ? 'overview-app-body' : ''}`}>
         <Sidebar
           query={query}
@@ -406,13 +407,19 @@ function AppContent() {
   );
 }
 
-function ErrorScreen({ message }: { message: string }) {
+function ErrorScreen({ error }: { error: import('./lib/api').UiError }) {
   const { t } = useI18n();
   return (
     <main className="loading-screen" role="alert">
       <span className="loading-mark error-mark" />
       <h1>{t('PreviouslyOn could not load')}</h1>
-      <p>{message}</p>
+      <p>{t(error.messageKey)}</p>
+      {error.technicalDetails.length > 0 ? (
+        <details>
+          <summary>{t('Technical details')}</summary>
+          <ul>{error.technicalDetails.map((detail) => <li key={detail}>{detail}</li>)}</ul>
+        </details>
+      ) : null}
     </main>
   );
 }

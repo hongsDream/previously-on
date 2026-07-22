@@ -71,6 +71,20 @@ an existing registration. It calls the same journaled setup implementation used 
 existing Codex configuration is backed up and interrupted writes remain recoverable. The doctor
 checks run after setup without creating a Codex task, starting a model turn, or uploading data.
 
+## Local Codex Desktop import
+
+Registered projects remain separate in the local manifest and UI. Choosing **Sync Codex app
+history** explicitly starts a same-device App Server import for the selected project only. The UI
+may start this action once when that project is opened during a browser session, and the user can
+request it again with the button; PreviouslyOn does not run a cloud sync service or continuously
+watch a Codex account. **All projects** is a read-only local summary and does not merge project
+histories.
+
+The import keeps only bounded, redacted, allowlisted semantic events and metadata. Raw transcripts
+are not written to the canonical store. Stable `reasonCode` values drive user-facing status copy;
+redacted App Server failures and compatibility warnings remain separate `technicalDetails` and are
+shown only under **Technical details**. Nothing from this flow is uploaded by PreviouslyOn.
+
 ## Beta AI fact refresh
 
 AI refresh is disabled by default. `previously setup codex --enable-ai-refresh` installs a managed

@@ -340,7 +340,8 @@ pub(super) async fn build_bootstrap(
         crate::ai_refresh::AiRefreshCapabilityV1 {
             status: crate::ai_refresh::AiRefreshCapabilityStatusV1::Blocked,
             profile_name: crate::ai_refresh::AI_REFRESH_PROFILE.to_string(),
-            reason: Some("no registered repository".to_string()),
+            technical_details: vec!["no registered repository".to_string()],
+            reason_code: crate::ai_refresh::AiRefreshCapabilityReasonCodeV1::VerificationBlocked,
             checked_at: Utc::now(),
         }
     };
