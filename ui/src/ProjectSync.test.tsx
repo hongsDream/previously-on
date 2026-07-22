@@ -210,6 +210,30 @@ describe('Codex project synchronization', () => {
     const details = within(alert).getByText('기술 세부 정보').closest('details');
     expect(details).toContainElement(within(alert).getByText('socket failure raw detail'));
   });
+
+  it('does not retry an unscoped legacy bootstrap after a scoped project bootstrap fails', async () => {
+    localStorage.setItem('previously-on:preferences:v1', JSON.stringify({ schemaVersion: 1, language: 'ko', repositoryId: 'repo-alpha' }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requestPath = String(input);
+      if (requestPath === '/api/overview') return response({ repositories: overview });
+      if (requestPath === '/api/bootstrap?repositoryId=repo-alpha') {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ errorCode: 'conflict', technicalDetails: ['scoped bootstrap conflict'] }),
+        };
+      }
+      throw new Error(`unexpected request ${requestPath}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('요청을 완료하기 전에 로컬 데이터가 변경되었습니다. 새로고침한 뒤 다시 시도하세요.');
+    expect(within(alert).getByText('scoped bootstrap conflict')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === '/api/bootstrap')).toBe(false);
+  });
 });
 
 function installDeferredSyncFetch(

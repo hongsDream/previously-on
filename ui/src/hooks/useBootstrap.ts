@@ -120,6 +120,7 @@ export function useBootstrap() {
     const controller = new AbortController();
     activeController.current = controller;
     const version = ++loadVersion.current;
+    let overviewLoaded = false;
     const installLegacyBootstrap = (legacyBootstrap: BootstrapData) => {
       if (!legacyBootstrap.repository || !Array.isArray(legacyBootstrap.tasks)) {
         throw new Error('The local project bootstrap returned an invalid response.');
@@ -146,6 +147,7 @@ export function useBootstrap() {
     fetchRepositoryOverview(controller.signal)
       .then((overview) => {
         if (loadVersion.current !== version) return;
+        overviewLoaded = true;
         if (!Array.isArray(overview.repositories)) {
           const legacyBootstrap = overview as unknown as BootstrapData;
           if (legacyBootstrap.repository && Array.isArray(legacyBootstrap.tasks)) {
@@ -175,8 +177,13 @@ export function useBootstrap() {
           void synchronize(repositoryId, version, true);
         });
       })
-      .catch(async () => {
+      .catch(async (error: unknown) => {
         if (loadVersion.current !== version) return;
+        if (overviewLoaded) {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          setFatalError(toUiError(error, 'The local API returned an invalid response.'));
+          return;
+        }
         try {
           await loadLegacyBootstrap();
           return;
