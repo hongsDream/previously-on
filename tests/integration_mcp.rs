@@ -10,6 +10,7 @@ use previously_on::mcp::{
     codex_thread_deep_link, handle_request, run_stdio, tool_definitions, McpBackend,
     StoreMcpBackend, MAX_MCP_REQUEST_BYTES,
 };
+use previously_on::setup::SetupProjectV2;
 use previously_on::store::Store;
 use serde_json::{json, Value};
 use std::process::Command;
@@ -295,6 +296,105 @@ fn initialize_and_tool_call_follow_json_rpc() {
         serde_json::to_vec(&capped).unwrap(),
         serde_json::to_vec(&capped_again).unwrap()
     );
+}
+
+#[test]
+fn multi_repository_search_requires_a_root_and_isolates_explicit_selection() {
+    let temp = TempDir::new().unwrap();
+    let first_root = temp.path().join("first");
+    let second_root = temp.path().join("second");
+    git(
+        temp.path(),
+        &["init", "--quiet", first_root.to_str().unwrap()],
+    );
+    git(
+        temp.path(),
+        &["init", "--quiet", second_root.to_str().unwrap()],
+    );
+    let first_identity = previously_on::git::repository_identity(&first_root).unwrap();
+    let second_identity = previously_on::git::repository_identity(&second_root).unwrap();
+    let database = temp.path().join("previously.sqlite3");
+    let store = Store::open(&database).unwrap();
+    let now = Utc::now();
+    for (identity, task_id) in [
+        (&first_identity, "task-first"),
+        (&second_identity, "task-second"),
+    ] {
+        store
+            .upsert_repository(&RepositoryV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: identity.id.clone(),
+                path: identity.root.to_string_lossy().into_owned(),
+                remote_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        store
+            .upsert_task(&TaskV1 {
+                schema_version: SCHEMA_VERSION_V1,
+                id: task_id.into(),
+                repository_id: identity.id.clone(),
+                title: "Authentication cleanup".into(),
+                goal: None,
+                lifecycle: TaskLifecycle::Active,
+                branch: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+    }
+    let projects = [&first_identity, &second_identity]
+        .into_iter()
+        .map(|identity| SetupProjectV2 {
+            repository_id: identity.id.clone(),
+            primary_root: identity.root.clone(),
+            known_worktree_roots: vec![identity.root.clone()],
+            registered_at: now.to_rfc3339(),
+        })
+        .collect::<Vec<_>>();
+    let backend = StoreMcpBackend::open_registry(&database, &projects).unwrap();
+
+    let ambiguous = handle_request(
+        &backend,
+        &json!({
+            "jsonrpc":"2.0",
+            "id":80,
+            "method":"tools/call",
+            "params":{"name":"search_tasks","arguments":{"query":"authentication"}}
+        }),
+    )
+    .unwrap();
+    assert_eq!(ambiguous["result"]["isError"], true);
+    assert!(ambiguous["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("repository_root is required"));
+
+    for (identity, expected_task) in [
+        (&first_identity, "task-first"),
+        (&second_identity, "task-second"),
+    ] {
+        let selected = handle_request(
+            &backend,
+            &json!({
+                "jsonrpc":"2.0",
+                "id":81,
+                "method":"tools/call",
+                "params":{"name":"search_tasks","arguments":{
+                    "query":"authentication",
+                    "repository_root":identity.root
+                }}
+            }),
+        )
+        .unwrap();
+        assert_eq!(selected["result"]["isError"], false);
+        let hits = selected["result"]["structuredContent"]["data"]
+            .as_array()
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["task"]["id"], expected_task);
+    }
 }
 
 #[test]
