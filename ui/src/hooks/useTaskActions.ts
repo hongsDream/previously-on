@@ -18,6 +18,7 @@ import type {
 import type { PerformMutation } from './useMutationRunner';
 
 interface TaskActionsOptions {
+  repositoryId: string | null;
   selectedTask?: Task;
   selection: WorkspaceSelectionIds;
   offlineFallback: boolean;
@@ -28,6 +29,7 @@ interface TaskActionsOptions {
 }
 
 export function useTaskActions({
+  repositoryId,
   selectedTask,
   selection,
   offlineFallback,
@@ -52,12 +54,12 @@ export function useTaskActions({
     if (offlineFallback || mutationPending || !selectedTask) return false;
     const refreshed = await performMutation(async () => {
       await mutation();
-      return fetchBootstrap();
+      return fetchBootstrap(repositoryId ?? undefined);
     });
     if (!refreshed) return false;
     installRefreshedBootstrap(refreshed, preferredTaskId ?? selectedTask.id);
     return true;
-  }, [installRefreshedBootstrap, mutationPending, offlineFallback, performMutation, selectedTask]);
+  }, [installRefreshedBootstrap, mutationPending, offlineFallback, performMutation, repositoryId, selectedTask]);
 
   const update = useCallback((taskUpdate: TaskUpdateV1) => {
     if (!selectedTask) return Promise.resolve(false);

@@ -25,8 +25,9 @@ use crate::contracts::{
     RegressionContractV1, RequiredTestV1,
 };
 use crate::domain::{
-    AiFactCandidateStatusV1, ChangeStatus, ContinuationStateV1, EventEnvelopeV1, EventKind,
-    EvidenceIntegrity, FactKind, FactLifecycle, FactV1, Freshness, TaskLifecycle, TemporalStatusV1,
+    AiFactCandidateStatusV1, ChangeStatus, ContinuationStateV1, CoverageStatus, EventEnvelopeV1,
+    EventKind, EvidenceIntegrity, FactKind, FactLifecycle, FactV1, Freshness, TaskLifecycle,
+    TemporalStatusV1,
 };
 use crate::grouping::TaskGroupingRequestV1;
 use crate::redaction::{redact_excerpt, redact_text, redact_value};
@@ -46,6 +47,22 @@ struct AppState {
     store: Store,
     session_token: Arc<str>,
     data_dir: Arc<PathBuf>,
+    #[cfg(not(test))]
+    codex_import: crate::codex_import::CodexImportService,
+}
+
+fn codex_import_service(state: &AppState) -> crate::codex_import::CodexImportService {
+    #[cfg(not(test))]
+    {
+        state.codex_import.clone()
+    }
+    #[cfg(test)]
+    {
+        crate::codex_import::CodexImportService::new(
+            state.data_dir.join("previously.sqlite3"),
+            state.data_dir.join("setup-manifest.json"),
+        )
+    }
 }
 
 fn server_setup_paths(state: &AppState) -> ApiResult<crate::setup::SetupPaths> {
@@ -125,10 +142,17 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
     crate::ai_refresh::recover_interrupted_operations(&store)?;
     store.apply_retention(Utc::now(), 90)?;
     let session_token = Alphanumeric.sample_string(&mut rand::rng(), 48);
+    #[cfg(not(test))]
+    let codex_import = crate::codex_import::CodexImportService::new(
+        &database_path,
+        data_dir.join("setup-manifest.json"),
+    );
     let state = AppState {
         store,
         session_token: Arc::from(session_token),
         data_dir: Arc::new(data_dir),
+        #[cfg(not(test))]
+        codex_import,
     };
 
     let app = Router::new()
@@ -140,6 +164,7 @@ pub async fn serve_ui(data_dir: PathBuf, bind: SocketAddr, open_browser: bool) -
         )
         .route("/api/repositories/unregister", post(unregister_repository))
         .route("/api/setup/codex", post(setup_codex))
+        .route("/api/imports/codex", post(import_codex))
         .route("/api/export", get(export_repository))
         .route("/api/repository", delete(purge_repository))
         .route("/api/facts/{id}", patch(update_fact))
@@ -277,6 +302,30 @@ async fn setup_codex(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportCodexRequest {
+    repository_id: String,
+}
+
+async fn import_codex(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ImportCodexRequest>,
+) -> ApiResult<Json<crate::codex_import::CodexImportReportV1>> {
+    authorize_mutation(&state, &headers)?;
+    let repository_id = request.repository_id.trim();
+    if repository_id.is_empty() || repository_id.len() > 4096 || repository_id.contains('\0') {
+        return Err(ApiError::bad_request("repositoryId is invalid"));
+    }
+    registered_repository_by_id(&state, repository_id)?;
+    let report = codex_import_service(&state)
+        .sync_repository(repository_id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(report))
+}
+
 fn install_codex_from_ui(
     setup_paths: &crate::setup::SetupPaths,
     repository: &std::path::Path,
@@ -352,17 +401,46 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
     authorize_api_read(&state, &headers)?;
     let mut repositories = Vec::new();
     for project in registered_projects(&state)? {
-        let task_count = state
+        let tasks = state
             .store
             .list_tasks(Some(&project.repository_id))
-            .map_err(ApiError::internal)?
-            .len();
+            .map_err(ApiError::internal)?;
+        let sessions = state
+            .store
+            .list_sessions(Some(&project.repository_id))
+            .map_err(ApiError::internal)?;
+        let events = state
+            .store
+            .list_events(Some(&project.repository_id))
+            .map_err(ApiError::internal)?;
+        let task_count = tasks.len();
+        let recent_activity_at = tasks
+            .iter()
+            .map(|task| task.updated_at)
+            .chain(
+                sessions
+                    .iter()
+                    .map(|session| session.last_activity_at.unwrap_or(session.started_at)),
+            )
+            .chain(events.iter().map(|event| event.occurred_at))
+            .max()
+            .map(iso);
+        let record_status = if events.is_empty() {
+            "empty"
+        } else if events
+            .iter()
+            .any(|event| event.coverage.status != CoverageStatus::Complete)
+        {
+            "degraded"
+        } else {
+            "ready"
+        };
         repositories.push(json!({
             "repositoryId": project.repository_id,
             "primaryRoot": project.primary_root,
-            "knownWorktreeRoots": project.known_worktree_roots,
-            "registeredAt": project.registered_at,
-            "taskCount": task_count
+            "taskCount": task_count,
+            "recentActivityAt": recent_activity_at,
+            "recordStatus": record_status
         }));
     }
     Ok(Json(redact_value(&json!({ "repositories": repositories }))))

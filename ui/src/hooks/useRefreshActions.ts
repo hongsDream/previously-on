@@ -14,6 +14,7 @@ import type { AiFactRefreshOperationV1, BootstrapData, Fact, FactKind, Task } fr
 import type { PerformMutation } from './useMutationRunner';
 
 interface RefreshActionsOptions {
+  repositoryId: string | null;
   data: BootstrapData | null;
   selectedTask?: Task;
   selection: WorkspaceSelectionIds;
@@ -29,6 +30,7 @@ interface RefreshActionsOptions {
 }
 
 export function useRefreshActions({
+  repositoryId,
   data,
   selectedTask,
   selection,
@@ -47,13 +49,13 @@ export function useRefreshActions({
     setMutationPending(true);
     setActionError('');
     try {
-      installBootstrap(await fetchBootstrap(), selection);
+      installBootstrap(await fetchBootstrap(repositoryId ?? undefined), selection);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'The local status could not be refreshed.');
     } finally {
       setMutationPending(false);
     }
-  }, [installBootstrap, mutationPending, offlineFallback, selection, setActionError, setMutationPending]);
+  }, [installBootstrap, mutationPending, offlineFallback, repositoryId, selection, setActionError, setMutationPending]);
 
   const exportData = useCallback(async () => {
     if (!data || offlineFallback || isUnregistered || mutationPending) return;

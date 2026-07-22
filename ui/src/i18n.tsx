@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { I18nContext, type I18nValue, type Language } from './i18n-context';
+import { readPreferences, updatePreferences } from './lib/preferences';
 
-const STORAGE_KEY = 'previously-on:preferences:v1';
 const KOREAN_MESSAGES: Record<string, string> = {
   'Tasks': '작업',
   'Sessions': '세션',
@@ -28,6 +28,24 @@ const KOREAN_MESSAGES: Record<string, string> = {
   'No repository': '저장소 없음',
   'Repository state: {state}': '저장소 상태: {state}',
   'Repository state': '저장소 상태',
+  'Project selector': '프로젝트 선택',
+  'All projects': '전체 프로젝트',
+  'Read-only overview': '읽기 전용 보기',
+  'Compare project activity without synchronizing or mixing project history.': '동기화하거나 프로젝트 기록을 섞지 않고 활동을 비교합니다.',
+  'Recent activity': '최근 활동',
+  'No activity': '활동 없음',
+  'Record status': '기록 상태',
+  'No registered projects': '등록된 프로젝트가 없습니다',
+  'empty': '기록 없음',
+  'Sync Codex app history': 'Codex 앱 기록 동기화',
+  'Synchronizing…': '동기화 중…',
+  'Codex app history synchronization': 'Codex 앱 기록 동기화',
+  'Synchronization complete': '동기화 완료',
+  'Synchronization degraded': '동기화 성능 저하',
+  '{count} tasks imported': '가져온 작업 {count}개',
+  '{count} duplicates': '중복 {count}개',
+  '{count} missing or unknown items': '누락/불명 항목 {count}개',
+  'Technical details': '기술 세부 정보',
   'Preview context pack': '컨텍스트 팩 미리보기',
   'More options': '더 보기',
   'Export JSON': 'JSON 내보내기',
@@ -538,11 +556,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   const setLanguage = useCallback((nextLanguage: Language) => {
     setLanguageState(nextLanguage);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ schemaVersion: 1, language: nextLanguage }));
-    } catch {
-      // The selected language still applies for this session when storage is unavailable.
-    }
+    updatePreferences({ language: nextLanguage });
   }, []);
 
   const value = useMemo<I18nValue>(() => ({
@@ -556,12 +570,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 }
 
 function readInitialLanguage(): Language {
-  try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as { schemaVersion?: unknown; language?: unknown } | null;
-    if (stored?.schemaVersion === 1 && (stored.language === 'en' || stored.language === 'ko')) return stored.language;
-  } catch {
-    // Invalid or unavailable preferences fall back to the browser language.
-  }
+  const stored = readPreferences();
+  if (stored.language) return stored.language;
   return navigator.language.toLowerCase().startsWith('ko') ? 'ko' : 'en';
 }
 

@@ -6,16 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, ExitCode, Stdio};
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::BaseDirs;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::app_server::{
-    codex_version, inspect_capabilities, AppServerCapabilityStatus, AppServerClient,
-};
-use crate::domain::{CoverageStatus, CoverageV1, EventEnvelopeV1, EventKind};
+use crate::app_server::{codex_version, inspect_capabilities, AppServerCapabilityStatus};
+use crate::domain::EventEnvelopeV1;
 use crate::hook::{HookEvent, HookIngressConfig};
 use crate::setup::{self, SetupPaths, MANAGED_ID};
 use crate::store::Store;
@@ -221,6 +219,13 @@ impl AppConfig {
                 })
                 .unwrap_or_default(),
         }
+    }
+
+    pub fn codex_import_service(&self) -> crate::codex_import::CodexImportService {
+        crate::codex_import::CodexImportService::new(
+            &self.database_path,
+            self.setup_paths().manifest_path(),
+        )
     }
 }
 
@@ -666,108 +671,11 @@ pub(crate) async fn doctor_for_setup_paths(paths: &SetupPaths) -> DoctorReport {
 
 async fn import_codex_threads(config: &AppConfig, repo: &Path) -> Result<()> {
     let repository = crate::git::repository_identity(repo)?;
-    let repository_id = repository.id;
-    let store = Store::open(&config.database_path)?;
-    let mut client = AppServerClient::connect().await?;
-    let capability = client.capability_report().await;
-    if capability.status == crate::app_server::AppServerCapabilityStatus::Unsupported {
-        bail!(
-            "Codex App Server integration is unsupported: {:?}",
-            capability.warnings
-        );
-    }
-    let import_report = client.import_threads_report(&repository.root).await?;
-    let count = import_report.threads.len();
-    let mut semantic_events = 0usize;
-    let mut duplicate_events = 0usize;
-    let mut semantic_coverages = Vec::new();
-    for thread in import_report.threads {
-        let projection =
-            crate::app_server::project_thread_events(&thread, &repository_id, &repository.root);
-        semantic_coverages.push(projection.coverage.clone());
-        for event in projection.events {
-            let ack = crate::hook::ingest_hook_event(&store, event)?;
-            semantic_events += 1;
-            if ack.status == crate::hook::HookDeliveryStatus::Duplicate {
-                duplicate_events += 1;
-            }
-        }
-        let turns = thread
-            .thread
-            .get("turns")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0);
-        let payload = json!({
-            "id": thread.id,
-            "sessionId": thread.session_id,
-            "cwd": thread.cwd,
-            "cliVersion": thread.cli_version,
-            "createdAt": thread.created_at,
-            "updatedAt": thread.updated_at,
-            "turnCount": turns,
-            "rawTranscriptStored": false
-        });
-        let occurred_at = Utc
-            .timestamp_opt(thread.updated_at, 0)
-            .single()
-            .unwrap_or_else(Utc::now);
-        let mut event = EventEnvelopeV1::new(
-            format!("codex-app-server:thread:read:{}", thread.id),
-            &repository_id,
-            thread.session_id,
-            EventKind::Unknown,
-            occurred_at,
-            payload,
-        );
-        event.coverage = thread.coverage;
-        event.coverage.status = event.coverage.status.worst(CoverageStatus::Degraded);
-        event.coverage.captured.extend([
-            "thread/list".to_string(),
-            "thread/read".to_string(),
-            "allowlisted semantic item projection".to_string(),
-        ]);
-        store.insert_event(&event)?;
-    }
-    client.shutdown().await?;
-    let agent_lineage = match AppServerClient::connect_experimental().await {
-        Ok(mut lineage_client) => {
-            let observed = crate::app_server::collect_agent_lineage(
-                &mut lineage_client,
-                &store,
-                &repository.root,
-                &repository_id,
-            )
-            .await;
-            lineage_client.shutdown().await.ok();
-            observed
-        }
-        Err(error) => Err(error),
-    };
-    let (observed_agents, agent_lineage_warning) = match agent_lineage {
-        Ok(agents) => (agents.len(), None),
-        Err(error) => (
-            0,
-            Some(crate::redaction::redact_excerpt(&format!(
-                "agent lineage unavailable: {error}"
-            ))),
-        ),
-    };
-    let semantic_coverage = CoverageV1::merge(semantic_coverages.iter());
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "importedThreads": count,
-            "semanticEvents": semantic_events,
-            "duplicateEvents": duplicate_events,
-            "capability": capability,
-            "coverage": import_report.coverage,
-            "semanticCoverage": semantic_coverage,
-            "notices": import_report.notices,
-            "observedAgents": observed_agents,
-            "agentLineageWarning": agent_lineage_warning
-        }))?
-    );
+    let report = config
+        .codex_import_service()
+        .sync_repository(&repository.id)
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

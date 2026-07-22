@@ -3,6 +3,7 @@ import type {
   AiFactRefreshOperationV1,
   BootstrapData,
   ContractEvaluationV1,
+  CodexImportReportV1,
   FactStatus,
   Fact,
   FactKind,
@@ -10,6 +11,7 @@ import type {
   RegressionCandidateV1,
   RegressionContractV1,
   RelationshipGraphV1,
+  RepositoryOverviewV1,
   TaskGroupingOperationV1,
   TaskGroupingPreviewV1,
   TaskGroupingRequestV1,
@@ -91,8 +93,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function fetchBootstrap(signal?: AbortSignal) {
-  return request<BootstrapData>('/api/bootstrap', { signal });
+export function fetchBootstrap(repositoryId?: string, signal?: AbortSignal) {
+  const query = repositoryId ? `?repositoryId=${encodeURIComponent(repositoryId)}` : '';
+  return request<BootstrapData>(`/api/bootstrap${query}`, { signal });
+}
+
+export function fetchRepositoryOverview(signal?: AbortSignal) {
+  return request<{ repositories: RepositoryOverviewV1[] }>('/api/overview', { signal });
+}
+
+export function syncCodexRepository(repositoryId: string) {
+  return request<CodexImportReportV1>('/api/imports/codex', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryId }),
+  });
 }
 
 export function setupCodex(repositoryPath: string) {

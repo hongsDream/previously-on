@@ -528,3 +528,42 @@ export interface BootstrapData {
   resumeCandidate?: ResumeCandidate;
   contextPacks: Record<string, ContextPack>;
 }
+
+export type CodexImportStatus = 'complete' | 'degraded' | 'unsupported';
+
+export interface CoverageV1 {
+  status: 'complete' | 'degraded';
+  captured: string[];
+  missing: string[];
+  warnings: string[];
+}
+
+export interface CodexImportReportV1 {
+  schemaVersion: number;
+  repositoryId: string;
+  status: CodexImportStatus;
+  importedTaskCount: number;
+  semanticEventCount: number;
+  duplicateCount: number;
+  missingOrUnknownItems: string[];
+  lastSyncedAt: string;
+  capability: {
+    status: CodexImportStatus;
+    testedCodexVersion: string;
+    detectedCodexVersion?: string;
+    warnings: string[];
+  };
+  coverage: CoverageV1;
+  semanticCoverage: CoverageV1;
+  notices: Array<{ threadId?: string; message: string }>;
+  observedAgentCount: number;
+  technicalDetails: string[];
+}
+
+export interface RepositoryOverviewV1 {
+  repositoryId: string;
+  primaryRoot: string;
+  taskCount: number;
+  recentActivityAt?: string;
+  recordStatus: 'empty' | 'ready' | 'degraded';
+}
